@@ -1,11 +1,11 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using NuclearOption.Networking;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal static class CommanderGameAccess
 {
@@ -324,6 +324,47 @@ internal static class CommanderGameAccess
         return false;
     }
 
+    /// <summary>
+    /// Any hostile unit under the cursor, including structures and objectives that are not
+    /// eligible for Commander selection. Used to turn a right click into an attack order.
+    /// </summary>
+    internal static bool TryRaycastHostileUnit(Vector2 screenPosition, out Unit unit)
+    {
+        unit = null!;
+        Camera? camera = SceneSingleton<CameraStateManager>.i?.mainCamera;
+        FactionHQ? localHq = GetLocalHq();
+        if (camera == null || localHq == null)
+        {
+            return false;
+        }
+
+        Ray ray = camera.ScreenPointToRay(screenPosition);
+        RaycastHit[] hits = Physics.RaycastAll(ray, 500000f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+        if (hits.Length == 0)
+        {
+            return false;
+        }
+
+        System.Array.Sort(hits, static (a, b) => a.distance.CompareTo(b.distance));
+        for (int i = 0; i < hits.Length; i++)
+        {
+            Unit? hitUnit = hits[i].collider.GetComponentInParent<Unit>()
+                ?? hits[i].collider.GetComponentInParent<UnitPart>()?.parentUnit;
+            if (hitUnit == null || hitUnit.disabled || hitUnit.NetworkHQ == null)
+            {
+                continue;
+            }
+
+            if (!IsFriendlyUnit(hitUnit, localHq))
+            {
+                unit = hitUnit;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     internal static bool TryRaycastWorldPosition(Vector2 screenPosition, out GlobalPosition position)
     {
         position = default;
@@ -482,6 +523,62 @@ internal static class CommanderGameAccess
     {
         Transform? spawnTransform = GetDepotSpawnTransform(depot);
         return spawnTransform != null ? spawnTransform.position : depot.transform.position;
+    }
+
+    /// <summary>
+    /// Condition 0-1, taken from the worst-off part on the unit. Parts start at 100 hit points,
+    /// so this is the same number the Basegame damage model works from.
+    /// </summary>
+    internal static float GetUnitCondition(Unit? unit)
+    {
+        if (unit == null || unit.disabled)
+        {
+            return 0f;
+        }
+
+        float worst = 1f;
+        List<DamageablePart> parts = unit.damageables;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            if (parts[i].Removed)
+            {
+                return 0f;
+            }
+
+            if (parts[i].Damageable is UnitPart part)
+            {
+                worst = Mathf.Min(worst, Mathf.Clamp01(part.hitPoints * 0.01f));
+            }
+        }
+
+        return worst;
+    }
+
+    /// <summary>Ammo 0-1 across every weapon station, or -1 when the unit carries no weapons.</summary>
+    internal static float GetUnitAmmo(Unit? unit)
+    {
+        if (unit == null || unit.disabled || unit.weaponStations == null || unit.weaponStations.Count == 0)
+        {
+            return -1f;
+        }
+
+        return Mathf.Clamp01(unit.GetAmmoLevel());
+    }
+
+    /// <summary>
+    /// Fuel 0-1, or -1 for anything that carries no fuel tanks (every ground vehicle and ship —
+    /// only <see cref="Aircraft"/> burns fuel in this game). Tanks only drain on the client that
+    /// simulates the airframe, so on a pure multiplayer client a remote aircraft reads its spawn
+    /// level rather than a live one.
+    /// </summary>
+    internal static float GetUnitFuel(Unit? unit)
+    {
+        if (unit is not Aircraft aircraft || aircraft.disabled)
+        {
+            return -1f;
+        }
+
+        return Mathf.Clamp01(aircraft.GetFuelLevel());
     }
 
     internal static float HorizontalDistance(Vector3 a, Vector3 b)

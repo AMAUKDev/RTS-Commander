@@ -6,9 +6,9 @@ using HarmonyLib;
 using NuclearOption.Networking;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed partial class CommanderSamSiteService
+internal sealed partial class CommanderSamSiteService : ICommanderTickPersistent, ICommanderResetSession
 {
     private const float CoreSupplyRangeMeters = 600f;
     private const float FallbackCoreCapacity = 10000f;
@@ -80,7 +80,7 @@ internal sealed partial class CommanderSamSiteService
         SetStatus("Friendly AI is selecting and refining a SAM-site location.");
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         ResetConstructionSession();
     }

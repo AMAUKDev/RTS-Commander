@@ -4,12 +4,13 @@ using NuclearOption.Networking;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderTacticalMapService
+internal sealed class CommanderTacticalMapService : ICommanderTickActive, ICommanderResetSession
 {
-    private const float TacticalMapSize = 675f;
+    private const float MinimumMapSize = 260f;
     private const float TacticalMapMargin = 12f;
+    private const float ResizeGripSize = 18f;
     private const float HeaderHeight = 30f;
 
     private static readonly MethodInfo? JumpCameraToMethod = AccessTools.Method(typeof(DynamicMap), "JumpCameraTo");
@@ -21,7 +22,9 @@ internal sealed class CommanderTacticalMapService
     private bool tacticalOpen;
     private bool positionInitialized;
     private bool dragging;
+    private bool resizing;
     private bool helpVisible;
+    private float mapSize = Mathf.Clamp(CommanderSettings.TacticalMapSize, MinimumMapSize, 2000f);
     private Vector2 dragOffset;
     private Rect mapWindowRect;
     private GameObject? hiddenVirtualMfd;
@@ -163,6 +166,7 @@ internal sealed class CommanderTacticalMapService
 
         tacticalOpen = false;
         dragging = false;
+        resizing = false;
         helpVisible = false;
         SuppressMapFollow = false;
         activeMap = null;
@@ -187,7 +191,7 @@ internal sealed class CommanderTacticalMapService
         HideCoverageLayer();
     }
 
-    internal void Tick()
+    public void TickActive()
     {
         if (restoreTacticalAfterFullscreen && IsFullscreenOpen && CommanderGameInput.CancelDown)
         {
@@ -216,8 +220,9 @@ internal sealed class CommanderTacticalMapService
             return;
         }
 
-        mapWindowRect.width = TacticalMapSize;
-        mapWindowRect.height = TacticalMapSize + HeaderHeight;
+        mapSize = Mathf.Clamp(mapSize, MinimumMapSize, MaximumMapSize);
+        mapWindowRect.width = mapSize;
+        mapWindowRect.height = mapSize + HeaderHeight;
         mapWindowRect = CommanderUiTheme.ClampWindow(mapWindowRect, TacticalMapMargin);
         if (!Mathf.Approximately(lastAppliedUiScale, CommanderUiScale.Scale)
             || lastAppliedMapPosition != mapWindowRect.position)
@@ -290,13 +295,14 @@ internal sealed class CommanderTacticalMapService
         {
             CommanderUiTheme.DrawHelpOverlay(
                 new Rect(mapRect.x + 10f, mapRect.y + 10f, mapRect.width - 20f, 82f),
-                "LMB selects map icons or moves the free camera when terrain is empty; RMB issues Basegame orders. FOLLOW tracks position, CENTER jumps once, and POV provides a movable view attached to the unit. M opens the fullscreen map and restores this map when closed. Radar coverage is generated from Unit Systems.");
+                "LMB clicks icons; drag LMB to pan the map, or hold the map box-select key and drag for a selection box. RMB sets a travel point, and RMB on a hostile icon makes it an attack order. Hold the queue key to chain points into a route the unit drives in order. Drag the bottom-right corner to resize this map. FOLLOW tracks position, CENTER jumps once, POV attaches to the unit. M opens the fullscreen map.");
         }
 
         HandleDrag(new Rect(header.x, header.y, header.width - 66f, header.height));
+        HandleResize(new Rect(mapRect.xMax - ResizeGripSize, mapRect.yMax - ResizeGripSize, ResizeGripSize, ResizeGripSize));
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         RestoreScale(activeMap);
         RestoreVirtualMfd();
@@ -350,7 +356,6 @@ internal sealed class CommanderTacticalMapService
         Open();
     }
 
-
     private void EnsureInitialPosition()
     {
         if (positionInitialized)
@@ -358,17 +363,42 @@ internal sealed class CommanderTacticalMapService
             return;
         }
 
+        mapSize = Mathf.Clamp(mapSize, MinimumMapSize, MaximumMapSize);
         mapWindowRect = new Rect(
-            CommanderUiScale.Width - TacticalMapMargin - TacticalMapSize,
+            CommanderUiScale.Width - TacticalMapMargin - mapSize,
             TacticalMapMargin,
-            TacticalMapSize,
-            TacticalMapSize + HeaderHeight);
+            mapSize,
+            mapSize + HeaderHeight);
         positionInitialized = true;
     }
 
+    private static float MaximumMapSize => Mathf.Max(
+        MinimumMapSize,
+        Mathf.Min(CommanderUiScale.Width - TacticalMapMargin * 2f, CommanderUiScale.Height - TacticalMapMargin * 2f - HeaderHeight));
+
     private Rect GetMapGuiRect()
     {
-        return new Rect(mapWindowRect.x, mapWindowRect.y + HeaderHeight, TacticalMapSize, TacticalMapSize);
+        return new Rect(mapWindowRect.x, mapWindowRect.y + HeaderHeight, mapSize, mapSize);
+    }
+
+    /// <summary>Projects a world coordinate onto the map canvas in screen pixels.</summary>
+    internal bool TryWorldToMapScreen(GlobalPosition position, out Vector2 screenPosition)
+    {
+        screenPosition = default;
+        DynamicMap? map = activeMap ?? SceneSingleton<DynamicMap>.i;
+        if (map == null || !DynamicMap.mapMaximized || map.mapImage == null || map.mapDimension <= 0f)
+        {
+            return false;
+        }
+
+        // Inverse of DynamicMap.GetCursorCoordinates.
+        float pixelsPerMeter = 900f * map.mapImage.transform.lossyScale.x / map.mapDimension;
+        Vector3 origin = map.mapImage.transform.position;
+        Vector3 offset = position.AsVector3();
+        screenPosition = new Vector2(
+            origin.x + offset.x * pixelsPerMeter,
+            origin.y + offset.z * pixelsPerMeter);
+        return RectTransformUtility.RectangleContainsScreenPoint(map.mapBackground.rectTransform, screenPosition, null);
     }
 
     private void SyncCoverageLayer()
@@ -422,7 +452,7 @@ internal sealed class CommanderTacticalMapService
 
         DestroyCoverageLayer();
         coverageLayerObject = new GameObject(
-            "NOCommander SAM Coverage",
+            "GroundControl SAM Coverage",
             typeof(RectTransform),
             typeof(CanvasRenderer),
             typeof(RawImage));
@@ -439,7 +469,7 @@ internal sealed class CommanderTacticalMapService
         coverageMapLayer.color = Color.white;
 
         GameObject markerObject = new(
-            "NOCommander SAM Coverage Origin",
+            "GroundControl SAM Coverage Origin",
             typeof(RectTransform),
             typeof(CanvasRenderer),
             typeof(Image));
@@ -487,7 +517,7 @@ internal sealed class CommanderTacticalMapService
         Vector2 bottomLeft = RectTransformUtility.WorldToScreenPoint(null, mapCorners[0]);
         Vector2 bottomRight = RectTransformUtility.WorldToScreenPoint(null, mapCorners[3]);
         float sourcePixelSize = Mathf.Max(Vector2.Distance(bottomLeft, bottomRight), 1f);
-        float scale = TacticalMapSize * CommanderUiScale.Scale / sourcePixelSize;
+        float scale = mapSize * CommanderUiScale.Scale / sourcePixelSize;
         rectTransform.localScale = Vector3.one * scale;
         Vector2 screenCenter = CommanderUiScale.GuiToScreen(mapRect.center);
         rectTransform.position = new Vector3(
@@ -517,6 +547,37 @@ internal sealed class CommanderTacticalMapService
         else if (current.type == EventType.MouseUp && current.button == 0)
         {
             dragging = false;
+        }
+    }
+
+    /// <summary>Corner grip that scales the compact tactical map.</summary>
+    private void HandleResize(Rect gripRect)
+    {
+        GUI.Box(gripRect, string.Empty, CommanderUiTheme.Panel);
+        CommanderUiTheme.DrawFrame(gripRect, 1f);
+
+        Event current = Event.current;
+        if (current.type == EventType.MouseDown && current.button == 0 && gripRect.Contains(current.mousePosition))
+        {
+            resizing = true;
+            current.Use();
+        }
+        else if (current.type == EventType.MouseDrag && resizing)
+        {
+            float wanted = Mathf.Max(
+                current.mousePosition.x - mapWindowRect.x,
+                current.mousePosition.y - mapWindowRect.y - HeaderHeight);
+            mapSize = Mathf.Clamp(wanted, MinimumMapSize, MaximumMapSize);
+            mapWindowRect.width = mapSize;
+            mapWindowRect.height = mapSize + HeaderHeight;
+            mapWindowRect = CommanderUiTheme.ClampWindow(mapWindowRect, TacticalMapMargin);
+            ApplyLayout();
+            current.Use();
+        }
+        else if (current.type == EventType.MouseUp && resizing)
+        {
+            resizing = false;
+            CommanderSettings.TacticalMapSize = mapSize;
         }
     }
 

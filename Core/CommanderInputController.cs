@@ -1,9 +1,13 @@
+using NuclearOption.MissionEditorScripts;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderInputController
 {
+    private const float MapIconPickRadiusPixels = 24f;
+    private const float DoubleClickSeconds = 0.35f;
+
     private readonly CommanderOverlayUi overlayUi;
     private readonly CommanderSelectionService selectionService;
     private readonly CommanderSpawnService spawnService;
@@ -13,7 +17,10 @@ internal sealed class CommanderInputController
     private readonly CommanderSupplyHeliService supplyHeliService;
     private readonly CommanderMobileEmplacementService mobileEmplacementService;
     private readonly CommanderAirCommandService airCommandService;
+    private readonly CommanderBoxSelectService boxSelectService;
     private CommanderPovCrewUi? povCrewUi;
+    private Unit? lastClickedUnit;
+    private float lastClickAt;
 
     internal CommanderInputController(
         CommanderOverlayUi overlayUi,
@@ -24,7 +31,8 @@ internal sealed class CommanderInputController
         CommanderTacticalMapService tacticalMapService,
         CommanderSupplyHeliService supplyHeliService,
         CommanderMobileEmplacementService mobileEmplacementService,
-        CommanderAirCommandService airCommandService)
+        CommanderAirCommandService airCommandService,
+        CommanderBoxSelectService boxSelectService)
     {
         this.overlayUi = overlayUi;
         this.selectionService = selectionService;
@@ -35,6 +43,7 @@ internal sealed class CommanderInputController
         this.supplyHeliService = supplyHeliService;
         this.mobileEmplacementService = mobileEmplacementService;
         this.airCommandService = airCommandService;
+        this.boxSelectService = boxSelectService;
     }
 
     internal void SetPovCrewUi(CommanderPovCrewUi ui)
@@ -44,103 +53,219 @@ internal sealed class CommanderInputController
 
     internal void Tick()
     {
-        if (CommanderNavalPurchaseService.Instance?.AwaitingRallySelection == true)
-        {
-            return;
-        }
+        // Keyboard orders run before the cursor tests: a hotkey must not depend on whether the
+        // mouse happens to be resting over a Commander window.
+        TickKeyboardOrders();
 
-        if (spawnService.IsMapInteractionActive())
+        if (CommanderNavalPurchaseService.Instance?.AwaitingRallySelection == true
+            || spawnService.IsMapInteractionActive())
         {
+            boxSelectService.Cancel();
             return;
         }
 
         Vector2 mousePosition = Input.mousePosition;
-        if (povCrewUi?.ContainsScreenPoint(mousePosition) == true)
-        {
-            return;
-        }
-        if (tacticalMapService.ContainsScreenPoint(mousePosition))
-        {
-            return;
-        }
-
         DynamicMap? dynamicMap = SceneSingleton<DynamicMap>.i;
-        if (tacticalMapService.IsOpen && dynamicMap != null && dynamicMap.IsCursorInMapRectangle())
+        bool overMap = dynamicMap != null
+            && DynamicMap.mapMaximized
+            && dynamicMap.IsCursorInMapRectangle();
+
+        // RTS windows always win, even when they sit on top of the fullscreen map: without
+        // this, clicking a row in Order of Battle also panned the map underneath it.
+        if (overlayUi.ContainsScreenPoint(mousePosition)
+            || (!overMap
+                && (povCrewUi?.ContainsScreenPoint(mousePosition) == true
+                    || tacticalMapService.ContainsScreenPoint(mousePosition))))
         {
+            boxSelectService.Cancel();
             return;
         }
 
-        if (CommanderShortcutInput.IsDown(CommanderSettings.PrimaryAction))
+        // Placement modes own the click outright; no selection or ordering while one is armed.
+        if (TryHandlePlacementClick(mousePosition))
         {
-            HandlePrimaryClick(mousePosition);
+            boxSelectService.Cancel();
+            return;
         }
+
+        bool boxSelected = boxSelectService.Tick(overMap);
 
         if (CommanderShortcutInput.IsDown(CommanderSettings.SecondaryAction))
         {
-            HandleSecondaryClick(mousePosition);
+            if (overMap)
+            {
+                HandleMapOrder(dynamicMap!);
+            }
+            else
+            {
+                moveService.TryIssueMoveOrder(mousePosition);
+            }
+        }
+
+        // Selection resolves on release so a drag can become a box instead of a click.
+        // Map clicks stay with the Basegame icon picker.
+        if (!boxSelected && !overMap && CommanderShortcutInput.IsUp(CommanderSettings.PrimaryAction))
+        {
+            HandlePrimaryClick(mousePosition);
         }
     }
 
-    private void HandlePrimaryClick(Vector2 mousePosition)
+    private void TickKeyboardOrders()
     {
-        if (overlayUi.ContainsScreenPoint(mousePosition))
+        if (InputFieldChecker.InsideInputField)
         {
             return;
+        }
+
+        if (CommanderShortcutInput.IsDown(CommanderSettings.StopOrder))
+        {
+            moveService.StopSelectedUnits();
+        }
+
+        if (CommanderShortcutInput.IsDown(CommanderSettings.CycleIdleUnit)
+            && selectionService.SelectNextIdleUnit())
+        {
+            CommanderCameraFollowService.Instance?.CenterOnSelection();
+        }
+    }
+
+    private bool TryHandlePlacementClick(Vector2 mousePosition)
+    {
+        if (!supplyHeliService.AwaitingTargetSelection
+            && !airCommandService.AwaitingAreaSelection
+            && !mobileEmplacementService.AwaitingDestination
+            && !spawnService.AwaitingRallyPointSelection)
+        {
+            return false;
+        }
+
+        if (!CommanderShortcutInput.IsDown(CommanderSettings.PrimaryAction)
+            || overlayUi.ContainsScreenPoint(mousePosition))
+        {
+            return true;
         }
 
         if (supplyHeliService.AwaitingTargetSelection)
         {
             supplyHeliService.TrySpawnAtWorldPoint(mousePosition);
-            return;
         }
-
-        if (airCommandService.AwaitingAreaSelection)
+        else if (airCommandService.AwaitingAreaSelection)
         {
             airCommandService.TrySetAreaFromWorld(mousePosition);
-            return;
         }
-
-        if (mobileEmplacementService.AwaitingDestination)
+        else if (mobileEmplacementService.AwaitingDestination)
         {
             mobileEmplacementService.TrySetDestinationFromWorld(mousePosition);
-            return;
         }
-
-        if (spawnService.AwaitingRallyPointSelection)
+        else
         {
             spawnService.TrySetRallyPointFromWorld(mousePosition);
-            return;
         }
-
-        bool additive = CommanderSettings.AddToSelection.IsPressed();
-
-        if (markerService.TryGetMarkerUnitAt(mousePosition, out Unit markerUnit))
-        {
-            selectionService.SelectUnit(markerUnit, additive);
-            CommanderCameraFollowService.Instance?.CenterOnSelectionIfFollowing();
-            return;
-        }
-
-        if (CommanderGameAccess.TryRaycastSelectableUnit(mousePosition, out Unit worldUnit))
-        {
-            selectionService.SelectUnit(worldUnit, additive);
-            CommanderCameraFollowService.Instance?.CenterOnSelectionIfFollowing();
-            return;
-        }
-
-        if (!additive)
-        {
-            selectionService.DeselectAll();
-        }
+        return true;
     }
 
-    private void HandleSecondaryClick(Vector2 mousePosition)
+    private void HandlePrimaryClick(Vector2 mousePosition)
     {
-        if (overlayUi.ContainsScreenPoint(mousePosition))
+        bool additive = CommanderSettings.AddToSelection.IsPressed();
+
+        Unit? clicked = null;
+        if (markerService.TryGetMarkerUnitAt(mousePosition, out Unit markerUnit))
+        {
+            clicked = markerUnit;
+        }
+        else if (CommanderGameAccess.TryRaycastSelectableUnit(mousePosition, out Unit worldUnit))
+        {
+            clicked = worldUnit;
+        }
+
+        if (clicked == null)
+        {
+            lastClickedUnit = null;
+            if (!additive)
+            {
+                selectionService.DeselectAll();
+            }
+            return;
+        }
+
+        bool doubleClick = ReferenceEquals(clicked, lastClickedUnit)
+            && Time.unscaledTime - lastClickAt <= DoubleClickSeconds;
+        lastClickedUnit = clicked;
+        lastClickAt = Time.unscaledTime;
+
+        bool sameTypeModifier = CommanderSettings.SelectSameType.IsPressed();
+        if (sameTypeModifier || doubleClick)
+        {
+            // Double click takes the units you can actually see; the modifier takes every one
+            // of that type the faction owns, wherever it is.
+            selectionService.SelectAllOfType(clicked, additive, onScreenOnly: !sameTypeModifier);
+            return;
+        }
+
+        if (additive && selectionService.IsSelected(clicked))
+        {
+            selectionService.DeselectUnit(clicked);
+            return;
+        }
+
+        selectionService.SelectUnit(clicked, additive);
+    }
+
+    /// <summary>
+    /// Right click on the tactical or fullscreen map. A hostile icon becomes an attack order,
+    /// a friendly one a guard order, and anything else a travel point.
+    /// </summary>
+    private void HandleMapOrder(DynamicMap dynamicMap)
+    {
+        if (!dynamicMap.TryGetCursorCoordinates(out GlobalPosition position))
         {
             return;
         }
 
-        moveService.TryIssueMoveOrder(mousePosition);
+        Unit? attackTarget = null;
+        if (TryGetMapUnitUnderCursor(dynamicMap, out Unit hoveredUnit))
+        {
+            if (CommanderGameAccess.IsFriendlyUnit(hoveredUnit, CommanderGameAccess.GetLocalHq()))
+            {
+                if (CommanderSettings.GuardOrders && moveService.IssueGuardOrder(hoveredUnit))
+                {
+                    return;
+                }
+            }
+            else
+            {
+                attackTarget = hoveredUnit;
+            }
+        }
+
+        moveService.IssueOrderAt(position, attackTarget, CommanderSettings.QueueWaypoint.IsPressed());
+    }
+
+    private static bool TryGetMapUnitUnderCursor(DynamicMap dynamicMap, out Unit unit)
+    {
+        unit = null!;
+        Vector2 mousePosition = Input.mousePosition;
+        float bestDistance = MapIconPickRadiusPixels * MapIconPickRadiusPixels;
+        System.Collections.Generic.List<MapIcon> icons = dynamicMap.mapIcons;
+        for (int i = 0; i < icons.Count; i++)
+        {
+            if (icons[i] is not UnitMapIcon unitIcon
+                || unitIcon == null
+                || !unitIcon.gameObject.activeInHierarchy
+                || unitIcon.unit == null
+                || unitIcon.unit.disabled)
+            {
+                continue;
+            }
+
+            float distance = ((Vector2)unitIcon.transform.position - mousePosition).sqrMagnitude;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                unit = unitIcon.unit;
+            }
+        }
+
+        return unit != null;
     }
 }

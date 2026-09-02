@@ -3,9 +3,9 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderRadarService
+internal sealed class CommanderRadarService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderResetSession
 {
     private const float ControlRangeMeters = 300f;
     private const float RefreshIntervalSeconds = 1f;
@@ -40,21 +40,21 @@ internal sealed class CommanderRadarService
 
     internal string StatusText => Time.unscaledTime <= statusUntil ? statusText : string.Empty;
 
-    internal void Activate()
+    public void Activate()
     {
         nextRefreshTime = CommanderScheduler.Stagger("radar.nearby", RefreshIntervalSeconds, 0.4f);
         RefreshBindings();
         SyncFocusedUnit();
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         UnbindHq();
         inspectedUnit = null;
         focusedState = null;
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         UnbindHq();
         inspectedUnit = null;
@@ -65,7 +65,7 @@ internal sealed class CommanderRadarService
         statusText = string.Empty;
     }
 
-    internal void Tick()
+    public void TickActive()
     {
         RefreshBindings();
         SyncFocusedUnit();
@@ -130,9 +130,50 @@ internal sealed class CommanderRadarService
             return;
         }
 
-        for (int i = 0; i < state.Radars.Length; i++)
+        ApplyRadarState(state.Unit, state.Radars, enable);
+        state.IsRadarOnline = enable;
+        SetStatus(enable ? "Radar online." : "Radar offline. ARAD seekers can no longer track its emission.");
+    }
+
+    /// <summary>
+    /// Switches one unit's radars without it being selected, so a waypoint EMCON action can
+    /// run on a unit the player is not currently looking at.
+    /// </summary>
+    internal bool SetUnitRadar(Unit? unit, bool enable)
+    {
+        if (unit == null
+            || unit.disabled
+            || !CommanderGameAccess.IsFriendlyUnit(unit, CommanderGameAccess.GetLocalHq()))
         {
-            Radar radar = state.Radars[i];
+            return false;
+        }
+
+        if (radarsByUnit.TryGetValue(unit, out Radar[] cached))
+        {
+            if (enable && !HasOperationalRadar(cached))
+            {
+                return false;
+            }
+
+            ApplyRadarState(unit, cached, enable);
+            return true;
+        }
+
+        Radar[] radars = unit.GetComponentsInChildren<Radar>();
+        if (radars.Length == 0 || (enable && !HasOperationalRadar(radars)))
+        {
+            return false;
+        }
+
+        ApplyRadarState(unit, radars, enable);
+        return true;
+    }
+
+    private void ApplyRadarState(Unit unit, Radar[] radars, bool enable)
+    {
+        for (int i = 0; i < radars.Length; i++)
+        {
+            Radar radar = radars[i];
             if (radar == null || !radar.IsOperational())
             {
                 continue;
@@ -150,15 +191,17 @@ internal sealed class CommanderRadarService
 
         if (enable)
         {
-            offlineRadarUnits.Remove(state.Unit);
+            offlineRadarUnits.Remove(unit);
         }
         else
         {
-            offlineRadarUnits.Add(state.Unit);
+            offlineRadarUnits.Add(unit);
         }
 
-        state.IsRadarOnline = enable;
-        SetStatus(enable ? "Radar online." : "Radar offline. ARAD seekers can no longer track its emission.");
+        if (focusedState != null && ReferenceEquals(focusedState.Unit, unit))
+        {
+            focusedState.IsRadarOnline = enable;
+        }
     }
 
     internal static bool IsUnitRadarOffline(Unit unit)

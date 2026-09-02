@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal static class CommanderUiScale
 {

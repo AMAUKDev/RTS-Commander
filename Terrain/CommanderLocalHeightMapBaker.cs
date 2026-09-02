@@ -5,7 +5,7 @@ using NuclearOption.Effects;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderLocalHeightMapBaker
 {
@@ -48,12 +48,12 @@ internal sealed class CommanderLocalHeightMapBaker
 
         target = new RenderTexture(Resolution, Resolution, 16, RenderTextureFormat.R16)
         {
-            name = "NOCommander_LocalTerrain",
+            name = "GroundControl_LocalTerrain",
             filterMode = FilterMode.Point,
             wrapMode = TextureWrapMode.Clamp
         };
         target.Create();
-        CommandBuffer command = new() { name = "NO Commander local terrain" };
+        CommandBuffer command = new() { name = "GroundControl local terrain" };
         Matrix4x4 view = Matrix4x4.TRS(
             center.ToLocalPosition(),
             Quaternion.Euler(90f, 0f, 0f),

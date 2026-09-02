@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderWorldMarkerRenderer
 {
@@ -13,6 +13,7 @@ internal sealed class CommanderWorldMarkerRenderer
     private readonly CommanderSamSiteService samSiteService;
     private readonly List<GlobalPosition> deliveryTargets = new();
     private readonly List<GlobalPosition> supplyRoute = new();
+    private readonly List<GlobalPosition> routePoints = new();
     private readonly List<CommanderSamSiteAnalyzerService.SiteLayoutMarker> samSiteLayout = new();
     private readonly List<CommanderSamSiteAnalyzerService.SiteCandidate> samSiteProposals = new();
 
@@ -45,9 +46,16 @@ internal sealed class CommanderWorldMarkerRenderer
             return;
         }
 
+        CommanderOrderPing.Draw(camera);
+
         for (int i = 0; i < selectionService.SelectedUnits.Count; i++)
         {
             Unit unit = selectionService.SelectedUnits[i];
+            if (DrawOrderRoute(camera, unit))
+            {
+                continue;
+            }
+
             if (moveService.TryGetPlayerDestination(unit, out GlobalPosition destination))
             {
                 DrawMarker(camera, destination, "MOVE", new Color(0.2f, 0.85f, 0.82f, 0.9f));
@@ -105,6 +113,149 @@ internal sealed class CommanderWorldMarkerRenderer
         }
     }
 
+    /// <summary>
+    /// Draws the remaining travel points of a RTS order in the 3D view, plus the attack marker
+    /// when the route ends on a target. While the map is up the route lines come from
+    /// <see cref="CommanderMapRouteRenderer"/> instead — camera-projected lines drawn over an open
+    /// map sweep across it as the camera turns, which is what made routes look wrong there — so
+    /// only the numbered point labels are drawn on the map.
+    /// </summary>
+    private bool DrawOrderRoute(Camera camera, Unit unit)
+    {
+        IReadOnlyList<GlobalPosition> waypoints;
+        int index;
+        Unit? attackTarget;
+        if (unit is Aircraft aircraft)
+        {
+            if (CommanderAirCommandService.Instance?.TryGetAircraftRoute(
+                    aircraft, out waypoints, out index, out attackTarget) != true)
+            {
+                return false;
+            }
+        }
+        else if (!moveService.TryGetOrder(unit, out waypoints, out index, out attackTarget))
+        {
+            return false;
+        }
+
+        routePoints.Clear();
+        // The leg the unit is flying or driving right now starts at the unit, so the whole
+        // plan reads as one unbroken line from the unit through every remaining point.
+        routePoints.Add(unit.GlobalPosition());
+        for (int i = Mathf.Max(0, index); i < waypoints.Count; i++)
+        {
+            routePoints.Add(waypoints[i]);
+        }
+        if (attackTarget != null && !attackTarget.disabled)
+        {
+            routePoints.Add(attackTarget.GlobalPosition());
+        }
+
+        if (routePoints.Count < 2)
+        {
+            return false;
+        }
+
+        Color routeColor = attackTarget != null
+            ? new Color(1f, 0.42f, 0.24f, 0.9f)
+            : new Color(0.30f, 0.92f, 0.80f, 0.9f);
+        bool mapOpen = DynamicMap.mapMaximized;
+        if (!mapOpen)
+        {
+            DrawRouteLines(camera, routeColor);
+        }
+
+        // Passed points still count, so the labels match the numbering the player placed.
+        CommanderTacticalMapService? map = CommanderTacticalMapService.Instance;
+        for (int i = 1; i < routePoints.Count; i++)
+        {
+            bool attackPoint = i == routePoints.Count - 1 && attackTarget != null;
+            string label = attackPoint ? "ATTACK" : (index + i).ToString();
+            // The attack bracket is sized to frame the target it is aimed at; travel points
+            // stay small so a long route does not clutter the view.
+            float size = attackPoint ? 48f : 14f;
+            if (!mapOpen)
+            {
+                DrawRoutePoint(camera, routePoints[i], label, routeColor, size);
+            }
+            else if (map != null && map.TryWorldToMapScreen(routePoints[i], out Vector2 mapPoint))
+            {
+                CommanderUiTheme.DrawWorldMarker(
+                    CommanderUiScale.ScreenToGui(mapPoint), label, routeColor, attackPoint ? 20f : 14f);
+            }
+        }
+        return true;
+    }
+
+    private void DrawRouteLines(Camera camera, Color color)
+    {
+        for (int i = 1; i < routePoints.Count; i++)
+        {
+            if (TryGetRouteSegment(camera, routePoints[i - 1], routePoints[i], out Vector2 from, out Vector2 to))
+            {
+                CommanderUiTheme.DrawLine(from, to, color, 2f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Projects one route leg into GUI space. A point behind the camera projects mirrored, so
+    /// the leg is clipped against the camera plane instead of being dropped: dropping it is
+    /// what made routes look like disconnected fragments whenever a waypoint went off screen.
+    /// </summary>
+    private static bool TryGetRouteSegment(
+        Camera camera,
+        GlobalPosition start,
+        GlobalPosition end,
+        out Vector2 from,
+        out Vector2 to)
+    {
+        from = default;
+        to = default;
+        Vector3 a = start.ToLocalPosition();
+        Vector3 b = end.ToLocalPosition();
+        float aDepth = camera.transform.InverseTransformPoint(a).z;
+        float bDepth = camera.transform.InverseTransformPoint(b).z;
+        const float NearClip = 1f;
+
+        if (aDepth < NearClip && bDepth < NearClip)
+        {
+            return false;
+        }
+
+        if (aDepth < NearClip)
+        {
+            a = Vector3.Lerp(a, b, (NearClip - aDepth) / (bDepth - aDepth));
+        }
+        else if (bDepth < NearClip)
+        {
+            b = Vector3.Lerp(b, a, (NearClip - bDepth) / (aDepth - bDepth));
+        }
+
+        from = CommanderUiScale.ScreenToGui(camera.WorldToScreenPoint(a));
+        to = CommanderUiScale.ScreenToGui(camera.WorldToScreenPoint(b));
+        return true;
+    }
+
+    /// <summary>
+    /// Travel point: an open bracket with its number above it. Points off screen are clamped
+    /// to the screen edge so the route still tells you which way it goes.
+    /// </summary>
+    private static void DrawRoutePoint(Camera camera, GlobalPosition position, string label, Color color, float size)
+    {
+        Vector3 screen = camera.WorldToScreenPoint(position.ToLocalPosition());
+        if (screen.z <= 0f)
+        {
+            return;
+        }
+
+        Vector2 guiPoint = CommanderUiScale.ScreenToGui(screen);
+        // Clamped to the screen so a route that runs off the edge still shows which way it goes.
+        guiPoint.x = Mathf.Clamp(guiPoint.x, 16f, Mathf.Max(16f, CommanderUiScale.Width - 16f));
+        guiPoint.y = Mathf.Clamp(guiPoint.y, 16f, Mathf.Max(16f, CommanderUiScale.Height - 12f));
+        CommanderUiTheme.DrawWorldMarker(guiPoint, label, color, size);
+    }
+
     private static string GetSamLabel(CommanderSamSiteAnalyzerService.SiteUnitRole role)
     {
         return role switch
@@ -137,42 +288,24 @@ internal sealed class CommanderWorldMarkerRenderer
         };
     }
 
+    /// <summary>Bracket parked below the cursor, so the cursor and what it is over stay clear.</summary>
     private static void DrawCursorMarker(string label, Color color)
     {
         Vector2 guiPoint = CommanderUiScale.ScreenToGui(Input.mousePosition);
-        GUIStyle style = CommanderUiTheme.Panel;
-        float width = GetMarkerWidth(label, style, 60f);
-        float height = GetMarkerHeight(label, style, width, 26f);
-        Rect marker = new(guiPoint.x + 14f, guiPoint.y + 14f, width, height);
-        Color previous = GUI.color;
-        GUI.color = color;
-        GUI.Box(marker, label, style);
-        CommanderUiTheme.DrawFrame(marker, 1f);
-        GUI.color = previous;
+        CommanderUiTheme.DrawWorldMarker(new Vector2(guiPoint.x, guiPoint.y + 30f), label, color, 22f);
     }
 
     private static void DrawMarker(Camera camera, GlobalPosition position, string label, Color color)
     {
-        Vector3 world = position.ToLocalPosition();
-        Vector3 screen = camera.WorldToScreenPoint(world);
-        if (screen.z <= 0f || screen.x < 0f || screen.x > Screen.width || screen.y < 0f || screen.y > Screen.height)
-        {
-            return;
-        }
-
-        Vector2 guiPoint = CommanderUiScale.ScreenToGui(screen);
-        GUIStyle style = CommanderUiTheme.Panel;
-        float width = GetMarkerWidth(label, style, 60f);
-        float height = GetMarkerHeight(label, style, width, 26f);
-        Rect marker = new(guiPoint.x - width * 0.5f, guiPoint.y - height * 0.5f, width, height);
-        Color previous = GUI.color;
-        GUI.color = color;
-        GUI.Box(marker, label, style);
-        CommanderUiTheme.DrawFrame(marker, 1f);
-        GUI.color = previous;
+        DrawWorldPoint(camera, position, label, color, 26f);
     }
 
     private static void DrawLargeMarker(Camera camera, GlobalPosition position, string label, Color color)
+    {
+        DrawWorldPoint(camera, position, label, color, 44f);
+    }
+
+    private static void DrawWorldPoint(Camera camera, GlobalPosition position, string label, Color color, float size)
     {
         Vector3 screen = camera.WorldToScreenPoint(position.ToLocalPosition());
         if (screen.z <= 0f || screen.x < 0f || screen.x > Screen.width || screen.y < 0f || screen.y > Screen.height)
@@ -180,27 +313,6 @@ internal sealed class CommanderWorldMarkerRenderer
             return;
         }
 
-        Vector2 guiPoint = CommanderUiScale.ScreenToGui(screen);
-        GUIStyle style = CommanderUiTheme.PrimaryButton;
-        float width = GetMarkerWidth(label, style, 116f);
-        float height = GetMarkerHeight(label, style, width, 38f);
-        Rect marker = new(guiPoint.x - width * 0.5f, guiPoint.y - height * 0.5f, width, height);
-        Color previous = GUI.color;
-        GUI.color = color;
-        GUI.Box(marker, label, style);
-        CommanderUiTheme.DrawFrame(marker, 2f);
-        GUI.color = previous;
-    }
-
-    private static float GetMarkerWidth(string label, GUIStyle style, float minimumWidth)
-    {
-        return Mathf.Max(minimumWidth, style.CalcSize(new GUIContent(label)).x + 18f);
-    }
-
-    private static float GetMarkerHeight(string label, GUIStyle style, float width, float minimumHeight)
-    {
-        float contentWidth = Mathf.Max(1f, width - style.padding.horizontal);
-        float calculatedHeight = style.CalcHeight(new GUIContent(label), contentWidth);
-        return Mathf.Max(minimumHeight, calculatedHeight + 4f);
+        CommanderUiTheme.DrawWorldMarker(CommanderUiScale.ScreenToGui(screen), label, color, size);
     }
 }

@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderMarkerView
 {
@@ -111,6 +111,18 @@ internal sealed class CommanderMarkerView
         }
 
         hitDistance = Vector2.Distance(screenPosition, rectTransform.position);
+        return true;
+    }
+
+    internal bool TryGetScreenPosition(out Vector2 screenPosition)
+    {
+        screenPosition = default;
+        if (!visible || !image.enabled)
+        {
+            return false;
+        }
+
+        screenPosition = rectTransform.position;
         return true;
     }
 

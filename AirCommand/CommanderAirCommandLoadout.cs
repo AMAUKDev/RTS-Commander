@@ -4,7 +4,7 @@ using System.Reflection;
 using NuclearOption.SavedMission;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed partial class CommanderAirCommandService
 {

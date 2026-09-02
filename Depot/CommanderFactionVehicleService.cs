@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderFactionVehicleService
+internal sealed class CommanderFactionVehicleService : ICommanderResetSession
 {
     private readonly HashSet<string> heldCategories = new(StringComparer.Ordinal);
     private readonly HashSet<VehicleDefinition> heldDefinitions = new();
@@ -108,7 +108,7 @@ internal sealed class CommanderFactionVehicleService
             || heldCategories.Contains(CommanderGameAccess.GetVehicleCategoryLabel(definition));
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         heldCategories.Clear();
         heldDefinitions.Clear();

@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed partial class CommanderAirCommandService
 {
@@ -44,7 +44,7 @@ internal sealed partial class CommanderAirCommandService
             position,
             radius,
             GetMissionAreaColor(mode),
-            "Commander Air Mission Preview");
+            "RTS Air Mission Preview");
         if (pendingAreaPreview != null) pendingAreaPreview.SetActive(true);
     }
 
@@ -79,7 +79,7 @@ internal sealed partial class CommanderAirCommandService
                 mission.AreaCenter,
                 mission.Radius,
                 GetMissionAreaColor(mission.Mode),
-                "Commander Air Mission Area");
+                "RTS Air Mission Area");
         }
     }
 

@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderDepotUi
 {
@@ -94,7 +94,7 @@ internal sealed class CommanderDepotUi
         {
             CommanderUiTheme.DrawHelpOverlay(
                 new Rect(12f, 34f, windowRect.width - 24f, 92f),
-                "Click vehicles to stage them in order; click staged entries to remove them. SPAWN transfers the list to the expandable depot queue, while CLEAR empties it. Reserve Only lists retained factory output. Rally can be set from map or 3D and is applied after the Basegame depot exit order.");
+                "Click vehicles to stage them in order; click staged entries to remove them. SPAWN transfers the list to the expandable depot queue, while CLEAR empties it. Reserve Only lists retained factory output. Rally can be set from map or 3D and is applied after the Basegame depot exit order. REINFORCE GROUP puts every unit this depot builds straight into that control group.");
         }
         if (GUI.Button(new Rect(windowRect.width - 34f, 3f, 26f, 22f), "X", CommanderUiTheme.DangerButton))
         {
@@ -117,7 +117,16 @@ internal sealed class CommanderDepotUi
         {
             spawnService.ClearRallyPoint();
         }
-        y += 40f;
+        y += 36f;
+
+        int reinforceGroup = spawnService.GetReinforceGroup();
+        if (GUI.Button(new Rect(12f, y, windowRect.width - 24f, 30f),
+            reinforceGroup == 0 ? "REINFORCE GROUP: OFF" : $"REINFORCE GROUP: {reinforceGroup}",
+            reinforceGroup == 0 ? CommanderUiTheme.Button : CommanderUiTheme.PrimaryButton))
+        {
+            spawnService.CycleReinforceGroup();
+        }
+        y += 38f;
 
         y = DrawCategories(y);
         y += 8f;

@@ -1,6 +1,6 @@
 using HarmonyLib;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 [HarmonyPatch(typeof(UnitCommand), nameof(UnitCommand.SetDestination))]
 internal static class CommanderMobileEmplacementDestinationPatch

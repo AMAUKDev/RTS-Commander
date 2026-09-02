@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 [HarmonyPatch]
 internal static class CommanderAirCommandPatches

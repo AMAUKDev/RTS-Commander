@@ -6,9 +6,9 @@ using NuclearOption.Networking;
 using NuclearOption.SavedMission;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed partial class CommanderSupplyHeliService
+internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderTickPersistent, ICommanderResetSession
 {
     private const string SamSiteCargoSupportSummary = "Automatic SAM-site ammunition run";
     private const string SamSiteCargoSupportPrefix = "SAM-site ammunition:";
@@ -163,7 +163,7 @@ internal sealed partial class CommanderSupplyHeliService
         ? null
         : aircraftOptions[Mathf.Clamp(selectedAircraftIndex, 0, aircraftOptions.Count - 1)];
 
-    internal void Activate()
+    public void Activate()
     {
         if (aircraftOptions.Count == 0)
         {
@@ -171,7 +171,7 @@ internal sealed partial class CommanderSupplyHeliService
         }
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         uiVisible = false;
         CancelTargetSelection(showStatus: false);
@@ -188,7 +188,7 @@ internal sealed partial class CommanderSupplyHeliService
         SetStatus("Deployment selection cleared.");
     }
 
-    internal void TickActive()
+    public void TickActive()
     {
         if (AwaitingTargetSelection && CommanderGameInput.CancelDown)
         {
@@ -196,7 +196,7 @@ internal sealed partial class CommanderSupplyHeliService
         }
     }
 
-    internal void TickPersistent()
+    public void TickPersistent()
     {
         BindPendingTerrainAutopilots();
 
@@ -226,7 +226,7 @@ internal sealed partial class CommanderSupplyHeliService
         }
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         aircraftOptions.Clear();
         airbaseOptions.Clear();
@@ -1362,6 +1362,5 @@ internal sealed partial class CommanderSupplyHeliService
         statusText = text;
         statusUntil = Time.unscaledTime + StatusDurationSeconds;
     }
-
 
 }

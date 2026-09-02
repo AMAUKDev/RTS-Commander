@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using NuclearOption.Networking;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderMobileEmplacementService
+internal sealed class CommanderMobileEmplacementService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderTickPersistent, ICommanderResetSession
 {
     private const float TractorRange = 300f;
     private const float ArrivalDistance = 12f;
@@ -39,18 +39,18 @@ internal sealed class CommanderMobileEmplacementService
     internal bool AwaitingDestination => pendingRelocation != null;
     internal string StatusText => Time.unscaledTime <= statusUntil ? statusText : string.Empty;
 
-    internal void Activate()
+    public void Activate()
     {
         nextUpdateAt = CommanderScheduler.Stagger("mobile-emplacements", UpdateIntervalSeconds, 0.2f);
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         pendingRelocation = null;
         statusText = string.Empty;
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         pendingRelocation = null;
         jobs.Clear();
@@ -61,7 +61,7 @@ internal sealed class CommanderMobileEmplacementService
         nextAvailabilityCheckAt = 0f;
     }
 
-    internal void TickActive()
+    public void TickActive()
     {
         if (AwaitingDestination && CommanderGameInput.CancelDown)
         {
@@ -70,7 +70,7 @@ internal sealed class CommanderMobileEmplacementService
         }
     }
 
-    internal void TickPersistent()
+    public void TickPersistent()
     {
         if (!CommanderScheduler.IsDue(ref nextUpdateAt, UpdateIntervalSeconds))
         {

@@ -3,7 +3,7 @@ using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 [BepInPlugin(PluginInfo.Guid, PluginInfo.Name, PluginInfo.Version)]
 public sealed class CommanderPlugin : BaseUnityPlugin
@@ -27,6 +27,7 @@ public sealed class CommanderPlugin : BaseUnityPlugin
         harmony = new Harmony(PluginInfo.Guid);
         harmony.PatchAll();
 
+        CommanderServiceRegistryCheck.Run();
         modeController = gameObject.AddComponent<CommanderModeController>();
         Logger.LogInfo($"{PluginInfo.Name} {PluginInfo.Version} loaded");
     }

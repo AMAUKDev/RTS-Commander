@@ -5,7 +5,7 @@ using NuclearOption.Networking;
 using NuclearOption.SavedMission;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed partial class CommanderSupplyHeliService
 {

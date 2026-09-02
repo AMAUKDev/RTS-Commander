@@ -2,7 +2,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 [HarmonyPatch(typeof(Repairer), "SearchForRepair")]
 internal static class CommanderRepairPatches

@@ -1,6 +1,6 @@
 using System;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal static class CommanderFeatureGate
 {

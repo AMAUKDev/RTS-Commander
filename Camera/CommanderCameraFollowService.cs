@@ -4,12 +4,13 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderCameraFollowService
+internal sealed class CommanderCameraFollowService : ICommanderDeactivate, ICommanderTickActive, ICommanderResetSession
 {
     private const float PovMouseLookScale = 2f;
     private const float PovNearClipPlane = 0.05f;
+    private const int BookmarkCount = 4;
     private static readonly FieldInfo? FreeCameraPanField = AccessTools.Field(typeof(CameraFreeState), "panView");
     private static readonly FieldInfo? FreeCameraTiltField = AccessTools.Field(typeof(CameraFreeState), "tiltView");
 
@@ -36,6 +37,8 @@ internal sealed class CommanderCameraFollowService
     private float spacePressedAt;
     private bool spaceHeld;
     private bool longSpaceTriggered;
+    private int lastSelectionRevision = -1;
+    private readonly CameraBookmark[] bookmarks = new CameraBookmark[BookmarkCount];
 
     internal CommanderCameraFollowService(CommanderSelectionService selectionService)
     {
@@ -63,7 +66,7 @@ internal sealed class CommanderCameraFollowService
     {
         if (Enabled)
         {
-            Disable();
+            Deactivate();
             return;
         }
 
@@ -172,6 +175,10 @@ internal sealed class CommanderCameraFollowService
         return true;
     }
 
+    /// <summary>
+    /// Centers on the selection. A single unit is framed close up; a group (convoy, control
+    /// group, box selection) is framed so that every selected unit fits on screen.
+    /// </summary>
     internal void CenterOnSelection()
     {
         Unit? selected = selectionService.FocusedSelection;
@@ -184,6 +191,12 @@ internal sealed class CommanderCameraFollowService
         float length = selected.definition != null ? selected.definition.length : selected.maxRadius * 2f;
         float distance = Mathf.Max(20f, selected.maxRadius * 4f, length * 2f);
         Vector3 targetPosition = selected.transform.position + Vector3.up * Mathf.Max(1f, selected.maxRadius * 0.35f);
+        if (selectionService.SelectedUnits.Count > 1
+            && TryGetSelectionBounds(out Vector3 center, out float extent))
+        {
+            targetPosition = center + Vector3.up * Mathf.Max(1f, selected.maxRadius * 0.35f);
+            distance = Mathf.Max(distance, extent * 2.2f + 60f);
+        }
         Vector3 viewDirection = cameraManager.transform.forward;
         if (viewDirection.sqrMagnitude < 0.1f)
         {
@@ -205,6 +218,22 @@ internal sealed class CommanderCameraFollowService
         }
     }
 
+    /// <summary>
+    /// Jump to whatever was just picked and keep following it. Used by every list row that
+    /// selects a unit, so "click a unit in a list" always shows you the unit without a
+    /// second trip to the CENTER button.
+    /// </summary>
+    internal void FocusSelection()
+    {
+        if (!CanFollow)
+        {
+            return;
+        }
+
+        Enabled = true;
+        CenterOnSelection();
+    }
+
     internal void CenterOnSelectionIfFollowing()
     {
         if (Enabled)
@@ -213,9 +242,89 @@ internal sealed class CommanderCameraFollowService
         }
     }
 
-    internal void Tick()
+    /// <summary>World-space centre and radius of everything currently selected.</summary>
+    private bool TryGetSelectionBounds(out Vector3 center, out float extent)
+    {
+        center = Vector3.zero;
+        extent = 0f;
+        int count = 0;
+        IReadOnlyList<Unit> units = selectionService.SelectedUnits;
+        for (int i = 0; i < units.Count; i++)
+        {
+            if (units[i] == null || units[i].disabled)
+            {
+                continue;
+            }
+
+            center += units[i].transform.position;
+            count++;
+        }
+
+        if (count == 0)
+        {
+            return false;
+        }
+
+        center /= count;
+        for (int i = 0; i < units.Count; i++)
+        {
+            if (units[i] != null && !units[i].disabled)
+            {
+                extent = Mathf.Max(extent, Vector3.Distance(center, units[i].transform.position));
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Global position the camera tracks: one unit, or the centre of a group.</summary>
+    private Vector3 GetFollowAnchor(Unit fallback)
+    {
+        if (selectionService.SelectedUnits.Count <= 1 || PovMode)
+        {
+            return fallback.GlobalPosition().AsVector3();
+        }
+
+        return TryGetSelectionBounds(out Vector3 center, out _)
+            ? center.ToGlobalPosition().AsVector3()
+            : fallback.GlobalPosition().AsVector3();
+    }
+
+    /// <summary>
+    /// Snaps to and starts following whatever was just selected. Called once per selection
+    /// change so panning away afterwards is not fought by the follow logic.
+    /// </summary>
+    private void HandleSelectionChanged()
+    {
+        if (!CommanderSettings.AutoFollowSelection)
+        {
+            return;
+        }
+
+        Unit? selected = selectionService.FocusedSelection;
+        if (selected == null || selected.disabled)
+        {
+            if (Enabled)
+            {
+                Deactivate();
+            }
+            return;
+        }
+
+        target = selected;
+        Enabled = true;
+        CenterOnSelection();
+        lastGlobalPosition = GetFollowAnchor(selected);
+    }
+
+    public void TickActive()
     {
         HandleSpaceShortcut();
+        HandleCameraBookmarks();
+        if (lastSelectionRevision != selectionService.SelectionRevision)
+        {
+            lastSelectionRevision = selectionService.SelectionRevision;
+            HandleSelectionChanged();
+        }
         if (!Enabled)
         {
             return;
@@ -224,11 +333,11 @@ internal sealed class CommanderCameraFollowService
         Unit? selected = selectionService.FocusedSelection;
         if (selected == null || selected.disabled)
         {
-            Disable();
+            Deactivate();
             return;
         }
 
-        Vector3 currentGlobalPosition = selected.GlobalPosition().AsVector3();
+        Vector3 currentGlobalPosition = GetFollowAnchor(selected);
         if (!ReferenceEquals(selected, target))
         {
             target = selected;
@@ -292,7 +401,7 @@ internal sealed class CommanderCameraFollowService
         povHighFrequencyShake = Mathf.Lerp(povHighFrequencyShake, 0f, 4f * Time.fixedDeltaTime);
     }
 
-    internal void Disable()
+    public void Deactivate()
     {
         ExitPovMode();
         Enabled = false;
@@ -327,6 +436,57 @@ internal sealed class CommanderCameraFollowService
         service.ApplyPovLookInput(cameraManager);
         cameraManager.transform.rotation = selected.transform.rotation * service.povLocalRotation;
         SyncFreeCameraAngles(cameraManager);
+    }
+
+    /// <summary>
+    /// F1-F4 jump the camera to a saved viewpoint; the assign-group modifier (Ctrl by default)
+    /// stores the current one, matching how control groups are stored.
+    /// </summary>
+    private void HandleCameraBookmarks()
+    {
+        if (!CommanderSettings.CameraBookmarks || InputFieldChecker.InsideInputField)
+        {
+            return;
+        }
+
+        CameraStateManager? cameraManager = SceneSingleton<CameraStateManager>.i;
+        if (cameraManager == null)
+        {
+            return;
+        }
+
+        for (int slot = 0; slot < BookmarkCount; slot++)
+        {
+            if (!Input.GetKeyDown(KeyCode.F1 + slot))
+            {
+                continue;
+            }
+
+            if (CommanderSettings.AssignGroupModifier.IsPressed())
+            {
+                bookmarks[slot] = new CameraBookmark(
+                    cameraManager.transform.position,
+                    cameraManager.transform.rotation);
+                CommanderPlugin.Log.LogInfo($"Camera bookmark {slot + 1} stored.");
+                return;
+            }
+
+            if (!bookmarks[slot].HasValue)
+            {
+                return;
+            }
+
+            // Following would drag the camera straight back off the bookmark.
+            if (Enabled)
+            {
+                Deactivate();
+            }
+            cameraManager.transform.SetPositionAndRotation(
+                bookmarks[slot].Position, bookmarks[slot].Rotation);
+            cameraManager.cameraVelocity = Vector3.zero;
+            SyncFreeCameraAngles(cameraManager);
+            return;
+        }
     }
 
     private void HandleSpaceShortcut()
@@ -763,5 +923,28 @@ internal sealed class CommanderCameraFollowService
             povClipCamera.nearClipPlane = povPreviousNearClipPlane;
         }
         povClipCamera = null;
+    }
+
+    /// <summary>Bookmarks are world positions, so they are meaningless in the next mission.</summary>
+    public void ResetSession()
+    {
+        for (int i = 0; i < bookmarks.Length; i++)
+        {
+            bookmarks[i] = default;
+        }
+    }
+
+    private readonly struct CameraBookmark
+    {
+        internal CameraBookmark(Vector3 position, Quaternion rotation)
+        {
+            Position = position;
+            Rotation = rotation;
+            HasValue = true;
+        }
+
+        internal Vector3 Position { get; }
+        internal Quaternion Rotation { get; }
+        internal bool HasValue { get; }
     }
 }

@@ -4,7 +4,7 @@ using System.Linq;
 using NuclearOption.Networking;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed partial class CommanderSamSiteService
 {
@@ -38,7 +38,7 @@ internal sealed partial class CommanderSamSiteService
         }
     }
 
-    internal void TickPersistent()
+    public void TickPersistent()
     {
         if (constructionSites.Count == 0 || Time.unscaledTime < nextConstructionTickAt)
         {

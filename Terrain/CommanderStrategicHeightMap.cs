@@ -5,7 +5,7 @@ using NuclearOption.Effects;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderStrategicHeightMap
 {
@@ -77,12 +77,12 @@ internal sealed class CommanderStrategicHeightMap
 
         target = new RenderTexture(resolutionX, resolutionY, 16, RenderTextureFormat.R16)
         {
-            name = "NOCommander_StrategicHeightMap",
+            name = "GroundControl_StrategicHeightMap",
             filterMode = FilterMode.Point,
             wrapMode = TextureWrapMode.Clamp
         };
         target.Create();
-        CommandBuffer command = new() { name = "NO Commander strategic heightmap" };
+        CommandBuffer command = new() { name = "GroundControl strategic heightmap" };
         Matrix4x4 view = Matrix4x4.TRS(
             new GlobalPosition(0f, 0f, 0f).ToLocalPosition(),
             Quaternion.Euler(90f, 0f, 0f),

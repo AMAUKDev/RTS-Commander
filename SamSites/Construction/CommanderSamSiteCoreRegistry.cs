@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal static class CommanderSamSiteCoreRegistry
 {

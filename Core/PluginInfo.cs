@@ -1,8 +1,8 @@
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal static class PluginInfo
 {
-    public const string Guid = "com.nuclearoption.commander";
-    public const string Name = "Nuclear Option Commander";
-    public const string Version = "0.1.2.0";
+    public const string Guid = "com.groundcontrol.rts";
+    public const string Name = "Ground Control (RTS)";
+    public const string Version = "0.4.0.0";
 }

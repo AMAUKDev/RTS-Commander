@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderSpawnService
+internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderTickPersistent, ICommanderResetSession
 {
     private const float DepotRefreshIntervalSeconds = 5f;
     private const float SpawnUpdateIntervalSeconds = 0.3f;
@@ -58,7 +58,7 @@ internal sealed class CommanderSpawnService
     internal bool AwaitingRallyPointSelection => awaitingRallyPointSelection;
     internal string StatusText => Time.unscaledTime <= statusUntil ? statusText : string.Empty;
 
-    internal void Activate()
+    public void Activate()
     {
         awaitingRallyPointSelection = false;
         rallySelectionQueue = null;
@@ -77,7 +77,7 @@ internal sealed class CommanderSpawnService
         SyncSelectedDepotFromSelection();
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         UnbindProductionHq();
         awaitingRallyPointSelection = false;
@@ -88,7 +88,7 @@ internal sealed class CommanderSpawnService
         rallyClickTracker.Reset();
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         Deactivate();
         depotQueues.Clear();
@@ -102,7 +102,7 @@ internal sealed class CommanderSpawnService
         productionCatalogDirty = true;
     }
 
-    internal void TickActive()
+    public void TickActive()
     {
         if (CommanderScheduler.IsDue(ref nextDepotRefreshTime, DepotRefreshIntervalSeconds))
         {
@@ -116,7 +116,7 @@ internal sealed class CommanderSpawnService
 
     }
 
-    internal void TickPersistent()
+    public void TickPersistent()
     {
         if (CommanderScheduler.IsDue(ref nextSpawnUpdateTime, SpawnUpdateIntervalSeconds))
         {
@@ -475,6 +475,29 @@ internal sealed class CommanderSpawnService
 
         CompleteRallyPointSelection(rallyPoint);
         return true;
+    }
+
+    /// <summary>Control group new arrivals from this depot join automatically; 0 is off.</summary>
+    internal int GetReinforceGroup()
+    {
+        return GetSelectedQueue()?.ReinforceGroup ?? 0;
+    }
+
+    internal void CycleReinforceGroup()
+    {
+        DepotSpawnQueue? queue = GetSelectedQueue();
+        if (queue == null)
+        {
+            SetStatus("Select a depot first.");
+            return;
+        }
+
+        queue.ReinforceGroup = queue.ReinforceGroup >= CommanderGroupService.GroupCount
+            ? 0
+            : queue.ReinforceGroup + 1;
+        SetStatus(queue.ReinforceGroup == 0
+            ? "New units will not join a control group."
+            : $"New units will join control group {queue.ReinforceGroup}.");
     }
 
     internal string GetRallyLabel()
@@ -903,6 +926,10 @@ internal sealed class CommanderSpawnService
             }
 
             queue.ExpectedSpawnDefinitions.Dequeue();
+            if (queue.ReinforceGroup > 0)
+            {
+                CommanderGroupService.Instance?.AddUnitToGroup(unit, queue.ReinforceGroup);
+            }
 
             if (queue.HasRallyPoint)
             {
@@ -1056,6 +1083,7 @@ internal sealed class CommanderSpawnService
         internal Dictionary<string, int> PendingSummaryCounts { get; } = new(StringComparer.Ordinal);
         internal List<string> PendingSummaryLines { get; } = new();
         internal bool PendingSummaryDirty { get; set; } = true;
+        internal int ReinforceGroup { get; set; }
         internal bool HasRallyPoint { get; set; }
         internal GlobalPosition RallyPoint { get; set; }
         internal int NextRallySlot { get; set; }

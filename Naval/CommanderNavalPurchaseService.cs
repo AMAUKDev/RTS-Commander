@@ -4,9 +4,9 @@ using NuclearOption.Networking;
 using RoadPathfinding;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderNavalPurchaseService
+internal sealed class CommanderNavalPurchaseService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderResetSession
 {
     private const float MinimumEntryBandMeters = 2000f;
     private const float EntryBandMapFraction = 0.08f;
@@ -40,17 +40,17 @@ internal sealed class CommanderNavalPurchaseService
     internal bool AwaitingRallySelection => pendingDefinition != null;
     internal string StatusText => Time.unscaledTime <= statusUntil ? statusText : string.Empty;
 
-    internal void Activate()
+    public void Activate()
     {
         RefreshDefinitions();
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         CancelRallySelection(showStatus: false);
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         pendingDefinition = null;
         shipDefinitions.Clear();
@@ -63,7 +63,7 @@ internal sealed class CommanderNavalPurchaseService
         mapClickTracker.Reset();
     }
 
-    internal void TickActive()
+    public void TickActive()
     {
         if (!AwaitingRallySelection)
         {

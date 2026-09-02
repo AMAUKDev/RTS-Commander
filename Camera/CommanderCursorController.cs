@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderCursorController
 {
@@ -29,7 +29,7 @@ internal sealed class CommanderCursorController
         active = false;
     }
 
-    internal void Tick()
+    internal void TickActive()
     {
         if (!CursorManager.GetFlag(CursorFlags.Map))
         {

@@ -3,7 +3,7 @@ using NuclearOption.MissionEditorScripts;
 using System.Reflection;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 [HarmonyPatch(typeof(CameraStateManager), nameof(CameraStateManager.SetFollowingUnit))]
 internal static class CommanderCameraFollowingPatch

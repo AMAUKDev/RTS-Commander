@@ -2,9 +2,9 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderMarkerService
+internal sealed class CommanderMarkerService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive
 {
     private const float RefreshIntervalSeconds = 1f;
 
@@ -16,12 +16,15 @@ internal sealed class CommanderMarkerService
     private readonly HashSet<Unit> currentUnits = new();
     private readonly List<Unit> unitsToRemove = new();
 
+    internal static CommanderMarkerService? Instance { get; private set; }
+
     internal CommanderMarkerService(CommanderSelectionService selectionService)
     {
         this.selectionService = selectionService;
+        Instance = this;
     }
 
-    internal void Activate()
+    public void Activate()
     {
         nextRefreshTime = CommanderScheduler.Stagger("markers.bindings", RefreshIntervalSeconds, 0.35f);
         EnsureMarkerRoot();
@@ -29,14 +32,14 @@ internal sealed class CommanderMarkerService
         SyncExistingUnits();
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         UnbindHq();
         ClearViews();
         DestroyMarkerRoot();
     }
 
-    internal void Tick()
+    public void TickActive()
     {
         EnsureMarkerRoot();
 
@@ -261,6 +264,25 @@ internal sealed class CommanderMarkerService
         }
 
         markerViews.Clear();
+    }
+
+    /// <summary>Every unit whose world marker currently sits inside a screen-space rectangle.</summary>
+    internal void CollectUnitsInScreenRect(Rect screenRect, List<Unit> units)
+    {
+        foreach (KeyValuePair<Unit, CommanderMarkerView> pair in markerViews)
+        {
+            if (!pair.Value.TryGetScreenPosition(out Vector2 screenPosition)
+                || !screenRect.Contains(screenPosition))
+            {
+                continue;
+            }
+
+            Unit unit = CommanderSamSiteCoreRegistry.ResolveSelection(pair.Key) ?? pair.Key;
+            if (!units.Contains(unit))
+            {
+                units.Add(unit);
+            }
+        }
     }
 
     internal bool TryGetMarkerUnitAt(Vector2 screenPosition, out Unit unit)

@@ -2,9 +2,9 @@ using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderDirectPathService
+internal sealed class CommanderDirectPathService : ICommanderDeactivate, ICommanderResetSession
 {
     private static readonly FieldInfo? PathfindingUnitField = AccessTools.Field(typeof(PathfindingAgent), "unit");
 
@@ -49,12 +49,12 @@ internal sealed class CommanderDirectPathService
         ReapplyCurrentDestination(vehicle);
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         directRouteVehicles.Clear();
     }
 
-    internal void Deactivate()
+    public void Deactivate()
     {
         directRouteVehicles.Clear();
     }

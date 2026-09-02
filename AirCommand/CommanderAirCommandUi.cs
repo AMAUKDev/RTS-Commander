@@ -1,7 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderAirCommandUi
 {
@@ -19,6 +19,8 @@ internal sealed class CommanderAirCommandUi
     private bool positionInitialized;
     private bool helpVisible;
     private readonly List<Aircraft> missionAircraft = new();
+    private readonly List<Aircraft> idleAircraft = new();
+    private bool showIdleAircraft;
     private Rect missionWindowRect;
     private Vector2 missionScroll;
     private bool missionPositionInitialized;
@@ -123,6 +125,11 @@ internal sealed class CommanderAirCommandUi
             missionWindowRect = CommanderUiTheme.ClampWindow(missionWindowRect);
         }
         service.CollectMissionAircraft(missionAircraft);
+        if (Visible)
+        {
+            // Scans every faction unit, so keep it to the frames the list is actually shown.
+            service.CollectIdleAircraft(idleAircraft);
+        }
     }
 
     internal bool ContainsScreenPoint(Vector2 screenPoint)
@@ -515,7 +522,29 @@ internal sealed class CommanderAirCommandUi
 
     private void DrawMissionWindow(int windowId)
     {
-        float y = 36f;
+        float y = 34f;
+        float tabWidth = (missionWindowRect.width - 26f) * 0.5f;
+        if (GUI.Button(new Rect(10f, y, tabWidth, 26f), $"ACTIVE ({missionAircraft.Count})",
+            showIdleAircraft ? CommanderUiTheme.Button : CommanderUiTheme.SelectedButton))
+        {
+            showIdleAircraft = false;
+            missionScroll = Vector2.zero;
+        }
+        if (GUI.Button(new Rect(16f + tabWidth, y, tabWidth, 26f), $"IDLE ({idleAircraft.Count})",
+            showIdleAircraft ? CommanderUiTheme.SelectedButton : CommanderUiTheme.Button))
+        {
+            showIdleAircraft = true;
+            missionScroll = Vector2.zero;
+        }
+        y += 32f;
+
+        if (showIdleAircraft)
+        {
+            DrawIdleAircraft(y);
+            GUI.DragWindow(new Rect(0f, 0f, missionWindowRect.width, 28f));
+            return;
+        }
+
         Aircraft? selectedAircraft = null;
         for (int i = 0; i < missionAircraft.Count; i++)
         {
@@ -580,5 +609,41 @@ internal sealed class CommanderAirCommandUi
             GUI.enabled = oldEnabled;
         }
         GUI.DragWindow(new Rect(0f, 0f, missionWindowRect.width, 28f));
+    }
+
+    /// <summary>
+    /// Aircraft that are already in the world and still flying their own orders. Tasking one
+    /// places a mission area for it exactly like a freshly spawned mission.
+    /// </summary>
+    private void DrawIdleAircraft(float y)
+    {
+        GUI.Label(new Rect(10f, y, missionWindowRect.width - 20f, 34f),
+            "Pick the mission type on the left, then TASK an aircraft and place its area on the map.",
+            CommanderUiTheme.MutedLabel);
+        y += 38f;
+
+        Rect view = new(10f, y, missionWindowRect.width - 20f, missionWindowRect.height - y - 12f);
+        Rect inner = new(0f, 0f, view.width - 18f, Mathf.Max(view.height, idleAircraft.Count * 42f + 4f));
+        missionScroll = GUI.BeginScrollView(view, missionScroll, inner);
+        bool oldEnabled = GUI.enabled;
+        for (int i = 0; i < idleAircraft.Count; i++)
+        {
+            Aircraft aircraft = idleAircraft[i];
+            float rowY = 2f + i * 42f;
+            if (GUI.Button(new Rect(2f, rowY, inner.width - 70f, 36f),
+                CommanderGameAccess.GetUnitLabel(aircraft),
+                CommanderUiTheme.Button))
+            {
+                CommanderSelectionService.Instance?.SelectUnit(aircraft, false);
+                CommanderCameraFollowService.Instance?.FocusSelection();
+            }
+            GUI.enabled = oldEnabled && !service.AwaitingAreaSelection;
+            if (GUI.Button(new Rect(inner.width - 66f, rowY, 64f, 36f), "TASK", CommanderUiTheme.PrimaryButton))
+            {
+                service.BeginAdoption(aircraft);
+            }
+            GUI.enabled = oldEnabled;
+        }
+        GUI.EndScrollView();
     }
 }

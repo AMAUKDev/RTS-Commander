@@ -1,4 +1,4 @@
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 internal sealed class CommanderCameraController
 {

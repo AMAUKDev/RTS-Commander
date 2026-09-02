@@ -2,11 +2,23 @@ using HarmonyLib;
 using NuclearOption.Networking;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
+/// <summary>
+/// While RTS mode is active the mod owns map input: the left button pans the map and clicks
+/// icons, the box-select modifier turns a left drag into a selection box, the middle button
+/// also pans, and the Basegame zoom and keyboard-pan bindings keep working.
+/// </summary>
 [HarmonyPatch(typeof(DynamicMap), "MapControls")]
 internal static class CommanderTacticalMapControlsPatch
 {
+    private const float MapIconPickRadiusPixels = 32f;
+    private const float ClickSlopPixels = 6f;
+
+    private static bool leftButtonHeld;
+    private static Vector2 leftButtonDownPosition;
+    private static bool leftButtonMoved;
+
     private static readonly AccessTools.FieldRef<DynamicMap, bool> FollowingCamera =
         AccessTools.FieldRefAccess<DynamicMap, bool>("followingCamera");
     private static readonly AccessTools.FieldRef<DynamicMap, Vector2> PositionOffset =
@@ -18,29 +30,134 @@ internal static class CommanderTacticalMapControlsPatch
 
     private static bool Prefix(DynamicMap __instance)
     {
-        CommanderTacticalMapService? tacticalMap = CommanderTacticalMapService.Instance;
-        bool overCommanderUi = CommanderOverlayUi.Instance?.ContainsScreenPoint(Input.mousePosition) == true;
-        if (overCommanderUi)
-        {
-            if (tacticalMap?.IsOpen == true)
-            {
-                UpdateCameraTracking(__instance);
-            }
-            return false;
-        }
-
-        if (tacticalMap?.IsOpen != true)
+        if (CommanderPlugin.Instance?.IsCommanderModeActive != true)
         {
             return true;
         }
 
-        if (__instance.IsCursorInMapRectangle())
+        if (CommanderOverlayUi.Instance?.ContainsScreenPoint(Input.mousePosition) != true
+            && __instance.IsCursorInMapRectangle())
         {
-            return true;
+            CommanderMapControls(__instance);
         }
 
         UpdateCameraTracking(__instance);
         return false;
+    }
+
+    private static void CommanderMapControls(DynamicMap map)
+    {
+        float zoomAxis = CommanderGameInput.GetAxis("Zoom View") * 0.05f;
+        if (zoomAxis != 0f)
+        {
+            map.SetZoomLevel(Mathf.Clamp(map.mapScaleCenter.transform.localScale.x * (zoomAxis + 1f), 1f, 40f));
+        }
+
+        float zoomScale = Mathf.Max(map.mapScaleCenter.localScale.x, 0.01f);
+        float keyboardHorizontal = CommanderGameInput.GetAxis("Move Map Horizontal");
+        float keyboardVertical = CommanderGameInput.GetAxis("Move Map Vertical");
+        if (keyboardHorizontal != 0f || keyboardVertical != 0f)
+        {
+            float speed = 300f * Time.unscaledDeltaTime / zoomScale;
+            PositionOffset(map) += new Vector2(keyboardHorizontal * speed, keyboardVertical * speed);
+        }
+
+        // A plain left drag pans, exactly like the Basegame map. The middle button keeps
+        // panning too, and a left drag with the box-select modifier belongs to the box.
+        bool boxDragging = CommanderBoxSelectService.Instance?.DraggingOnMap == true;
+        if (Input.GetMouseButton(2) || (Input.GetMouseButton(0) && !boxDragging))
+        {
+            float dragSpeed = 150f * Mathf.Min(Time.unscaledDeltaTime, 0.03f) / zoomScale;
+            PositionOffset(map) += new Vector2(
+                -Input.GetAxisRaw("Mouse X") * dragSpeed,
+                -Input.GetAxisRaw("Mouse Y") * dragSpeed);
+        }
+
+        FollowingCamera(map) = PositionOffset(map) == Vector2.zero;
+
+        if (CommanderGameInput.JumpMapDown && map.TryGetCursorCoordinates(out GlobalPosition jumpTarget))
+        {
+            CommanderTacticalMapService.Instance?.JumpCameraToPosition(jumpTarget);
+        }
+
+        TrackIconClick(map);
+    }
+
+    /// <summary>
+    /// Icon selection resolves on release, and only when the cursor barely moved: the same
+    /// button now pans the map, so clicking on press would select an icon every time the
+    /// player grabbed the map to drag it.
+    /// </summary>
+    private static void TrackIconClick(DynamicMap map)
+    {
+        if (Input.GetMouseButtonDown(0))
+        {
+            leftButtonHeld = true;
+            leftButtonMoved = false;
+            leftButtonDownPosition = Input.mousePosition;
+        }
+
+        if (!leftButtonHeld)
+        {
+            return;
+        }
+
+        if (Vector2.Distance(leftButtonDownPosition, Input.mousePosition) > ClickSlopPixels)
+        {
+            leftButtonMoved = true;
+        }
+
+        if (!Input.GetMouseButtonUp(0))
+        {
+            return;
+        }
+
+        leftButtonHeld = false;
+        if (leftButtonMoved
+            || CommanderBoxSelectService.Instance?.Dragging == true
+            || CommanderSpawnService.Instance?.AwaitingRallyPointSelection == true
+            || CommanderNavalPurchaseService.Instance?.AwaitingRallySelection == true)
+        {
+            return;
+        }
+
+        ClickNearestIcon(map);
+    }
+
+    /// <summary>Basegame icon picking, reimplemented because the original lives inside MapControls.</summary>
+    private static void ClickNearestIcon(DynamicMap map)
+    {
+        Vector3 mousePosition = Input.mousePosition;
+        float bestDistance = MapIconPickRadiusPixels * MapIconPickRadiusPixels;
+        MapIcon? best = null;
+        System.Collections.Generic.List<MapIcon> icons = map.mapIcons;
+        for (int i = 0; i < icons.Count; i++)
+        {
+            MapIcon icon = icons[i];
+            if (icon == null
+                || !icon.gameObject.activeInHierarchy
+                || icon.iconImage == null
+                || !icon.iconImage.raycastTarget)
+            {
+                continue;
+            }
+
+            if (icon is UnitMapIcon unitIcon
+                && (unitIcon.unit == null
+                    || SceneSingleton<TargetListSelector>.i?.CheckExclusions(unitIcon.unit) == true))
+            {
+                continue;
+            }
+
+            float distance = ((Vector2)icon.transform.position - (Vector2)mousePosition).sqrMagnitude;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = icon;
+            }
+        }
+
+        best?.ClickIcon(MapIcon.ClickSource.Controller);
     }
 
     private static void UpdateCameraTracking(DynamicMap map)
@@ -80,16 +197,6 @@ internal static class CommanderTacticalMapControlsPatch
             0f,
             0f,
             map.mapImage.transform.eulerAngles.z - camera.transform.eulerAngles.y);
-    }
-}
-
-[HarmonyPatch(typeof(DynamicMap), "SelectFromMap")]
-internal static class CommanderRallyMapSelectionPatch
-{
-    private static bool Prefix()
-    {
-        return CommanderSpawnService.Instance?.AwaitingRallyPointSelection != true
-            && CommanderNavalPurchaseService.Instance?.AwaitingRallySelection != true;
     }
 }
 

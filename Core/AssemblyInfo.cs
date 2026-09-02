@@ -1,7 +1,7 @@
 using System.Reflection;
 
-[assembly: AssemblyTitle("Nuclear Option Commander")]
-[assembly: AssemblyProduct("Nuclear Option Commander")]
-[assembly: AssemblyVersion("0.1.2.0")]
-[assembly: AssemblyFileVersion("0.1.2.0")]
-[assembly: AssemblyInformationalVersion("0.1.2.0")]
+[assembly: AssemblyTitle("Ground Control (RTS)")]
+[assembly: AssemblyProduct("Ground Control (RTS)")]
+[assembly: AssemblyVersion("0.4.0.0")]
+[assembly: AssemblyFileVersion("0.4.0.0")]
+[assembly: AssemblyInformationalVersion("0.4.0.0")]

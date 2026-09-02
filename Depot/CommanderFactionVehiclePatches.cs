@@ -1,7 +1,7 @@
 using System;
 using HarmonyLib;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
 [HarmonyPatch]
 internal static class CommanderFactionVehiclePatches

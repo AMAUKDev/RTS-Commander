@@ -1,9 +1,9 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace NuclearOptionCommander;
+namespace GroundControlRts;
 
-internal sealed class CommanderRepairService
+internal sealed class CommanderRepairService : ICommanderResetSession
 {
     private readonly HashSet<Unit> nearestTargetUnits = new();
     private float statusUntil;
@@ -52,7 +52,7 @@ internal sealed class CommanderRepairService
         return unit != null && !unit.disabled && nearestTargetUnits.Contains(unit);
     }
 
-    internal void ResetSession()
+    public void ResetSession()
     {
         nearestTargetUnits.Clear();
         statusText = string.Empty;
