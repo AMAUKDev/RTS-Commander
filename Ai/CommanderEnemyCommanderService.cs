@@ -202,6 +202,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         PruneStates(localHq);
         StatusLine = primary != null && states.TryGetValue(primary, out CommanderState primaryState)
             ? $"{GetPlanLabel(primaryState.Plan)}   {FundsLabel(primary.factionFunds)}"
+                + (primaryState.Defending ? "   DEFENDING" : string.Empty)
             : string.Empty;
     }
 

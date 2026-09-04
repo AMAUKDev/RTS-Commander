@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **Air Command threw you onto the game's fullscreen map to place a mission area, then threw you
+  back.** Picking a mission area, moving one, or adopting an aircraft opened the base game's big
+  map over the whole screen, and closing the AIR window swapped back to the RTS map — so a single
+  order meant two full-screen changes. The mod's own map is now the only map it ever asks you to
+  work on: opening AIR COMMAND brings the tactical map up beside the window, and every mission area
+  is placed on it. Buying a warship picks its rally point on the same map. The **AIR MISSIONS** list
+  moved to sit next to the AIR COMMAND window instead of on top of the tactical map. **M** still
+  opens the game's fullscreen map when you actually want it.
+
+- **A click on the tactical map could place a building or a mission area in the terrain behind it.**
+  With a placement armed, a left click over the map ran the world raycast as well as the map's own
+  handler, and the raycast read whatever the map canvas was hiding. Clicks over the map now belong
+  to the map.
+
 - **Gold mine income never showed up in the faction balance — it was being paid out to the personal
   account.** The game hands every pilot a share of the faction's money every 30 seconds: their
   mission income, plus a quarter of everything the faction is holding *above the balance the mission
@@ -136,6 +150,29 @@
   may script what they do, and overriding that is not a bug fix.
 
 ### Added
+
+- **The enemy commander defends its base.** Everything it bought used to walk at you the moment it
+  left the depot ramp, so its home was always empty behind the attack — which is how a match ended
+  with its last base simply being walked onto. It now keeps a **home guard**: a share of its ground
+  force posted on a ring around every base it holds, air-defence vehicles picked first because a
+  launcher gives an attack the least and a base the most. The rest still comes at you.
+
+- **It goes to a defence posture when it is attacked, or when it can see the attack coming.**
+  Anything hostile inside 15 km of one of its bases **on its own radar picture**, or any hit on
+  anything it owns, puts it on the defensive for two minutes: the ring roughly doubles, drawn back
+  out of the attack, then stands down once the raid is over so it does not turtle for the rest of the
+  match. Come in low, under its radar, and you meet the resting ring instead. The enemy readout on
+  the HUD says **DEFENDING** while the posture is up.
+
+- **It buys AAA and SAM vehicles to fill that ring**, ahead of whatever plan it is running, whenever
+  it cannot man the ring out of what it already owns — the same precedence a capture unit gets.
+
+- **It keeps one radar building at every base and rebuilds it when you bomb it.** A base with no
+  radar cannot see an attack coming, and the defence posture reads exactly that picture, so a radar
+  building now outranks a gold mine in its build queue. It also puts defensive structures around its
+  bases once its economy is running. Which structure it uses for each is read off the game's own
+  building categories and written to the log once, so a game patch that adds or removes one is
+  picked up on its own.
 
 - **Aircraft can take a base.** Put a travel point on a yellow capture marker with aircraft
   selected and they fly to that airfield, land on it, and sit in the ring until it falls — then

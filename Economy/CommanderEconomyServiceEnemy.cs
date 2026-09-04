@@ -28,8 +28,22 @@ internal sealed partial class CommanderEconomyService
     private const int ShoreLanePointBudget = 32;
     private const int ShoreLanePointStride = 3;
 
+    /// <summary>Defensive structures a commander keeps once its economy is running.</summary>
+    private const int EnemyDefenceBuildingTarget = 3;
+
+    /// <summary>A base counts as having radar cover with a radar building this close to it.</summary>
+    private const float RadarCoverageMeters = 3000f;
+
+    /// <summary>Ring a base-adjacent structure is dropped into: near enough to be part of the base,
+    /// far enough not to be on the apron.</summary>
+    private const float BaseSiteMinMeters = 200f;
+    private const float BaseSiteMaxMeters = 900f;
+
     /// <summary>HQs already told, once, that this map gives them nowhere to put a dock.</summary>
     private readonly HashSet<FactionHQ> shoreSearchReported = new();
+
+    /// <summary>The structure each building category resolves to, decided once per mission.</summary>
+    private readonly Dictionary<BuildingType, BuildingDefinition?> categoryDefinitions = new();
 
     private void ReviewEnemies()
     {
@@ -148,6 +162,15 @@ internal sealed partial class CommanderEconomyService
             return 0f;
         }
 
+        // A base that cannot see the attack coming outranks income. Without a radar building the
+        // commander's tracking database holds only what its parked units happen to see, and the
+        // whole defence posture reads that database.
+        BuildingDefinition? radar = service.ResolveCategoryDefinition(BuildingType.RDR, preferDearest: true);
+        if (radar != null && TryGetUncoveredBase(hq, BuildingType.RDR, RadarCoverageMeters, out _))
+        {
+            return GetStructureCost(radar);
+        }
+
         bool duel = CommanderEnemyCommanderService.IsDuelMission;
         if (service.CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget))
         {
@@ -157,6 +180,12 @@ internal sealed partial class CommanderEconomyService
         if (service.CountFactories(hq) < (duel ? DuelEnemyFactoryTarget : EnemyFactoryTarget))
         {
             return FactoryBuildCost;
+        }
+
+        BuildingDefinition? defence = service.ResolveCategoryDefinition(BuildingType.DEF, preferDearest: false);
+        if (defence != null && CountBuildings(hq, BuildingType.DEF) < EnemyDefenceBuildingTarget)
+        {
+            return GetStructureCost(defence);
         }
 
         // A commander whose map gave it no coast hands the money back rather than reserving for a
@@ -169,6 +198,12 @@ internal sealed partial class CommanderEconomyService
     /// <summary>Builds whatever <see cref="GetEnemyBuildReserve"/> said this commander wants next.</summary>
     private bool TryBuildEnemyEconomy(FactionHQ hq)
     {
+        // Same order as GetEnemyBuildReserve, because that method is what saved up for this one.
+        if (TryBuildEnemyRadar(hq))
+        {
+            return true;
+        }
+
         bool duel = CommanderEnemyCommanderService.IsDuelMission;
         if (CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget))
         {
@@ -180,7 +215,201 @@ internal sealed partial class CommanderEconomyService
             return TryBuildEnemyFactory(hq);
         }
 
+        if (TryBuildEnemyDefence(hq))
+        {
+            return true;
+        }
+
         return TryBuildEnemyNavalDock(hq);
+    }
+
+    /// <summary>
+    /// One radar building per base, rebuilt when the last one is bombed. Sited beside the base it
+    /// covers rather than wherever a dart lands: the thing being answered is "this base has no
+    /// radar", and a second mast next to the first one answers nothing.
+    /// </summary>
+    private bool TryBuildEnemyRadar(FactionHQ hq)
+    {
+        BuildingDefinition? radar = ResolveCategoryDefinition(BuildingType.RDR, preferDearest: true);
+        if (radar == null
+            || !TryGetUncoveredBase(hq, BuildingType.RDR, RadarCoverageMeters, out GlobalPosition anchor)
+            || !TryFindSiteNear(hq, radar, anchor, out GlobalPosition site)
+            || SpawnBuilding(hq, site, radar, GetStructureLabel(radar), randomRotation: true) == null)
+        {
+            return false;
+        }
+
+        hq.AddFunds(-GetStructureCost(radar));
+        CommanderPlugin.Log.LogInfo(
+            $"Enemy commander ({hq.faction.name}) built a {GetStructureLabel(radar)} at a base with no radar cover.");
+        return true;
+    }
+
+    /// <summary>Hardens a base with whatever the encyclopedia files under DEFENCE.</summary>
+    private bool TryBuildEnemyDefence(FactionHQ hq)
+    {
+        BuildingDefinition? defence = ResolveCategoryDefinition(BuildingType.DEF, preferDearest: false);
+        if (defence == null || CountBuildings(hq, BuildingType.DEF) >= EnemyDefenceBuildingTarget)
+        {
+            return false;
+        }
+
+        GlobalPosition site = default;
+        if (!TryFindEnemyBuildSite(hq, defence, ref site)
+            || SpawnBuilding(hq, site, defence, GetStructureLabel(defence), randomRotation: true) == null)
+        {
+            return false;
+        }
+
+        hq.AddFunds(-GetStructureCost(defence));
+        CommanderPlugin.Log.LogInfo(
+            $"Enemy commander ({hq.faction.name}) built a {GetStructureLabel(defence)} to defend its base.");
+        return true;
+    }
+
+    /// <summary>
+    /// The structure a commander uses for a whole building category, resolved off the live
+    /// encyclopedia rather than a name table: <c>BuildingType</c> is authored in the game's own
+    /// assets, so a patch that adds a radar mast files itself and a patch that removes one degrades
+    /// to "no radar" instead of to a null prefab. Logged once, because a choice a game patch can
+    /// invalidate should not be a silent one.
+    /// </summary>
+    private BuildingDefinition? ResolveCategoryDefinition(BuildingType type, bool preferDearest)
+    {
+        if (categoryDefinitions.TryGetValue(type, out BuildingDefinition? cached))
+        {
+            return cached;
+        }
+
+        IReadOnlyList<BuildingDefinition> entries = Catalog;
+        if (entries.Count == 0)
+        {
+            // The encyclopedia is not up yet. Ask again next review rather than caching a null.
+            return null;
+        }
+
+        BuildingDefinition? best = null;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            BuildingDefinition candidate = entries[i];
+            if (candidate.buildingType != type)
+            {
+                continue;
+            }
+
+            if (best == null || (preferDearest ? candidate.value > best.value : candidate.value < best.value))
+            {
+                best = candidate;
+            }
+        }
+
+        categoryDefinitions[type] = best;
+        CommanderPlugin.Log.LogInfo(best == null
+            ? $"No {GetCategoryLabel(type)} structure in the encyclopedia, so no commander will build one."
+            : $"Commanders will build {GetStructureLabel(best)} for {GetCategoryLabel(type)} "
+                + $"({GetStructureCost(best):0}).");
+        return best;
+    }
+
+    /// <summary>The first base this faction holds with no building of that category near it.</summary>
+    private static bool TryGetUncoveredBase(
+        FactionHQ hq,
+        BuildingType type,
+        float coverage,
+        out GlobalPosition center)
+    {
+        center = default;
+        foreach (Airbase airbase in hq.GetAirbases())
+        {
+            if (airbase == null || airbase.disabled || airbase.center == null)
+            {
+                continue;
+            }
+
+            GlobalPosition candidate = airbase.center.GlobalPosition();
+            if (!HasBuildingNear(hq, type, candidate, coverage))
+            {
+                center = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasBuildingNear(FactionHQ hq, BuildingType type, GlobalPosition position, float radius)
+    {
+        if (hq.factionUnits == null)
+        {
+            return false;
+        }
+
+        foreach (PersistentID id in hq.factionUnits)
+        {
+            if (id.TryGetUnit(out Unit unit)
+                && unit != null
+                && !unit.disabled
+                && unit is Building
+                && unit.definition is BuildingDefinition definition
+                && definition.buildingType == type
+                && FastMath.InRange(unit.transform.GlobalPosition(), position, radius))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int CountBuildings(FactionHQ hq, BuildingType type)
+    {
+        if (hq.factionUnits == null)
+        {
+            return 0;
+        }
+
+        int count = 0;
+        foreach (PersistentID id in hq.factionUnits)
+        {
+            if (id.TryGetUnit(out Unit unit)
+                && unit != null
+                && !unit.disabled
+                && unit is Building
+                && unit.definition is BuildingDefinition definition
+                && definition.buildingType == type)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>A legal site on a ring around one point, through the same shared rule as every
+    /// other build in the mod.</summary>
+    private bool TryFindSiteNear(
+        FactionHQ hq,
+        BuildingDefinition definition,
+        GlobalPosition anchor,
+        out GlobalPosition site)
+    {
+        for (int attempt = 0; attempt < EnemySiteAttempts; attempt++)
+        {
+            float angle = Random.Range(0f, Mathf.PI * 2f);
+            float distance = Random.Range(BaseSiteMinMeters, BaseSiteMaxMeters);
+            GlobalPosition candidate = new(
+                anchor.x + Mathf.Cos(angle) * distance,
+                anchor.y,
+                anchor.z + Mathf.Sin(angle) * distance);
+            if (preview.IsSiteAllowed(definition, candidate, hq, out _))
+            {
+                site = candidate;
+                return true;
+            }
+        }
+
+        site = default;
+        return false;
     }
 
     /// <summary>Drops an enemy mine beside something that faction already owns, so it lands in its own rear.</summary>

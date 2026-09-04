@@ -101,6 +101,22 @@ internal sealed partial class CommanderEnemyCommanderService
         return false;
     }
 
+    /// <summary>
+    /// A hit on anything a hostile commander owns puts it on the defensive, whether or not its
+    /// sensors ever saw what did it: the radar half of the trigger cannot see a low pass that has
+    /// already dropped. Called from the shared <c>Unit.RecordDamage</c> postfix, so it stays a
+    /// dictionary lookup and a float write — <c>states</c> never holds the local HQ, which is what
+    /// keeps the player's own losses out of it.
+    /// </summary>
+    internal void NotifyUnitDamaged(Unit? unit)
+    {
+        FactionHQ? hq = unit == null ? null : unit.NetworkHQ;
+        if (hq != null && states.TryGetValue(hq, out CommanderState state))
+        {
+            state.ThreatUntil = Time.time + ThreatHoldSeconds;
+        }
+    }
+
     private void ReviewDefences(FactionHQ localHq)
     {
         foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
@@ -400,13 +416,21 @@ internal sealed partial class CommanderEnemyCommanderService
     /// </summary>
     private static void CheckDefencePosture()
     {
-        if (ThreatDefendersPerBase <= DefendersPerBase)
+        // Read into locals first: compared as constants the compiler folds the whole check away
+        // and warns that the failure branch is unreachable, which is exactly the branch that has
+        // to survive a retune.
+        int resting = DefendersPerBase;
+        int threatened = ThreatDefendersPerBase;
+        int posts = DefencePostsPerBase;
+        float innerRing = DefenceRingMinMeters;
+        float outerRing = DefenceRingMaxMeters;
+        if (threatened <= resting)
         {
             CommanderPlugin.Log.LogError(
                 "Enemy defence self-check FAILED: the threatened guard is no larger than the resting one.");
         }
 
-        if (DefencePostsPerBase < 1 || DefenceRingMaxMeters < DefenceRingMinMeters)
+        if (posts < 1 || outerRing < innerRing)
         {
             CommanderPlugin.Log.LogError(
                 "Enemy defence self-check FAILED: the base ring has no usable posts.");

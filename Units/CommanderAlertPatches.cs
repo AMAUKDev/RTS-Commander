@@ -19,6 +19,9 @@ internal static class CommanderAlertPatches
     private static void RecordDamagePostfix(Unit __instance, PersistentID lastDamagedBy)
     {
         CommanderAlertService.Instance?.NotifyDamage(__instance, lastDamagedBy);
+        // Same hook, other side of the board: a hostile commander that is being shot at goes to
+        // its defence posture even when nothing of its own ever saw the shooter.
+        CommanderEnemyCommanderService.Instance?.NotifyUnitDamaged(__instance);
     }
 
     [HarmonyPatch(typeof(Unit), nameof(Unit.ReportKilled))]

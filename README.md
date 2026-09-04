@@ -226,6 +226,9 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
 - Selected units draw their full remaining route on the map, numbered in the order they will
   drive it.
 - Radar coverage overlay generated from Unit Systems.
+- **This is the only map the mod asks you to work on.** Air mission areas and naval rally points
+  are placed on it, so no order ever swaps the screen out for the game's fullscreen map and back.
+  `M` still opens the fullscreen map when you want it, and `Esc` comes back.
 
 ---
 
@@ -280,6 +283,8 @@ Dispatch aircraft with custom loadouts on a specific mission:
   engage anything in range.
 - **CAS**, **ARAD** and **Strike** only attack targets inside their assigned area (red circle).
 - ARAD supports saturation attacks; missions in progress can be edited, relocated or recalled.
+- Opening **AIR COMMAND** brings the tactical map up beside the window, and mission areas are placed
+  on that map or in the 3D view. Right-click, or the game's Cancel binding, backs out.
 - Aircraft come from the faction reserve when possible, otherwise they are purchased. Aircraft
   that return successfully restore the airframe or refund the money.
 - **Fixed-wing only.** Everything that steers a commanded aircraft is built on the game's aeroplane
@@ -553,7 +558,19 @@ hosting.
 
 ### What it does with what it owns
 
-Three things the commander does that are not "buy another tank":
+Four things the commander does that are not "buy another tank":
+
+- **It defends its base.** A share of its ground force is posted on a ring around every base it
+  holds instead of being sent at you — air-defence vehicles first, because a launcher gives an
+  attack the least and a base the most. Anything hostile inside 15 km of one of its bases **on its
+  own radar picture**, or any hit on anything it owns, puts it in a defence posture for two
+  minutes: the ring roughly doubles, pulled back out of the attack, and stands down again once the
+  raid is over so it does not turtle for the rest of the match. Its readout on the HUD says
+  **DEFENDING** while it is up. Come in low, under its radar, and you meet the resting ring
+  instead. If it cannot man the ring out of what it owns it buys AAA and SAM vehicles for it,
+  ahead of whatever plan it is running, and it keeps one **radar building at every base** —
+  rebuilding it when you bomb it, because a base with no radar cannot see you coming. It puts
+  defensive structures around its bases too, once its economy is running.
 
 - **It flies its aircraft at you.** On the duel, every airframe it owns is given a real strike
   mission over your territory out of the same Air Command machinery your own aircraft use, with
