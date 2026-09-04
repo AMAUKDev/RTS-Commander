@@ -34,6 +34,7 @@ public sealed class CommanderPlugin : BaseUnityPlugin
         CommanderEconomyService.SelfCheck();
         CommanderCaptureService.SelfCheck();
         CommanderBuildPreview.SelfCheck();
+        CommanderCameraTuning.SelfCheck();
         modeController = gameObject.AddComponent<CommanderModeController>();
         Logger.LogInfo($"{PluginInfo.Name} {PluginInfo.Version} loaded");
     }

@@ -27,8 +27,27 @@ internal static class CommanderSettings
     internal static bool ShowUnitListUi { get => Get("UI", "ShowUnitListUi", true); set => Set("UI", "ShowUnitListUi", value); }
     internal static bool ShowBuildUi { get => Get("UI", "ShowBuildUi", true); set => Set("UI", "ShowBuildUi", value); }
     internal static float TacticalMapSize { get => Get("UI", "TacticalMapSize", 675f); set => Set("UI", "TacticalMapSize", value); }
-    internal static float MapDragSensitivity { get => Get("UI", "MapDragSensitivity", 8f); set => Set("UI", "MapDragSensitivity", value); }
+    // Renamed from MapDragSensitivity because the meaning changed: the pan is now driven by real
+    // cursor pixels against the map's on-screen scale, so 1.0 means the map sticks to the cursor.
+    // A rename is the only way to reissue a default, since BepInEx keeps whatever is in the file.
+    internal static float MapDragSpeed { get => Get("UI", "MapDragSpeed", 1f); set => Set("UI", "MapDragSpeed", value); }
     internal static bool AutoFollowSelection { get => Get("Camera", "AutoFollowSelection", true); set => Set("Camera", "AutoFollowSelection", value); }
+    // Selecting a unit attaches the follow but must not yank a camera the player just aimed, so
+    // the camera only travels when the unit is off screen, near an edge, or too far to read.
+    internal static bool AutoFrameSelection { get => Get("Camera", "AutoFrameOffscreenSelection", true); set => Set("Camera", "AutoFrameOffscreenSelection", value); }
+    internal static float CameraPanSpeed { get => Get("Camera", "PanSpeed", 300f); set => Set("Camera", "PanSpeed", value); }
+    internal static float CameraZoomSpeed { get => Get("Camera", "ZoomSpeed", 1f); set => Set("Camera", "ZoomSpeed", value); }
+    // The RTS camera keeps its own look feel instead of borrowing PlayerSettings.viewSensitivity
+    // and viewSmoothing, which are tuned for a pilot's head in a cockpit and read as lag here.
+    internal static float CameraLookSensitivity { get => Get("Camera", "LookSensitivity", 1f); set => Set("Camera", "LookSensitivity", value); }
+    internal static float CameraSmoothing { get => Get("Camera", "Smoothing", 0.05f); set => Set("Camera", "Smoothing", value); }
+    internal static bool CameraHeightScaledSpeed { get => Get("Camera", "HeightScaledSpeed", true); set => Set("Camera", "HeightScaledSpeed", value); }
+    internal static bool CameraEdgeScroll { get => Get("Camera", "EdgeScroll", false); set => Set("Camera", "EdgeScroll", value); }
+    internal static bool CameraOrbitLook { get => Get("Camera", "OrbitLook", true); set => Set("Camera", "OrbitLook", value); }
+    // Follow copies a smoothed anchor rather than the unit's exact per-frame movement, so an
+    // aircraft's jitter does not become camera shake. Lead is off by default: it is a taste knob.
+    internal static float FollowSmoothing { get => Get("Camera", "FollowSmoothing", 0.1f); set => Set("Camera", "FollowSmoothing", value); }
+    internal static float FollowLeadSeconds { get => Get("Camera", "FollowLeadSeconds", 0f); set => Set("Camera", "FollowLeadSeconds", value); }
     internal static bool GroupHotkeys { get => Get("Gameplay", "GroupHotkeys", true); set => Set("Gameplay", "GroupHotkeys", value); }
     internal static bool CameraBookmarks { get => Get("Gameplay", "CameraBookmarks", true); set => Set("Gameplay", "CameraBookmarks", value); }
     internal static bool OrderFeedback { get => Get("Gameplay", "OrderFeedback", true); set => Set("Gameplay", "OrderFeedback", value); }
@@ -149,7 +168,17 @@ internal static class CommanderSettings
         _ = CombatAlerts;
         _ = EnemyCommanderMode;
         _ = TacticalMapSize;
-        _ = MapDragSensitivity;
+        _ = MapDragSpeed;
+        _ = AutoFrameSelection;
+        _ = CameraPanSpeed;
+        _ = CameraZoomSpeed;
+        _ = CameraLookSensitivity;
+        _ = CameraSmoothing;
+        _ = CameraHeightScaledSpeed;
+        _ = CameraEdgeScroll;
+        _ = CameraOrbitLook;
+        _ = FollowSmoothing;
+        _ = FollowLeadSeconds;
         _ = ShowBuildUi;
         _ = GoldMineCost;
         _ = GoldMineIncomePerMinute;

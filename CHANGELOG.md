@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+### Camera
+
+The RTS camera was rebuilt this release. Everything below is one job: make commanding feel like
+driving a camera over a battlefield instead of flying an unwilling aeroplane.
+
+- **Selecting an aircraft could leave it behind the camera while the camera followed it.** This was
+  a real bug, not a feel problem. Centring on a unit turned the camera by writing its rotation
+  directly — but the free camera keeps its own copy of where it is pointing, and every frame it
+  smoothly steers back to that copy. So the camera faced the unit for a single frame, then rotated
+  away while the follow kept dragging it along behind an aircraft you could no longer see. Every
+  camera jump now writes the angles back, which is what camera bookmarks were already doing and is
+  why they never had the problem.
+
+- **Selecting a unit no longer yanks the camera.** The camera used to teleport onto whatever you
+  clicked, every time, including units already in the middle of your screen. Now selecting attaches
+  the follow and leaves your view alone. It only travels when the unit is off screen, hugging an
+  edge, or too far away to read — and then it *glides* there over about a third of a second instead
+  of cutting. Touch the camera during the glide and it hands control straight back. Tap the
+  centre key when you do want the old instant jump; it is unchanged.
+
+- **Pan speed now scales with how high you are.** One flat speed is either useless at altitude or
+  uncontrollable on the deck. Down among the vehicles the camera nudges; up at survey height it
+  crosses the map. Turn it off in Settings > Camera if you want the old flat speed.
+
+- **The camera pans across the ground instead of along its own view axis.** Pointing down and
+  pressing forward used to drive the camera into the hillside, where the ground clamp shoved it back
+  up — a big part of what made moving around feel like a fight. Forward now means forward on the
+  map. Rise and descend are still the only things that change your height.
+
+- **The mouse wheel zooms.** It moves the camera toward whatever the cursor is over, so zooming in
+  also recentres on the thing you were pointing at, and each notch covers a quarter of your height
+  above the ground so the step stays sensible from treetop to stratosphere. Previously the wheel
+  fell through to the flight sim's field-of-view control, which warped the picture and quietly
+  changed how fast your mouse looked around.
+
+- **Holding the look key now orbits the point under your cursor** rather than turning the camera on
+  the spot, so the thing you were studying stays on screen while you swing around it. The old
+  turn-in-place behaviour is a toggle in Settings > Camera.
+
+- **The camera can no longer pitch past vertical and end up upside down.**
+
+- **Look and movement stopped borrowing the flight sim's settings.** Rotation was being smoothed
+  through `viewSmoothing`, a setting meant for a pilot's head in a cockpit, which read here as
+  ~200 ms of lag on every mouse movement, and starting or stopping had a matching drift. The RTS
+  camera now has its own sensitivity and its own smoothing, defaulting to near-instant.
+
+- **Cresting a ridge no longer jolts.** The game hard-snaps the camera to just above the terrain
+  with no easing. The mod now keeps its own slightly higher clearance and eases into it, so the
+  game's snap never fires.
+
+- **Following is smoothed instead of welded.** Follow used to copy the unit's exact movement every
+  frame, so an aircraft's jitter arrived as camera shake. It now tracks a lightly damped anchor.
+
+- **Optional edge scrolling** (Settings > Camera, off by default — the mod's windows crowd the
+  screen edges, so this is opt-in).
+
+- **Dragging the tactical map was crawling.** The pan was scaled only by the map's zoom level and
+  ignored the fact that the compact tactical map is a scaled-down copy of the fullscreen one, so on
+  the mod's own map every drag moved the map a fraction of how far the cursor went. The map now
+  sticks to the cursor one-to-one at any zoom, window size or framerate, with a speed slider next
+  to it. The keyboard map pan was fixed the same way.
+
+- **New Settings > Camera tab** holding all of it: pan speed, zoom speed, look sensitivity,
+  smoothing, height-scaled speed, edge scrolling, orbit look, follow behaviour and map drag speed.
+  A camera is tuned by moving it, so every one of these is a live slider or toggle.
+
+  The config key `UI/MapDragSensitivity` is replaced by `UI/MapDragSpeed`, because the number means
+  something different now — BepInEx keeps whatever is already in your config file, so the old key
+  had to be retired to give you the new default.
+
 ### Fixed
 
 - **Air Command threw you onto the game's fullscreen map to place a mission area, then threw you

@@ -34,7 +34,8 @@ and are installed into your mission list the first time the game loads the plugi
 | --- | --- |
 | Enter/leave RTS mode | `CMD` button on the left edge (while outside an aircraft) |
 | Move camera | `W` `A` `S` `D` `Q` `E`, hold `Shift` to boost |
-| Look around | Hold `MMB` |
+| Zoom | Mouse wheel (moves toward the cursor) |
+| Look around / orbit | Hold `MMB` |
 | Select a unit | `LMB` |
 | Add to selection | `Shift` + `LMB` |
 | Remove one unit from the selection | `Shift` + `LMB` on a selected unit |
@@ -205,11 +206,20 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
 
 ## Camera
 
-- Free camera with 3D unit selection.
-- **Auto centre and follow**: selecting a unit snaps the camera to it and follows it. Selecting
-  several units frames the whole group so a convoy fits on screen. Toggle in
-  **Settings → Gameplay → Command**.
-- `Space` centres on the selection; hold it to centre and follow.
+- Free camera with 3D unit selection. Pan speed scales with how high you are, so the camera nudges
+  down among the vehicles and crosses the map from survey height.
+- **Zoom on the mouse wheel**, toward whatever the cursor is over, so zooming in also recentres on
+  the thing you were pointing at.
+- **Hold `MMB` to orbit** the point under the cursor, so what you were studying stays on screen.
+  Prefer turning in place? **Settings → Camera**.
+- **Follow without the yank**: selecting a unit follows it but leaves your view where you put it.
+  The camera only travels when the unit is off screen or too far away to read, and then it glides
+  there rather than cutting. Selecting several units frames the whole group so a convoy fits on
+  screen. Both toggles live in **Settings → Camera**.
+- `Space` centres on the selection immediately; hold it to centre and follow.
+- **Optional edge scrolling** (**Settings → Camera**, off by default).
+- Pan speed, zoom speed, look sensitivity, smoothing and map drag speed are all live sliders in
+  **Settings → Camera**.
 - **Camera bookmarks**: `Ctrl` + `F1`–`F4` stores the current viewpoint, `F1`–`F4` jumps back to
   it. Useful for your front line, your airbase and your carrier. Toggle in
   **Settings → Gameplay**.
