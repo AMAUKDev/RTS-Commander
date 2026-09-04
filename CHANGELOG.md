@@ -2,6 +2,529 @@
 
 ## Unreleased
 
+### Camera
+
+The RTS camera was rebuilt this release. Everything below is one job: make commanding feel like
+driving a camera over a battlefield instead of flying an unwilling aeroplane.
+
+- **Selecting an aircraft could leave it behind the camera while the camera followed it.** This was
+  a real bug, not a feel problem. Centring on a unit turned the camera by writing its rotation
+  directly — but the free camera keeps its own copy of where it is pointing, and every frame it
+  smoothly steers back to that copy. So the camera faced the unit for a single frame, then rotated
+  away while the follow kept dragging it along behind an aircraft you could no longer see. Every
+  camera jump now writes the angles back, which is what camera bookmarks were already doing and is
+  why they never had the problem.
+
+- **Selecting a unit no longer yanks the camera.** The camera used to teleport onto whatever you
+  clicked, every time, including units already in the middle of your screen. Now selecting attaches
+  the follow and leaves your view alone. It only travels when the unit is off screen, hugging an
+  edge, or too far away to read — and then it *glides* there over about a third of a second instead
+  of cutting. Touch the camera during the glide and it hands control straight back. Tap the
+  centre key when you do want the old instant jump; it is unchanged.
+
+- **Pan speed now scales with how high you are.** One flat speed is either useless at altitude or
+  uncontrollable on the deck. Down among the vehicles the camera nudges; up at survey height it
+  crosses the map. Turn it off in Settings > Camera if you want the old flat speed.
+
+- **The camera pans across the ground instead of along its own view axis.** Pointing down and
+  pressing forward used to drive the camera into the hillside, where the ground clamp shoved it back
+  up — a big part of what made moving around feel like a fight. Forward now means forward on the
+  map. Rise and descend are still the only things that change your height.
+
+- **The mouse wheel zooms.** It moves the camera toward whatever the cursor is over, so zooming in
+  also recentres on the thing you were pointing at, and each notch covers a quarter of your height
+  above the ground so the step stays sensible from treetop to stratosphere. Previously the wheel
+  fell through to the flight sim's field-of-view control, which warped the picture and quietly
+  changed how fast your mouse looked around.
+
+- **Holding the look key now orbits the point under your cursor** rather than turning the camera on
+  the spot, so the thing you were studying stays on screen while you swing around it. The old
+  turn-in-place behaviour is a toggle in Settings > Camera.
+
+- **The camera can no longer pitch past vertical and end up upside down.**
+
+- **Look and movement stopped borrowing the flight sim's settings.** Rotation was being smoothed
+  through `viewSmoothing`, a setting meant for a pilot's head in a cockpit, which read here as
+  ~200 ms of lag on every mouse movement, and starting or stopping had a matching drift. The RTS
+  camera now has its own sensitivity and its own smoothing, defaulting to near-instant.
+
+- **Cresting a ridge no longer jolts.** The game hard-snaps the camera to just above the terrain
+  with no easing. The mod now keeps its own slightly higher clearance and eases into it, so the
+  game's snap never fires.
+
+- **Following is smoothed instead of welded.** Follow used to copy the unit's exact movement every
+  frame, so an aircraft's jitter arrived as camera shake. It now tracks a lightly damped anchor.
+
+- **Optional edge scrolling** (Settings > Camera, off by default — the mod's windows crowd the
+  screen edges, so this is opt-in).
+
+- **Dragging the tactical map was crawling.** The pan was scaled only by the map's zoom level and
+  ignored the fact that the compact tactical map is a scaled-down copy of the fullscreen one, so on
+  the mod's own map every drag moved the map a fraction of how far the cursor went. The map now
+  sticks to the cursor one-to-one at any zoom, window size or framerate, with a speed slider next
+  to it. The keyboard map pan was fixed the same way.
+
+- **New Settings > Camera tab** holding all of it: pan speed, zoom speed, look sensitivity,
+  smoothing, height-scaled speed, edge scrolling, orbit look, follow behaviour and map drag speed.
+  A camera is tuned by moving it, so every one of these is a live slider or toggle.
+
+  The config key `UI/MapDragSensitivity` is replaced by `UI/MapDragSpeed`, because the number means
+  something different now — BepInEx keeps whatever is already in your config file, so the old key
+  had to be retired to give you the new default.
+
+### Fixed
+
+- **Air Command threw you onto the game's fullscreen map to place a mission area, then threw you
+  back.** Picking a mission area, moving one, or adopting an aircraft opened the base game's big
+  map over the whole screen, and closing the AIR window swapped back to the RTS map — so a single
+  order meant two full-screen changes. The mod's own map is now the only map it ever asks you to
+  work on: opening AIR COMMAND brings the tactical map up beside the window, and every mission area
+  is placed on it. Buying a warship picks its rally point on the same map. The **AIR MISSIONS** list
+  moved to sit next to the AIR COMMAND window instead of on top of the tactical map. **M** still
+  opens the game's fullscreen map when you actually want it.
+
+- **A click on the tactical map could place a building or a mission area in the terrain behind it.**
+  With a placement armed, a left click over the map ran the world raycast as well as the map's own
+  handler, and the raycast read whatever the map canvas was hiding. Clicks over the map now belong
+  to the map.
+
+- **Gold mine income never showed up in the faction balance — it was being paid out to the personal
+  account.** The game hands every pilot a share of the faction's money every 30 seconds: their
+  mission income, plus a quarter of everything the faction is holding *above the balance the mission
+  started with*. Under a commander that second part is a hole in the treasury — the mines paid in,
+  and the next payout took a slice straight back out to the personal wallet, so a balance that
+  should have been climbing sat still. The faction's treasury is no longer counted as spare cash, so
+  mine income stays where you earned it. Your own flying allowance is untouched.
+
+- **Mine income read as a bare number.** `+20/min` looked like twenty dollars. Income is now written
+  in the same money units as everything else — `+$20.0m/min` — in the build window, the mine's
+  upgrade card, and the economy readout. The amount has not changed.
+
+- **The economy, base capture and the enemy commander all kept running while the game was paused.**
+  Every periodic job in the mod was on the wall clock instead of the game clock, so pausing froze the
+  battlefield and nothing else: mines kept paying, bases kept falling, the enemy kept shopping. Mod
+  logic now runs on game time — it stops dead when you pause, and it runs at 2x/4x with the CMD
+  panel's speed buttons. Panels and markers still refresh while paused, so you can still look around
+  and click things.
+
+- **Newly bought ground vehicles drove off at the enemy on their own.** A vehicle that has never had
+  a *player* order steers itself at the nearest objective or tracked enemy, and the depot's own
+  "roll off the ramp" nudge does not count as one. Units bought from a depot now form up in a
+  staging block beside it and wait for orders. Setting a rally point still overrides this; clearing
+  one puts staging back rather than turning it off.
+
+- **Air Command let you place a mission area you could not pay for.** The affordability check ran
+  after the target was picked, so the map opened, the area went down, and nothing happened. The
+  REQUEST MISSION button now refuses up front and says the price and your balance.
+
+- **Warships arrived on the far side of the map from the dock that paid for them.** A hull enters
+  the map along a sea lane, and the lane was picked from a band around the map edge and scored by
+  how close it was to your nearest *airbase*. On a map whose coast runs away from your bases that
+  put a fresh patrol boat an hour's sailing from the harbour. Ships now enter at the sea lane
+  nearest your naval dock, from anywhere on the map rather than only the edge band. A faction with
+  no dock cannot buy ships at all, so nothing else changes.
+
+- **The enemy commander built a gold mine on the landing strip.** Runways and taxiways are terrain,
+  not structures, so nothing was stopping a building being dropped straight onto one — and the
+  road check could not see them either, because an airfield's taxiways are its own network and not
+  part of the map's roads. Neither commander can now build on a runway or a taxiway, at any airbase
+  on the map, held or not. The build ghost turns red and says *that is a runway or taxiway*.
+
+- **Aircraft told to take a base flew over it and went home.** A travel point is a place to be, not
+  a place to land, so an aircraft handed the ground squad's hold point did exactly what it was
+  told. Ordering aircraft onto a capturable base is now a real landing order — see *Aircraft can
+  take a base* below.
+
+- **The enemy commander bought two ground-attack jets at the start of the match and then nothing
+  else, all game.** It always bought the most expensive airframe its strip would accept, so the
+  answer was always the same aeroplane; once its air fund could not clear that price again it
+  bought nothing at all and said nothing about it. It now composes a wing by role and starts
+  cheap — see *The enemy flies a mixed wing* below. **It also now writes a line to the log every
+  time it declines to buy an aircraft, saying why** (at its ceiling, no airbase, cannot afford the
+  cheapest thing its strips accept, nothing with an AI flight model), once per reason rather than
+  twice a minute. An air force that silently stops was indistinguishable from one that was broken.
+
+- **The enemy's aircraft crashed a few metres from the hangar, over and over.** They were being
+  spawned in a hangar and left to taxi and take off on their own, and the game's AI pilot cannot do
+  that on this map: a highway strip has no taxiways, so the pilot drives a straight line at the
+  runway and the taxi and takeoff states answer *any* trouble at all — a stuck moment, a scrape, a
+  wing that touches something — by ejecting the pilot and abandoning the aeroplane. You never see
+  this yourself because you fly your own aircraft off the strip by hand. Commander-launched AI
+  aircraft now enter the map already airborne over their own base, pointed at the enemy and at
+  flying speed, which is exactly how a mission spawns aircraft that start in the air. **This
+  applies to the aircraft your own AIR window buys too** — same hangar, same problem. Which
+  airframes a base offers has not changed.
+
+- **The naval dock could not be placed anywhere, however close to the water you stood.** The water
+  test compared a world height against a *camera-relative* sea level, and the game slides that
+  reference around as the camera moves — so the moment the RTS camera gained any altitude, every
+  probe decided there was no water anywhere on the map. Dry land and open sea now read correctly
+  regardless of where the camera is. The same mistake was quietly breaking the enemy commander's
+  dock siting and the capture squad's hold point at a coastal airfield.
+
+- **The enemy commander only ever built gold mines.** Two commanders spend the one faction balance
+  — one buys units, one buys buildings — and the unit spender took a fixed share of the balance
+  every review, so the balance never once climbed to a factory's or a dock's price after the
+  opening minutes. Whatever the economy is saving for is now held back from the unit spender until
+  it is bought, the same way airframes and warships are already saved for. The enemy now works
+  through mines, then factories, then a naval dock and its upgrades.
+
+- **The expansion priority self-check was failing at load.** An empty base at the very edge of the
+  enemy commander's reach only tied with a defended base underfoot instead of beating it, so the
+  commander could throw its capture squad at your airbase rather than walk onto a free one.
+
+- **The enemy's aircraft took off and flew straight into the ground.** It was buying VTOLs — a
+  Tarantula is the most expensive thing a highway strip will accept, and the buy loop always took
+  the dearest airframe the strip allowed. Everything the mod does to steer a commanded aircraft is
+  built on the game's *fixed-wing* pilot AI; helicopters and VTOLs run a completely different one,
+  so the mission told a Tarantula what to attack and then nothing flew it there. It nosed over
+  shortly after takeoff every time. No rotary or VTOL airframe can be given an Air Command mission
+  from either side any more — your AIR window already worked this way, the enemy's buy loop did
+  not. (The enemy was also stopped from buying helicopters outright at the time; that half has
+  since been reversed — see *The enemy flies helicopters now* below.)
+
+- **A capture squad drove into the terminal building over and over.** Capture orders aimed at the
+  airbase's centre point, which on a real airfield sits on a building, so the units rammed it,
+  reversed, and rammed it again forever. Standing anywhere inside the capture ring takes the base,
+  so the squad is now sent to open ground inside the ring instead.
+
+- **Units sent to capture a base could not be ordered anywhere else.** Any order given within the
+  capture ring (plus a bit) counted as another capture order, so a squad standing on a base had
+  every attempt to move it snapped straight back to where it was. Ordering a squad that is already
+  taking a base is now read as a redirect and obeyed literally, with a LEAVING <BASE> toast so you
+  can see the click landed. Adding fresh units to the selection still reads as reinforcement.
+
+- **The enemy commander parked buildings on its own roads.** Two things were wrong. The road check
+  measured the building by the size written on its data sheet, which for most structures is far
+  smaller than the building or not filled in at all — a refinery was being treated as ten metres
+  across. And the cheap "is this site anywhere near this road" test used the road's own bounding
+  box with no margin, which for a straight road is a line: every site beside it skipped the check
+  entirely. Buildings are now measured off the actual model, and the road test reaches out by the
+  clearance being asked for.
+
+- **The enemy commander stopped flying after the first few minutes.** It set aside a fixed share of
+  each review's balance for aircraft, and then spent the rest on ground vehicles — which kept the
+  balance low enough that the air share never once added up to an airframe's price again. Twenty
+  minutes in you were fighting an enemy with excellent convoys and an empty sky. The air share is
+  now *saved* between reviews instead of expiring with them, so it buys an aircraft as soon as it
+  can afford one. Ships are bought out of a second saved fund the same way. Either fund hands its
+  surplus back to the ground spender after a few reviews, so a faction that can never put anything
+  up does not quietly withhold money from its convoys forever.
+
+- **The enemy commander never flew an airstrike.** Even when it did buy an aircraft, nothing told
+  the aircraft what to do — and the game's own pilot AI lands after fifteen ticks with no target
+  found, which is most of the way to the player's base. Every airframe the enemy owns on the duel
+  now gets a real Air Command mission out of the same machinery your own aircraft use: a strategic
+  strike box over your territory, with one in three flying air superiority instead once you have
+  aircraft of your own up. This is duel-only. Every other mission launches its own AI aircraft and
+  may script what they do, and overriding that is not a bug fix.
+
+### Added
+
+- **The enemy commander defends its base.** Everything it bought used to walk at you the moment it
+  left the depot ramp, so its home was always empty behind the attack — which is how a match ended
+  with its last base simply being walked onto. It now keeps a **home guard**: a share of its ground
+  force posted on a ring around every base it holds, air-defence vehicles picked first because a
+  launcher gives an attack the least and a base the most. The rest still comes at you.
+
+- **It goes to a defence posture when it is attacked, or when it can see the attack coming.**
+  Anything hostile inside 15 km of one of its bases **on its own radar picture**, or any hit on
+  anything it owns, puts it on the defensive for two minutes: the ring roughly doubles, drawn back
+  out of the attack, then stands down once the raid is over so it does not turtle for the rest of the
+  match. Come in low, under its radar, and you meet the resting ring instead. The enemy readout on
+  the HUD says **DEFENDING** while the posture is up.
+
+- **It buys AAA and SAM vehicles to fill that ring**, ahead of whatever plan it is running, whenever
+  it cannot man the ring out of what it already owns — the same precedence a capture unit gets.
+
+- **It keeps one radar building at every base and rebuilds it when you bomb it.** A base with no
+  radar cannot see an attack coming, and the defence posture reads exactly that picture, so a radar
+  building now outranks a gold mine in its build queue. It also puts defensive structures around its
+  bases once its economy is running. Which structure it uses for each is read off the game's own
+  building categories and written to the log once, so a game patch that adds or removes one is
+  picked up on its own.
+
+- **Aircraft can take a base.** Put a travel point on a yellow capture marker with aircraft
+  selected and they fly to that airfield, land on it, and sit in the ring until it falls — then
+  take off again on their own. Give them any other order and they take off immediately. An
+  aircraft parked inside a ring is worth about a light vehicle to the capture (tunable:
+  Gameplay/AircraftCaptureStrength), because in the base game an aeroplane contributes nothing to a
+  capture at all unless it happens to be carrying a troop pod. The base game will also not land an
+  AI aircraft anywhere except a field its own faction already holds, and it ejects the pilot of
+  anything left standing still on a strange airfield — both are worked around, so an aircraft
+  ordered onto a neutral field actually arrives and actually stays.
+
+- **RESUPPLY, on the selection bar.** Select aircraft and press it and they fly to the nearest
+  airbase your faction holds and land. Landing is how the game recovers an airframe: it goes back
+  into stock with its cost refunded, ready to relaunch fully armed and fuelled. The route to the
+  field it has chosen is drawn as the same yellow travel line every other order gets, so you can
+  see where each one is going. Right-clicking aircraft onto a base you already own does the same
+  thing — an order dropped on your own airfield is read as a rearm run.
+
+- **The enemy flies a mixed wing.** Instead of one airframe repeated, the commander picks what the
+  wing is short of: air superiority the moment you put an aircraft up and it has no fighter,
+  a couple of transports while you have an army on the ground, ground attack the rest of the time.
+  Within a role it buys the *cheapest* airframe that fits until it is running two of them and only
+  then starts spending up — so the opening minutes are cheap light aircraft and the expensive
+  ground-attack jets arrive once its economy can carry them. Roles are read off the game's own
+  role data, not a list of aircraft names, so a patch that adds an aeroplane files it correctly.
+  The airborne ceiling went from four to eight, since four is one of each role and no depth.
+  Helicopters and tiltwings count, so the transports are real ones.
+
+- **The enemy flies helicopters now.** They were banned outright, which was aimed at the right
+  problem and hit the wrong target: what breaks a rotary airframe is being given an Air Command
+  mission (it gets the target half and nothing that flies it there), and that is already refused
+  for anything that is not an aeroplane. Left alone, the game's own helicopter AI is complete — it
+  finds targets, flies to them, and hands itself over to fly a transport run whenever it is
+  carrying cargo, which is the game placing troops for the enemy with no help from the mod. The one
+  thing still refused is an airframe whose pilot the base game gives no AI flight state to at all,
+  which would simply fall out of the sky. Which aircraft that covers is checked against the actual
+  aircraft at runtime rather than assumed from its name.
+
+- **The whole airframe list, in the log, once per mission.** Pilot type, role and price for every
+  aircraft each faction can buy, with anything the commander refuses to buy marked and the reason
+  given. All three are in the game's asset files rather than its code, so this is the only way to
+  see what the AI is actually choosing between — and the only way to catch the mod excluding an
+  aircraft it should not.
+
+- **A toast when any base changes hands.** CAPTURED / LOST / <FACTION> TOOK / NEUTRAL, raised the
+  moment the airfield flips, for every base on the map and both sides of the fight. It used to be a
+  line in the battle log you were not looking at.
+
+- **A capture progress bar.** A base being taken now shows how far along it is right on its marker,
+  in the 3D view and on the tactical map — `CAPTURING MARIS AIRPORT [####------] 40%` in green when
+  it is going your way, `CONTESTED` in red when it is not. The base game shows this nowhere outside
+  its debug overlay, so a squad standing in the ring used to look like a squad doing nothing.
+
+- **A countdown on factories.** Selecting a factory now says how long until its next batch and how
+  long a production run takes — `NEXT 2 x AGM IN 3:12 (EVERY 4:00)` — beside the upgrade button.
+  The old readout said `1/cycle` without ever saying how long a cycle was.
+
+- **Naval docks, and a naval gate to go with them.** Nobody buys ships any more without one — you
+  or the enemy. A dock is built from the BUILD window, has to stand on dry land at the water's
+  edge, and may sit further from your bases than anything else you build (its own radius, 12 km by
+  default, because the coast usually is). It upgrades three times and each level opens a heavier
+  class of hull: patrol boats and landing craft, then corvettes and frigates, then destroyers,
+  carriers and assault ships. Locked hulls stay visible in the naval window with the dock level
+  they need, so the ladder reads as something to build toward.
+
+- **The enemy commander goes to sea.** It builds its own dock on the nearest coast to a base it
+  holds, upgrades it, and buys hulls under exactly the same level gate you are on, entering them
+  from the map's sea lanes the way your purchases do. It never put a boat in the water before.
+
+- **A radar screen instead of a blind enemy.** The enemy has always been handed the location of
+  your *buildings* — without that it has nothing to attack — but nothing about your army. It now
+  buys radar vehicles and drives them out to standing overwatch posts on the approaches from your
+  territory, picking the highest ground near each post, and it is short of a radar before it is
+  short of anything else in its plan. Everything it sees that way, it sees because a truck is
+  parked somewhere you can shoot it.
+
+- **Game speed in the commander panel: 1x, 2x, 4x.** An RTS spends a lot of its time watching a
+  convoy cross a map. Host only — on a multiplayer client the clock belongs to the server — and it
+  drops back to 1x when you leave commander mode, so nothing carries a fast-forward into flying or
+  into the next mission.
+
+- **Build radius and naval dock radius are sliders** in Settings > Gameplay, not just config file
+  entries. Both are map-dependent: how tight a base perimeter feels, and whether a faction can
+  reach the coast at all, are answers you only get by looking at the map you are on.
+
+### Changed
+
+- **The enemy commander strikes your main base, and keeps fighters over its own.** Its strike target
+  was the *average* position of every airbase you hold — fine while you hold one, useless the moment
+  you capture a second, because the target slides off into open ground between them and the strike
+  package finds nothing to bomb. It now remembers the base you started the mission holding and works
+  that, from the first minute. One airframe in three is also held back on a combat air patrol over
+  its own ground instead of being sent to your base, so its mines and factories are defended and you
+  are met on the way in.
+
+- **The enemy's aircraft losses are logged.** Every airframe that leaves the world writes a line
+  saying how long it lasted. Twenty-six launches and no airstrike looked identical in the log to
+  twenty-six aeroplanes shot down on the way in; now it does not.
+
+- **The CAPTURE button is gone from the commander panel.** Capturing is an ordinary order: drop a
+  travel point on the yellow capture marker, in the 3D view or on the map, and the selection goes
+  and takes the base — as the last point of a route if you like. The button only ever did the same
+  thing to the nearest target, and having it there hid the fact that any order can be a capture.
+
+- **The build radius is 2.5 km, down from 7 km.** Bases are compact now; industry sits inside the
+  perimeter you are actually defending instead of sprawling most of the way to the enemy. The
+  naval dock is the one exception and keeps its own, larger radius.
+
+### Fixed
+
+- **The CAPTURE button did nothing and did not say why.** It refused outright when nothing in the
+  selection carried troops, and the refusal was written to a status line that is not drawn
+  anywhere — so pressing it with an ordinary vehicle selected looked like a dead button. It now
+  always issues the order and tells you on screen how many of the selected units can actually take
+  ground, rather than silently deciding for you. Which vehicles those are is also named once per
+  mission in the BepInEx console, because that fact lives in the game's asset files and cannot be
+  read any other way.
+
+- **Aircraft nobody bought no longer show up.** The Ground Control Duel handed each faction a
+  free AI air force — the mission's own `AIAircraftLimit`, which the game tops up automatically —
+  so two aircraft were already flying before you had spent anything, and the enemy's were picked
+  at random from the whole aircraft list regardless of whether the only airbase on its side could
+  handle them. That is where the aircraft that "crashed" in the first minute of a round came from.
+  Both sides now start with an empty sky: every aircraft in the duel is one a commander paid for.
+  Yours come from the AIR window; the enemy's are bought and launched one at a time, from an
+  airbase picked first so it never buys an airframe its strip cannot take. The duel's authored
+  aircraft stock is zero on both sides for the same reason — an AI aircraft either side puts up
+  now costs money, which is what makes it an economy duel. Aircraft **you** fly yourself are
+  untouched: those come out of your own allocation, as always.
+
+- **Aircraft fly the order you gave them.** Telling an aircraft to go somewhere and watching it
+  turn round and land at home with most of a tank left was the game's own idle timer: an AI pilot
+  that goes fifteen ticks without a target lands, and the mod was writing the commanded
+  destination *after* that decision had already been taken. A commanded aircraft is no longer
+  counted as idle, and running its racks dry no longer ends the order either — it finishes the
+  travel points first. Genuinely low fuel still sends it home, as it should.
+
+### Added
+
+- **Capturing bases, for both commanders.** Taking an airbase in Nuclear Option just means
+  standing a unit that carries troops inside the base's capture ring — but nobody was ever telling
+  units to go and do it. Now:
+  - **Capturable bases are marked on the map once you have found one.** The base game draws no map
+    icon at all for an airbase you do not own, so there was nothing to aim at. Now any capturable
+    base a unit of yours has been near is marked `CAPTURABLE <name>` — on the tactical map while it
+    is open, in the 3D view while it is not — in yellow when nobody holds it and orange when
+    somebody does. Finding one is announced in the battle log.
+
+    Finding it is the condition: fly or drive within range and it appears, and then it **stays**
+    marked for the rest of the mission whether or not anything of yours is still nearby, because an
+    airfield does not move. Aircraft find bases from 12 km, ground units from 4 km. Bases you have
+    not found behave like ordinary ground, so you cannot capture-order something you have not seen.
+  - **Right-click a base you do not own and the selected units go and take it** — in the 3D view or
+    on the tactical map. It is an ordinary order, so it composes with everything else: queue travel
+    points across the map and make the last one a base, and the route ends in a capture. The order
+    snaps to the middle of the ring, so units stop somewhere that actually captures instead of
+    wherever the cursor happened to land, which on a zoomed-out map can be a kilometre out.
+  - The main CMD panel also has a **CAPTURE** button naming the nearest base you could take and how
+    far away it is, as a shortcut for the common case.
+  - **The enemy commander expands.** Every twenty seconds it picks the nearest base nobody holds,
+    commits up to three of its capture-capable units, and keeps them pointed at the ring until the
+    base is its. If it owns nothing that can take ground, buying one jumps the queue ahead of
+    whatever its plan wanted — an expansion with no troops is an expansion that never happens.
+    Empty bases always outrank defended ones, however far away they are.
+  - Captures by either side land in the battle log.
+  - **The duel map now has bases to take.** Maris Airport, Sandrift Airbase and South Boscali
+    General Aviation are switched on as neutral, capturable ground between the two strips. Taking
+    one gives you a new place to launch from and a new 7 km circle to build in — and, with the new
+    lose condition, one more base the other side has to take off you before you are out.
+
+    The map's stock airbases are not laid out symmetrically, so this is a compromise rather than a
+    mirror: Maris is 9 km from the Boscali strip while Primeva's nearest two are 18 and 23 km. Say
+    if it plays lopsided and the set is one line to change.
+
+- **Win and lose conditions.** A faction left holding no airbase loses the match outright, and
+  everyone else wins it. This runs on every mission, not just the duel, and does not depend on
+  the mission author having written a capture objective for each base.
+
+- **Buildings must be built near a base you hold.** Both commanders can only place structures
+  within 7 km of an airbase their faction owns, so capturing ground is what opens up new places
+  to build. The ghost turns red and says so outside the radius. The distance is
+  `Economy / BuildRadiusKm` in the config file.
+
+- **The enemy commander obeys the same siting rules you do.** It used to drop mines and factories
+  wherever its dice landed, including across the highway — which is what left its own convoys
+  stuck against a building and its taxiing aircraft driving into one. It now checks each candidate
+  site against the same road and collision rules the player's build preview enforces, and tries
+  another spot when one is blocked.
+
+### Added
+
+- **Ground Control Duel now has an opponent that plays.** The enemy commander used to be off
+  until you found it in the settings, and on the duel map that meant nobody ever attacked you.
+  It now runs on that mission whether or not the setting is on (the button reads `(MISSION)`),
+  and it plays harder there than anywhere else:
+  - **Starts the moment the match does.** Both enemy reviews used to be able to burn their first
+    turn in the menu, so the opponent's first purchase and first gold mine could land half a
+    minute into the match. They now wait for a mission instead of a clock.
+  - Opens with half again its starting balance, and builds up to four gold mines and two
+    factories instead of two and one.
+  - Spends 45% of its pot every 30 seconds on up to five vehicles, so its depots keep pushing
+    convoys out instead of trickling.
+  - Buys and launches its own aircraft, one at a time and only types the airbase it is launching
+    from can actually take, so the air raids keep coming without anything writing itself off on
+    a highway strip.
+  - **Knows where your base is.** Every building you own is on its map the moment you place it,
+    which is what aims its convoys and its strike aircraft at you — the game's ground AI drives
+    at the nearest enemy it knows about, and its pilots only ever shoot at what their faction has
+    tracked. Your vehicles and aircraft stay unrevealed: it knows the address, not your army.
+
+  Everything past the opening balance is still earned at your rates, so killing its convoys and
+  bombing its mines stalls it exactly the way it would stall you.
+
+- **A see-through preview while you site a building.** The building itself follows the cursor,
+  green where the ground is clear and red where it is not, and the BUILD window says why it is
+  red. A site is blocked when it sits on a road or overlaps another unit or building; trees,
+  rocks and scenery are ignored, because clearing those to build is normal. A click on a red
+  site is refused instead of taking your money. Your placements land unrotated so what you saw
+  is what you get.
+- **Buildings you build are named for what they are.** A gold mine reads as "Gold Mine" on the
+  map, in its unit panel and in the repair list, instead of reporting the industrial prefab it is
+  wearing ("Refinery Structure"); a built factory reads as "<UNIT> Factory". Mines built before
+  this change keep the old name until the mission is restarted.
+- **Buildings you put down can be selected.** Click one or drag a box over it like any vehicle
+  and it opens the unit panel with its level, its upgrade button, and a **DESTROY BUILDING**
+  button (which asks for a second click and gives no refund). Until now the game's rule that
+  buildings are not selectable applied to your own gold mines and factories too, so a mine you
+  had just built could not be clicked at all — the only way to upgrade one was the BUILD list.
+
+- **Repair crews.** Buildings never healed on their own in this game, and until now there was
+  nothing a commander could do about a bombed refinery. `CMD → BUILD → REPAIR` lists every
+  damaged building you own with its condition, and **SEND CREW** hires one of your faction's
+  repair trucks for a flat fee and drops it beside that building. It drives in, repairs it, and
+  is yours afterwards — and it can be shelled on the way, so a crew is a bet, not a button. A
+  building that already has a crew coming says so instead of letting you pay twice.
+  - The enemy commander hires crews too, at the same price, and fixes its most valuable damaged
+    building first. Bombing its economy now has to be kept up.
+- **Every building in the game is buildable.** `CMD → BUILD → STRUCTURES` is the whole
+  encyclopedia — radars, depots, hangars, bunkers, ammunition dumps, industry, civilian
+  structures — grouped by the categories the game files them under. Each one does whatever its
+  own prefab does: a radar you build sees for you, a depot you build supplies for you. Prices come
+  from what the game itself values each building at, times the new `BuildingCostMultiplier`
+  config knob, so nothing goes stale when the game adds a building.
+- **The BUILD window has tabs.** ECONOMY (mines, factories and their upgrades), STRUCTURES and
+  REPAIR, with the damaged-building count on the REPAIR tab so you notice without looking.
+
+- **Build menu and an economy to spend it on.** `CMD → BUILD` is a new window with two things in
+  it, both paid for out of the faction money pool and both capped at three levels.
+  - **Gold mines.** Buy one and click a spot on the ground to site it. It looks like an ordinary
+    industrial building and pays your faction a standing income for as long as it stands. Upgrade
+    it twice for more income.
+  - **Factory upgrades.** A factory normally drops one unit into the faction reserve per
+    production cycle. Upgrade it and it drops two, then three.
+  - The enemy commander builds mines and buys upgrades under the same rules and the same prices,
+    out of its own funds, whenever it is switched on — so its economy grows too, and its mines
+    are targets worth striking.
+  - Prices and the income rate are in the `Economy` section of the BepInEx config file.
+
+- **A 1v1 mission that comes with the mod: Ground Control Duel.** It installs itself into your
+  mission list the first time the plugin loads — no separate download, but copy the whole
+  `GroundControlRts` folder into `BepInEx\plugins`, not just the DLL.
+  - Base against base: each commander starts with one highway airstrip, two vehicle depots and
+    a few AA mounts, about 20 km apart. Every other airbase on the map is shut down.
+  - No pre-placed armies and no pre-placed industry. Both sides start with the same money, the
+    same aircraft pool and the same buildings, and build everything else with `CMD → BUILD`.
+  - Capturing the enemy airstrip wins the match. No nukes.
+- **Factories can be built, not just upgraded.** `CMD → BUILD` has a `BUILD FACTORY` button
+  and a `PRODUCES` picker listing your own faction's ground vehicles: choose the unit, buy the
+  factory, click a site, and from then on it feeds that unit into the faction reserve for your
+  depots to deploy. The product and the cycle time are fixed once it is built. The enemy
+  commander builds its first factory the same way, at the same price.
+  - New config values in the `Economy` section: `FactoryBuildCost` and
+    `FactoryProductionSeconds`.
+
+### Changed
+
+- **Placement is less fiddly.** Hold the repeat key (Left Shift by default) while siting a
+  building to stay in placement mode and put down another one, the way supply deployments already
+  worked. Right-click now backs out of any armed placement — build, supply target, air mission
+  area or trailer destination — and Escape cancels a build placement like it already cancelled
+  the others.
+
 ### Fixed
 
 - **World markers no longer cover what they mark.** Every marker drawn over the 3D view - the
@@ -67,6 +590,27 @@
   **ballistic strike calls** (call for fire on a map point).
 
 ### Changed
+
+- **The enemy commander is a fair opponent instead of a difficulty slider.** CAUTIOUS / STANDARD
+  / AGGRESSIVE are gone, and so is the income stipend AGGRESSIVE handed the enemy faction. The
+  setting is now **OFF / MATCHED / MISSION FUNDS**. In MATCHED the enemy is put on your economy
+  the first time it reviews — your faction's authored starting balance, your kill reward, your
+  tax rate — and from there both commanders buy ground units out of the same kind of pot, a
+  quarter of it every 30 seconds, up to three vehicles. Neither side is handed anything. MISSION
+  FUNDS is the same commander on whatever balance the mission author gave it, for missions that
+  are meant to be lopsided.
+- **The enemy commander now plays to a tactical plan, and the plan is what decides the game.**
+  It reads what you are fielding every 30 seconds and commits to the counter: air power pulls it
+  onto **AIR DEFENCE**, massed armour onto **FIRE SUPPORT** (artillery), a static line of guns
+  and launchers onto **SPEARHEAD** (armour to run through it), and nothing dominant onto a cheap
+  **RECON SCREEN**. Switching takes two reviews of the same read, so a counter you just paid for
+  gets a minute to work before it answers — and shifting your own composition flips its plan
+  back, which is the loop. It will still buy one launcher ahead of the plan if you are flying and
+  it has no air defence at all.
+- **The enemy's plan and balance are shown under your funds readout**, because a plan you cannot
+  see is a plan you cannot answer. Hidden with the same **Faction funds** toggle.
+- Settings written by an older build carry over except for the enemy commander, which is a new
+  key (`EnemyCommanderMode`) and starts at OFF.
 
 - **New UI look.** Flat near-black translucent plates, one accent hairline instead of neon fill
   everywhere, and much lighter text — the old green-on-green buttons were hard to read. Panel

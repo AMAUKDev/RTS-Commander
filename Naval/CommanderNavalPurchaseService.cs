@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NuclearOption.Networking;
 using RoadPathfinding;
@@ -34,6 +34,69 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
     }
 
     internal IReadOnlyList<ShipDefinition> ShipDefinitions => shipDefinitions;
+
+    /// <summary>The dock level the local faction holds. Zero means no naval purchases at all.</summary>
+    internal static int DockLevel => CommanderEconomyService.GetNavalDockLevel(CommanderGameAccess.GetLocalHq());
+
+    /// <summary>
+    /// The dock level a hull needs before anyone may buy it. This is the whole ladder, and it is
+    /// keyed on <see cref="ShipType"/> rather than on a per-ship table so a patch that adds a hull
+    /// files itself under the class it already belongs to instead of falling off the list.
+    /// </summary>
+    internal static int GetRequiredDockLevel(ShipDefinition? definition)
+    {
+        return definition == null ? CommanderEconomyService.MaxLevel : GetRequiredDockLevel(definition.shipType);
+    }
+
+    /// <summary>The ladder itself, in one place: the self-check below reads the same table the
+    /// purchase gate does, or it would only ever be checking a copy of it.</summary>
+    private static int GetRequiredDockLevel(ShipType type)
+    {
+        return type switch
+        {
+            // Small craft: what a quayside can service on day one.
+            ShipType.PB or ShipType.LC => 1,
+            // Escorts.
+            ShipType.FFL or ShipType.FFG => 2,
+            // Capital ships and amphibious warfare.
+            _ => 3,
+        };
+    }
+
+    internal static bool IsUnlocked(ShipDefinition? definition, int dockLevel)
+    {
+        return definition != null && dockLevel >= GetRequiredDockLevel(definition);
+    }
+
+    internal static string GetLevelUnlockLabel(int level)
+    {
+        return level switch
+        {
+            <= 0 => "nothing",
+            1 => "patrol boats and landing craft",
+            2 => "corvettes and frigates",
+            _ => "destroyers, carriers and assault ships",
+        };
+    }
+
+    /// <summary>
+    /// Ship classes a dock at <paramref name="level"/> unlocks, for the economy self-check. The
+    /// ladder has to start at nothing and end at everything, or the dock is either pointless or a
+    /// hull nobody can ever buy.
+    /// </summary>
+    internal static int CountShipTypesAtLevel(int level)
+    {
+        int count = 0;
+        foreach (ShipType type in System.Enum.GetValues(typeof(ShipType)))
+        {
+            if (level >= GetRequiredDockLevel(type))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
     internal ShipDefinition? SelectedDefinition => shipDefinitions.Count == 0
         ? null
         : shipDefinitions[Mathf.Clamp(selectedIndex, 0, shipDefinitions.Count - 1)];
@@ -136,6 +199,17 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
             SetStatus("No friendly faction is available.");
             return;
         }
+        int dockLevel = CommanderEconomyService.GetNavalDockLevel(hq);
+        if (dockLevel <= 0)
+        {
+            SetStatus("No naval dock. Build one on the shore from the BUILD window before buying ships.");
+            return;
+        }
+        if (!IsUnlocked(definition, dockLevel))
+        {
+            SetStatus($"{definition.unitName} needs a level {GetRequiredDockLevel(definition)} naval dock.");
+            return;
+        }
         if (hq.factionFunds < definition.value)
         {
             SetStatus($"Insufficient faction funds for {definition.unitName}.");
@@ -148,11 +222,13 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
         }
 
         pendingDefinition = definition;
+        // The mod's own map, like every other placement. restoreTacticalMap now means "it was
+        // already open", so only a purchase that opened it puts it away again.
         restoreTacticalMap = tacticalMapService.IsOpen;
-        tacticalMapService.OpenFullscreen();
+        tacticalMapService.OpenForPlacement();
         tacticalMapService.SuppressMapFollow = true;
         mapClickTracker.Reset();
-        SetStatus("Select a water rally point on the fullscreen map. The ship will enter from a friendly map-edge sea lane.");
+        SetStatus("Select a water rally point on the tactical map. The ship will enter from a friendly map-edge sea lane.");
     }
 
     internal void CancelRallySelection()
@@ -178,6 +254,13 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
         {
             SetStatus("No sea lane is close enough to that rally point. Select open navigable water.");
             mapClickTracker.Reset();
+            return;
+        }
+
+        if (!IsUnlocked(definition, CommanderEconomyService.GetNavalDockLevel(hq)))
+        {
+            SetStatus($"{definition.unitName} is no longer unlocked. Check the naval dock is still standing.");
+            CancelRallySelection(showStatus: false);
             return;
         }
 
@@ -238,6 +321,54 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
         FinishRallySelection();
     }
 
+    /// <summary>
+    /// Buys and launches a ship for a faction that is not the player's. Same sea-lane entry, same
+    /// dock gate, same funds — the enemy commander calls this rather than carrying a second copy of
+    /// the entry search, which is the part that knows where a hull can actually be put in the water.
+    /// Returns what it spent, 0 when nothing was bought.
+    /// </summary>
+    internal float TryPurchaseForHq(FactionHQ hq, ShipDefinition definition, GlobalPosition rallyPoint)
+    {
+        Spawner? spawner = NetworkSceneSingleton<Spawner>.i;
+        if (!hq.IsServer
+            || spawner == null
+            || hq.factionFunds < definition.value
+            || !IsUnlocked(definition, CommanderEconomyService.GetNavalDockLevel(hq)))
+        {
+            return 0f;
+        }
+
+        RoadNetwork? seaLanes = NetworkSceneSingleton<LevelInfo>.i?.seaLanes;
+        if (seaLanes == null
+            || !seaLanes.Exists()
+            || !seaLanes.TryGetNearestPoint(rallyPoint, out GlobalPosition lanePoint, out _)
+            || !TryFindEntry(definition, hq, lanePoint, out GlobalPosition spawnPosition, out Quaternion rotation))
+        {
+            return 0f;
+        }
+
+        Ship? ship;
+        try
+        {
+            ship = spawner.SpawnShip(definition.unitPrefab, spawnPosition, rotation, hq, null, 1f, holdPosition: false);
+        }
+        catch (Exception exception)
+        {
+            CommanderPlugin.Log.LogError($"Enemy naval reinforcement spawn failed: {exception}");
+            return 0f;
+        }
+
+        if (ship == null)
+        {
+            return 0f;
+        }
+
+        float cost = Mathf.Max(0f, definition.value);
+        hq.AddFunds(-cost);
+        CommanderGameAccess.TrySetDestination(ship, lanePoint);
+        return cost;
+    }
+
     private bool TryFindEntry(
         ShipDefinition definition,
         FactionHQ hq,
@@ -261,6 +392,13 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
             MinimumEntryBandMeters,
             Mathf.Min(mapSettings.MapSize.x, mapSettings.MapSize.y) * EntryBandMapFraction);
 
+        // A hull belongs beside the harbour that unlocked it. Without a dock there is nothing to
+        // anchor to and the ship still has to come from somewhere, so it sails in off the map edge
+        // the way it always did; with one, every sea lane on the map is a candidate and the nearest
+        // to the dock wins. The edge band was what put a purchase on the far coast: it threw away
+        // every lane point near the dock before the score was ever asked.
+        bool hasDock = CommanderEconomyService.TryGetNavalDockPosition(hq, out GlobalPosition dock);
+
         entryCandidates.Clear();
         foreach (Road road in seaLanes.roads)
         {
@@ -275,13 +413,15 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
                 float edgeDistance = Mathf.Min(
                     halfWidth - Mathf.Abs(point.x),
                     halfHeight - Mathf.Abs(point.z));
-                if (edgeDistance < 0f || edgeDistance > entryBand)
+                if (edgeDistance < 0f || (!hasDock && edgeDistance > entryBand))
                 {
                     continue;
                 }
 
                 Vector3 direction = GetInwardRoadDirection(road, i, point);
-                float score = GetFriendlyEntryScore(hq, point, rallyPoint, edgeDistance);
+                float score = hasDock
+                    ? FastMath.Distance(point, dock) + FastMath.Distance(point, rallyPoint) * 0.15f
+                    : GetFriendlyEntryScore(hq, point, rallyPoint, edgeDistance);
                 entryCandidates.Add(new EntryCandidate(point, direction, score));
             }
         }
@@ -440,10 +580,9 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
         pendingDefinition = null;
         tacticalMapService.SuppressMapFollow = false;
         mapClickTracker.Reset();
-        tacticalMapService.CloseFullscreen();
-        if (restoreTacticalMap)
+        if (!restoreTacticalMap)
         {
-            tacticalMapService.Open();
+            tacticalMapService.Close();
         }
         restoreTacticalMap = false;
     }
@@ -458,13 +597,9 @@ internal sealed class CommanderNavalPurchaseService : ICommanderActivate, IComma
         pendingDefinition = null;
         tacticalMapService.SuppressMapFollow = false;
         mapClickTracker.Reset();
-        if (tacticalMapService.IsFullscreenOpen)
+        if (!restoreTacticalMap)
         {
-            tacticalMapService.CloseFullscreen();
-        }
-        if (restoreTacticalMap)
-        {
-            tacticalMapService.Open();
+            tacticalMapService.Close();
         }
         restoreTacticalMap = false;
         if (showStatus)

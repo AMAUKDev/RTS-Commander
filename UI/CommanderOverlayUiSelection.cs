@@ -194,12 +194,15 @@ internal sealed partial class CommanderOverlayUi
         DrawOrderRow(oldEnabled);
     }
 
-    /// <summary>Patrol, stance, retreat, formation and the action attached to the next waypoint.</summary>
+    /// <summary>Patrol, stance, retreat, formation, the action attached to the next waypoint, and
+    /// — only when the selection actually holds one — an aircraft's rearm run.</summary>
     private void DrawOrderRow(bool oldEnabled)
     {
         const float buttonWidth = 88f;
         float rowY = selectionBarRect.yMax - 40f;
-        float x = selectionBarRect.xMax - (buttonWidth * 5f + 24f) - 14f;
+        bool hasAircraft = moveService.HasSelectedAircraft;
+        float columns = hasAircraft ? 6f : 5f;
+        float x = selectionBarRect.xMax - (buttonWidth * columns + (columns - 1f) * 6f) - 14f;
         bool commandable = moveService.HasCommandableSelection;
 
         GUI.enabled = oldEnabled && commandable && moveService.CanSelectionPatrol;
@@ -236,6 +239,17 @@ internal sealed partial class CommanderOverlayUi
         {
             moveService.CyclePendingWaypointAction();
         }
+
+        // Only drawn for a selection with aircraft in it: the row is already five buttons wide and
+        // a permanently dead sixth is worse than a row that changes width.
+        if (hasAircraft
+            && GUI.Button(
+                new Rect(x + (buttonWidth + 6f) * 5f, rowY, buttonWidth, 34f),
+                new GUIContent("RESUPPLY", "Sends the selected aircraft to the nearest airbase the faction holds and lands them. The airframe goes back into stock, funds and all, ready to relaunch fully armed."),
+                CommanderUiTheme.Button))
+        {
+            moveService.ResupplySelectedAircraft();
+        }
         GUI.enabled = oldEnabled;
     }
 
@@ -266,7 +280,7 @@ internal sealed partial class CommanderOverlayUi
     /// </summary>
     private string GetSelectionCardText()
     {
-        if (!CommanderScheduler.IsDue(ref nextSelectionCardAt, 0.25f))
+        if (!CommanderScheduler.IsDueRealtime(ref nextSelectionCardAt, 0.25f))
         {
             return selectionCardText;
         }
@@ -333,7 +347,7 @@ internal sealed partial class CommanderOverlayUi
         // Rounds change on every shot, so this is polled rather than event driven, but the walk
         // touches every weapon on the unit - a few times a second is enough for a readout.
         bool sameUnit = ReferenceEquals(focused, loadoutUnit);
-        if (sameUnit && !CommanderScheduler.IsDue(ref nextLoadoutAt, 0.25f))
+        if (sameUnit && !CommanderScheduler.IsDueRealtime(ref nextLoadoutAt, 0.25f))
         {
             return;
         }

@@ -77,11 +77,18 @@ internal sealed class CommanderModeController : MonoBehaviour
         CommanderSpawnService spawnService = services.Register(
             new CommanderSpawnService(selectionService, factionVehicleService, tacticalMapService),
             CommanderTier.Advanced);
+        CommanderEconomyService economyService =
+            services.Register(new CommanderEconomyService(), CommanderTier.Advanced);
         services.Register(new CommanderEnemyCommanderService(), CommanderTier.Advanced);
+        // Core tier: the round has to be able to end whether or not RTS mode is open.
+        services.Register(new CommanderVictoryService());
 
         CommanderRepairService repairService = services.Register(new CommanderRepairService());
         // Routes tick last so orders act on this frame's spawns and kills.
         CommanderMoveService moveService = services.Register(new CommanderMoveService(selectionService));
+        // Capture ticks after the move service because a capture order is a move order: it hands
+        // the destination to that service rather than issuing its own for the player's units.
+        services.Register(new CommanderCaptureService(selectionService));
         // Route lines live inside the map's icon layer, so they tick after the routes they draw.
         services.Register(new CommanderMapRouteRenderer(selectionService, moveService));
 
@@ -100,6 +107,7 @@ internal sealed class CommanderModeController : MonoBehaviour
             navalPurchaseService,
             samSiteAnalyzerService,
             samSiteService,
+            economyService,
             UnlockAdvancedFeatures,
             () => Deactivate()));
 
@@ -115,6 +123,7 @@ internal sealed class CommanderModeController : MonoBehaviour
             supplyHeliService,
             mobileEmplacementService,
             airCommandService,
+            economyService,
             boxSelectService);
         inputController.SetPovCrewUi(povCrewUi);
         SceneManager.activeSceneChanged += OnActiveSceneChanged;
@@ -123,6 +132,11 @@ internal sealed class CommanderModeController : MonoBehaviour
     private void Update()
     {
         CommanderUiScale.RefreshResolutionPreset();
+
+        // The persistent tick runs before RTS mode is ever opened, and the enemy commander has to
+        // know which mission it is in to decide whether the duel rules apply, so the mission name
+        // is refreshed here rather than only on activation.
+        CommanderFeatureGate.RefreshMission();
         services.TickPersistent(CommanderFeatureGate.AdvancedFeaturesEnabled);
         if (!IsActive)
         {

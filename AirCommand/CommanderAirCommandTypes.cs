@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using NuclearOption.Networking;
@@ -22,6 +22,19 @@ internal sealed partial class CommanderAirCommandService
     {
         Primary,
         Mixed,
+    }
+
+    /// <summary>Why a commanded aircraft is being put on the deck at a named airbase.</summary>
+    internal enum LandingIntent
+    {
+        /// <summary>Not landing anywhere in particular; the mission is flying.</summary>
+        None,
+
+        /// <summary>Land at a field the faction holds. The Basegame recovers the airframe.</summary>
+        Resupply,
+
+        /// <summary>Land inside a takeable base's ring and hold it until the base falls.</summary>
+        Capture,
     }
 
     internal sealed class AirMissionOption
@@ -170,6 +183,19 @@ internal sealed partial class CommanderAirCommandService
         internal GameObject? MapVisual { get; set; }
         internal bool Returning { get; set; }
         internal bool RtbIssued { get; set; }
+
+        /// <summary>The airbase this aircraft has been told to put itself down on, if any.</summary>
+        internal Airbase? LandingBase { get; set; }
+        internal LandingIntent Intent { get; set; }
+
+        /// <summary>The pilot has been switched into the landing state for <see cref="LandingBase"/>.</summary>
+        internal bool LandingIssued { get; set; }
+
+        /// <summary>Stopped on the deck and held there, rather than left to the Basegame taxi state.</summary>
+        internal bool Parked { get; set; }
+
+        /// <summary>Capture strength this mission added to the airframe and still owes back.</summary>
+        internal float GrantedCaptureStrength { get; set; }
 
         /// <summary>Travel points the aircraft flies through before settling on the mission area.</summary>
         internal List<GlobalPosition> Route { get; } = new();

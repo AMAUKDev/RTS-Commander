@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using System.Reflection;
 using UnityEngine;
 using System.Collections.Generic;
@@ -147,10 +147,24 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         GlobalPosition water = waterDestination;
         bool groundValid = hasGroundDestination;
         bool waterValid = hasWaterDestination;
+        CommanderCaptureService.CaptureTarget target = default;
+        bool capture = attackTarget == null
+            && groundValid
+            && TryClaimCapturePoint(ref ground, out target);
+        if (capture)
+        {
+            water = ground;
+        }
+
         ApplyOrder(
             unit => unit is Ship ? (waterValid, water) : (groundValid, ground),
             attackTarget,
-            append);
+            append,
+            capture ? target : null);
+        if (capture)
+        {
+            CommanderCaptureService.Instance?.AnnounceCaptureOrder(target, selectionService.SelectedUnits[0]);
+        }
     }
 
     /// <summary>Same as the world order, but from a tactical-map coordinate.</summary>
@@ -162,7 +176,124 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         }
 
         GlobalPosition destination = attackTarget != null ? attackTarget.GlobalPosition() : point;
-        ApplyOrder(_ => (true, destination), attackTarget, append);
+        CommanderCaptureService.CaptureTarget target = default;
+        bool capture = attackTarget == null
+            && TryClaimCapturePoint(ref destination, out target);
+        ApplyOrder(_ => (true, destination), attackTarget, append, capture ? target : null);
+        if (capture)
+        {
+            CommanderCaptureService.Instance?.AnnounceCaptureOrder(target, selectionService.SelectedUnits[0]);
+        }
+    }
+
+    /// <summary>
+    /// An order that lands on a base this faction could take is a capture order: the destination
+    /// snaps to the middle of the ring, so the units stop somewhere that actually captures rather
+    /// than wherever the cursor was. Both order paths ask, so a capture works the same from the 3D
+    /// view and from the map, on its own or as the last of a queued string of travel points.
+    /// </summary>
+    private static bool TryClaimCapturePoint(
+        ref GlobalPosition point, out CommanderCaptureService.CaptureTarget target)
+    {
+        CommanderCaptureService? capture = CommanderCaptureService.Instance;
+        if (capture == null)
+        {
+            target = default;
+            return false;
+        }
+
+        return capture.TryResolveCaptureOrder(ref point, out target);
+    }
+
+    /// <summary>
+    /// An aircraft's half of an order. Three cases, in order: an order that resolved as a capture
+    /// puts the aircraft down inside the ring and holds the base; an order dropped on a field the
+    /// faction already holds is a rearm run; anything else is an ordinary travel or attack point.
+    /// </summary>
+    /// <remarks>
+    /// The capture case exists because an aircraft handed the ground squad's hold point simply flew
+    /// over the airfield and went home — a travel point is a place to be, not a place to land. The
+    /// resupply case is the same order read the other way round, which is what the player expects
+    /// when they right-click their own base with a fighter selected.
+    /// </remarks>
+    private void IssueAircraftOrder(
+        Aircraft aircraft,
+        GlobalPosition point,
+        Unit? attackTarget,
+        bool append,
+        CommanderCaptureService.CaptureTarget? capture)
+    {
+        CommanderAirCommandService? airCommand = CommanderAirCommandService.Instance;
+        if (airCommand == null)
+        {
+            return;
+        }
+
+        if (attackTarget == null
+            && capture.HasValue
+            && capture.Value.Airbase != null
+            && airCommand.SetAircraftLandingOrder(
+                aircraft,
+                capture.Value.Airbase,
+                CommanderAirCommandService.LandingIntent.Capture,
+                append))
+        {
+            return;
+        }
+
+        if (attackTarget == null
+            && !capture.HasValue
+            && CommanderCaptureService.TryResolveOwnedAirfield(point, aircraft.NetworkHQ, out Airbase home)
+            && airCommand.SetAircraftLandingOrder(
+                aircraft,
+                home,
+                CommanderAirCommandService.LandingIntent.Resupply,
+                append))
+        {
+            return;
+        }
+
+        airCommand.SetAircraftOrder(aircraft, point, attackTarget, append);
+    }
+
+    /// <summary>Sends every aircraft in the selection to the nearest field its faction holds.</summary>
+    internal int ResupplySelectedAircraft()
+    {
+        CommanderAirCommandService? airCommand = CommanderAirCommandService.Instance;
+        if (airCommand == null)
+        {
+            return 0;
+        }
+
+        int sent = 0;
+        IReadOnlyList<Unit> selection = selectionService.SelectedUnits;
+        for (int i = 0; i < selection.Count; i++)
+        {
+            if (selection[i] is Aircraft aircraft && airCommand.ResupplyAircraft(aircraft))
+            {
+                sent++;
+            }
+        }
+
+        return sent;
+    }
+
+    /// <summary>True when the selection holds at least one aircraft the commander can task.</summary>
+    internal bool HasSelectedAircraft
+    {
+        get
+        {
+            IReadOnlyList<Unit> selection = selectionService.SelectedUnits;
+            for (int i = 0; i < selection.Count; i++)
+            {
+                if (selection[i] is Aircraft aircraft && CommanderAirCommandService.IsTaskableAircraft(aircraft))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     /// <summary>
@@ -207,7 +338,8 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
     private void ApplyOrder(
         System.Func<Unit, (bool valid, GlobalPosition point)> resolvePoint,
         Unit? attackTarget,
-        bool append)
+        bool append,
+        CommanderCaptureService.CaptureTarget? capture = null)
     {
         if (selectionService.SelectedUnits.Count > 0)
         {
@@ -230,11 +362,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
             Unit unit = selectionService.SelectedUnits[i];
             if (unit is Aircraft aircraft)
             {
-                CommanderAirCommandService.Instance?.SetAircraftOrder(
-                    aircraft,
-                    resolvePoint(unit).point,
-                    attackTarget,
-                    append);
+                IssueAircraftOrder(aircraft, resolvePoint(unit).point, attackTarget, append, capture);
                 continue;
             }
 

@@ -19,6 +19,9 @@ internal static class CommanderAlertPatches
     private static void RecordDamagePostfix(Unit __instance, PersistentID lastDamagedBy)
     {
         CommanderAlertService.Instance?.NotifyDamage(__instance, lastDamagedBy);
+        // Same hook, other side of the board: a hostile commander that is being shot at goes to
+        // its defence posture even when nothing of its own ever saw the shooter.
+        CommanderEnemyCommanderService.Instance?.NotifyUnitDamaged(__instance);
     }
 
     [HarmonyPatch(typeof(Unit), nameof(Unit.ReportKilled))]
@@ -26,5 +29,58 @@ internal static class CommanderAlertPatches
     private static void ReportKilledPostfix(Unit __instance)
     {
         CommanderAlertService.Instance?.NotifyKilled(__instance);
+    }
+
+    /// <summary>
+    /// <c>Airbase.CaptureFaction</c> is the one place an airbase changes owner — the capture ring
+    /// completing, the last defender dying, a mission forcing it — so one pair of hooks here
+    /// reports every base that changes hands, for the player and against them alike. The prefix
+    /// only remembers who held it, because the postfix cannot ask any more.
+    /// </summary>
+    [HarmonyPatch(typeof(Airbase), "CaptureFaction")]
+    [HarmonyPrefix]
+    private static void CaptureFactionPrefix(Airbase __instance, out FactionHQ? __state)
+    {
+        __state = __instance.CurrentHQ;
+    }
+
+    [HarmonyPatch(typeof(Airbase), "CaptureFaction")]
+    [HarmonyPostfix]
+    private static void CaptureFactionPostfix(Airbase __instance, FactionHQ? __state)
+    {
+        // Missions hand their airbases to their factions during load, and every one of those is a
+        // "capture" as far as this method is concerned. Same ten-second grace the arrival alerts use.
+        if (ReferenceEquals(__state, __instance.CurrentHQ) || UnityEngine.Time.timeSinceLevelLoad < 10f)
+        {
+            return;
+        }
+
+        CommanderAlertService.Instance?.NotifyCapture(CaptureText(__instance, __state));
+    }
+
+    private static string CaptureText(Airbase airbase, FactionHQ? previous)
+    {
+        string label = CommanderCaptureService.GetAirbaseLabel(airbase).ToUpperInvariant();
+        FactionHQ? local = CommanderGameAccess.GetLocalHq();
+        FactionHQ? owner = airbase.CurrentHQ;
+        if (owner != null && ReferenceEquals(owner, local))
+        {
+            return $"CAPTURED {label}";
+        }
+
+        if (previous != null && ReferenceEquals(previous, local))
+        {
+            return $"LOST {label}";
+        }
+
+        return owner == null
+            ? $"{label} IS NEUTRAL"
+            : $"{FactionName(owner)} TOOK {label}";
+    }
+
+    private static string FactionName(FactionHQ hq)
+    {
+        string? name = hq.faction?.factionName;
+        return string.IsNullOrEmpty(name) ? "ENEMY" : name!.ToUpperInvariant();
     }
 }

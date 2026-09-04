@@ -61,12 +61,22 @@ internal sealed class CommanderMobileEmplacementService : ICommanderActivate, IC
         nextAvailabilityCheckAt = 0f;
     }
 
+    internal void CancelDestinationSelection()
+    {
+        if (!AwaitingDestination)
+        {
+            return;
+        }
+
+        pendingRelocation = null;
+        SetStatus("Trailer relocation cancelled.");
+    }
+
     public void TickActive()
     {
-        if (AwaitingDestination && CommanderGameInput.CancelDown)
+        if (CommanderGameInput.CancelDown)
         {
-            pendingRelocation = null;
-            SetStatus("Trailer relocation cancelled.");
+            CancelDestinationSelection();
         }
     }
 

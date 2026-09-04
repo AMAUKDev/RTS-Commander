@@ -2,7 +2,8 @@
 
 A BepInEx mod for **Nuclear Option** that adds RTS-style command gameplay on top of the base
 game: a free camera, unit selection, orders, group control, ground/naval production and an
-air-tasking layer. Intended mainly for the **Escalation** and **Terminal Control** game modes.
+air-tasking layer. Intended mainly for the **Escalation** and **Terminal Control** game modes,
+and it ships with a 1v1 base-against-base mission of its own, **Ground Control Duel**.
 ## Requirements
 
 - Nuclear Option
@@ -22,6 +23,9 @@ air-tasking layer. Intended mainly for the **Escalation** and **Terminal Control
 Nuclear Option\BepInEx\plugins
 ```
 
+Copy the whole folder, not just the DLL: the missions that ship with the mod sit next to it
+and are installed into your mission list the first time the game loads the plugin.
+
 ---
 
 ## Quick start
@@ -30,7 +34,8 @@ Nuclear Option\BepInEx\plugins
 | --- | --- |
 | Enter/leave RTS mode | `CMD` button on the left edge (while outside an aircraft) |
 | Move camera | `W` `A` `S` `D` `Q` `E`, hold `Shift` to boost |
-| Look around | Hold `MMB` |
+| Zoom | Mouse wheel (moves toward the cursor) |
+| Look around / orbit | Hold `MMB` |
 | Select a unit | `LMB` |
 | Add to selection | `Shift` + `LMB` |
 | Remove one unit from the selection | `Shift` + `LMB` on a selected unit |
@@ -155,6 +160,10 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
   move it anywhere (**Settings → Reset UI layout** puts it back). They are drawn **while you are
   flying too**, which is the point — otherwise you never find out you are losing units. Clicking
   one selects the unit and jumps to it. Toggle in **Settings → Gameplay**.
+- **Base captures** raise their own toast the moment an airfield changes hands, anywhere on the
+  map and either way round: `CAPTURED MARIS AIRPORT`, `LOST K92 HIGHWAY STRIP`,
+  `PRIMEVA TOOK SANDRIFT AIRBASE`. These ignore the combat-alerts toggle — losing a base is not
+  something to find out about later.
 - **Battle log**: the `LOG` tab in the Order of Battle keeps the last events with mission
   timestamps. Click an entry to jump to the unit.
 - **Condition and ammo**: the selection bar shows condition, ammo and the current order for the
@@ -178,16 +187,39 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
   map exactly as if you had just spawned it.
 - An aircraft only acts on a travel point while it has no target of its own, and only once its
   AI pilot is in its combat state (not while taking off, taxiing or landing).
+- **RESUPPLY**, on the selection bar whenever the selection holds aircraft, sends them to the
+  nearest airbase your faction holds and lands them there. Landing is how the game recovers an
+  airframe — it goes back into your stock with its cost refunded, ready to relaunch fully armed
+  and fuelled — so this is the rearm, not a refuelling truck. The route to the field each aircraft
+  picked is drawn as an ordinary yellow travel line, so you can see where they are going.
+  Right-clicking aircraft onto a base you already own does exactly the same thing.
+- **Right-clicking aircraft onto a base you do not own is a capture order**: they fly there, land,
+  and hold the ring. See *Capturing bases*.
+- **AI aircraft you launch enter the map already airborne over the base you launched them from**,
+  at flying speed and pointed at their mission area, rather than taxiing out of a hangar. The
+  game's AI pilot cannot reliably get off a highway strip — the taxi and takeoff states answer any
+  scrape or stall by ejecting the pilot, which is why commander-launched aircraft used to die a few
+  metres from the hangar while the ones you fly yourself never do. Which airframes a base offers is
+  unchanged, and it still has to be a base that accepts the type.
 
 ---
 
 ## Camera
 
-- Free camera with 3D unit selection.
-- **Auto centre and follow**: selecting a unit snaps the camera to it and follows it. Selecting
-  several units frames the whole group so a convoy fits on screen. Toggle in
-  **Settings → Gameplay → Command**.
-- `Space` centres on the selection; hold it to centre and follow.
+- Free camera with 3D unit selection. Pan speed scales with how high you are, so the camera nudges
+  down among the vehicles and crosses the map from survey height.
+- **Zoom on the mouse wheel**, toward whatever the cursor is over, so zooming in also recentres on
+  the thing you were pointing at.
+- **Hold `MMB` to orbit** the point under the cursor, so what you were studying stays on screen.
+  Prefer turning in place? **Settings → Camera**.
+- **Follow without the yank**: selecting a unit follows it but leaves your view where you put it.
+  The camera only travels when the unit is off screen or too far away to read, and then it glides
+  there rather than cutting. Selecting several units frames the whole group so a convoy fits on
+  screen. Both toggles live in **Settings → Camera**.
+- `Space` centres on the selection immediately; hold it to centre and follow.
+- **Optional edge scrolling** (**Settings → Camera**, off by default).
+- Pan speed, zoom speed, look sensitivity, smoothing and map drag speed are all live sliders in
+  **Settings → Camera**.
 - **Camera bookmarks**: `Ctrl` + `F1`–`F4` stores the current viewpoint, `F1`–`F4` jumps back to
   it. Useful for your front line, your airbase and your carrier. Toggle in
   **Settings → Gameplay**.
@@ -204,6 +236,9 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
 - Selected units draw their full remaining route on the map, numbered in the order they will
   drive it.
 - Radar coverage overlay generated from Unit Systems.
+- **This is the only map the mod asks you to work on.** Air mission areas and naval rally points
+  are placed on it, so no order ever swaps the screen out for the game's fullscreen map and back.
+  `M` still opens the fullscreen map when you want it, and `Esc` comes back.
 
 ---
 
@@ -213,7 +248,7 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
 
 - Buy ground units with the faction money pool, or deploy vehicles from the faction reserve.
 - Vehicles are grouped by their base-game categories.
-- Optional rally points for spawned vehicles, plus a spawn queue.
+- New vehicles stage beside the depot until ordered; optional rally points override that, plus a spawn queue.
 - **Reinforce group**: set a depot to put every unit it builds straight into a control group,
   so a battlegroup rebuilds itself without re-boxing it every time.
 - Faction reserve system that holds certain unit types back after a factory produces them.
@@ -225,7 +260,30 @@ Cycled from the selection bar, per unit, and they stick whether or not the unit 
 
 ### Naval
 
-- Purchasable naval units and naval resupply missions for selected ships.
+Nobody puts a ship in the water without a **naval dock** — not you, not the enemy commander.
+
+- Build one from `CMD → BUILD → ECONOMY`. It has to stand on dry land at the **water's edge**, and
+  it is the one building allowed further out than the ordinary build radius: it gets its own,
+  larger one (12 km by default), because the coast usually is.
+- It upgrades three times, and each level opens a heavier class of hull:
+
+  | Dock level | Unlocks |
+  | --- | --- |
+  | 1 | Patrol boats, landing craft |
+  | 2 | Corvettes, frigates |
+  | 3 | Destroyers, carriers, assault ships |
+
+- Hulls you cannot afford the dock for stay on the naval list with the level they need written
+  next to them, so the ladder is something to build toward rather than a list that mysteriously
+  grows.
+- **Purchased ships enter at the sea lane nearest your dock** and sail to the rally point you pick
+  on the fullscreen map. The dock is the harbour, so a hull arrives beside the thing that paid for
+  it rather than somewhere on the map edge.
+- Naval resupply missions for selected ships are unchanged and need no dock.
+
+If a faction on your map cannot reach the coast within 12 km of anything it holds, raise **naval
+dock radius** in `Settings → Gameplay` (or `Economy / NavalDockRadiusKm` in the config file) —
+capturing a base nearer the sea works too.
 
 ### Air Command
 
@@ -235,26 +293,321 @@ Dispatch aircraft with custom loadouts on a specific mission:
   engage anything in range.
 - **CAS**, **ARAD** and **Strike** only attack targets inside their assigned area (red circle).
 - ARAD supports saturation attacks; missions in progress can be edited, relocated or recalled.
+- Opening **AIR COMMAND** brings the tactical map up beside the window, and mission areas are placed
+  on that map or in the 3D view. Right-click, or the game's Cancel binding, backs out.
 - Aircraft come from the faction reserve when possible, otherwise they are purchased. Aircraft
   that return successfully restore the airframe or refund the money.
+- **Fixed-wing only.** Everything that steers a commanded aircraft is built on the game's aeroplane
+  pilot AI; helicopters and VTOLs fly a different one entirely and cannot be given a mission from
+  here — by you or by the enemy commander. Helicopters do their own job through the supply heli
+  missions instead, and the enemy commander buys them and lets the game's own helicopter AI fly
+  them. The one airframe kind the enemy will not buy is one whose pilot the base game gives no AI
+  flight state to at all — it would simply fall out of the sky. Which aircraft that actually covers
+  is data inside the game's asset files, so the mod reads it at runtime rather than guessing, and
+  writes the whole list to the BepInEx console once per mission: pilot type, role and price for
+  every airframe, with anything it refuses to buy marked.
+
+### Build (economy)
+
+`CMD → BUILD` opens the build menu. It has three tabs — **ECONOMY**, **STRUCTURES** and
+**REPAIR**. Everything in all three is paid for out of the faction money pool, and the enemy
+commander builds, upgrades and repairs under exactly the same rules and prices.
+
+Placement works the same everywhere: buy, then click the site in the 3D view. A see-through copy
+of the building follows the cursor — **green** where the ground is clear, **red** where it is
+not, with the reason in the window's status line. A site is refused when it sits on a road, when
+it sits on **any airbase's runway or taxiway** (a strip with a refinery on it is a strip nothing
+can land on), when it overlaps another unit or building, or when it is **more than 2.5 km from an
+airbase your faction holds** — you build around the bases you have taken, so taking ground is what opens up
+somewhere new to build. Trees, rocks and scenery are ignored, because clearing those to build is
+normal. Buildings you place land unrotated, so what the preview shows is what you get. The enemy
+commander is held to all the same rules, and the radius is the **build radius** slider in
+`Settings → Gameplay` (`Economy / BuildRadiusKm` in the config file).
+
+The **naval dock** is the single exception: it has its own, larger radius and its own shoreline
+rule, because a dock that cannot reach the sea is not a dock. See [Naval](#naval).
+
+Hold the repeat key (Left Shift by default) while clicking to stay in placement mode and site
+another one; right-click or Escape backs out.
+
+**Anything you build can be selected** — clicked, or caught in a box select, like a vehicle.
+Its unit panel carries the level and upgrade button for a mine or factory, and a **DESTROY
+BUILDING** button that asks for a second click and gives no refund. (Buildings you did not build
+stay unselectable; the map would be unusable otherwise.)
+
+#### ECONOMY
+
+- **Gold mine.** Buy one, then click a spot on the ground in the 3D view to site it. It looks
+  like an ordinary industrial building and it pays your faction a standing income for as long as
+  it is standing — so it is worth defending, and an enemy one is worth bombing.
+- **Factory.** Pick what it should build with the `PRODUCES` arrows — the list is your
+  own faction's ground vehicles — then buy it and click a site, the same way as a mine. From
+  then on it drops that unit into the faction reserve every production cycle, and your depots
+  deploy it. Both the product and the cadence are fixed the moment it is built, so choose
+  before you site it. Selecting a built factory shows the time left on the current run and how
+  long a run takes — `NEXT 2 x AGM IN 3:12 (EVERY 4:00)` — above the upgrade button.
+- **Naval dock.** The gate on every ship purchase, for both commanders. Site it on dry land at
+  the water's edge; three levels, each opening a heavier class of hull. See [Naval](#naval).
+- **Three levels, for mines, factories and docks alike.** Upgrading a mine raises its income;
+  upgrading a
+  factory raises how many units it drops into the faction reserve each production cycle, from one
+  per cycle up to three.
+- Levels last as long as the building does. Destroy the mine or the factory and the investment
+  goes with it.
+
+#### STRUCTURES
+
+Every other building the game ships, buildable for a price: radars, depots, hangars, bunkers,
+ammunition dumps, industry, civilian structures. They are listed under the same categories the
+game files them under, and each one does whatever its own prefab does — a radar you build sees
+for you, a depot you build supplies for you, a hangar services aircraft.
+
+Prices are not a table in the mod. Each building costs what the game itself values it at, times
+`BuildingCostMultiplier`, so the ladder stays sane and a game patch that adds a building adds a
+row without any work here.
+
+#### REPAIR
+
+Buildings in the base game do not heal on their own — a repair vehicle has to drive out to them.
+The REPAIR tab lists every damaged building you own with its condition, and **SEND CREW** hires
+one of your faction's repair trucks for a flat fee and drops it beside that building. It drives
+in, fixes it, and stays yours afterwards; it can also be shot on the way. A building that already
+has a crew coming says so, so you do not pay twice.
+
+The enemy commander repairs too, and puts its most valuable damaged building first — so a
+refinery you bombed does not stay bombed unless you keep hitting it.
+
+Prices, the income rate and the production cycle live in the `Economy` section of the BepInEx
+config file (`GoldMineCost`, `GoldMineIncomePerMinute`, `FactoryBuildCost`,
+`FactoryProductionSeconds`, `FactoryUpgradeCost`, `BuildingCostMultiplier`, `RepairCrewCost`,
+`BuildRadiusKm`), because every mission authors its own faction balance and the defaults are
+tuned for the large strategic ones.
+
+## Capturing bases
+
+Taking an airbase means putting a unit that carries troops inside its capture ring and keeping it
+there — the game's own rule, not the mod's. What the mod adds is the two things that were missing:
+knowing which bases are takeable, and anyone actually going to take them.
+
+**You have to find a base before you can take it.** The game draws no map icon for an airbase you
+do not own, so nothing marks them until one of your units gets close: aircraft spot a base from
+12 km, ground units from 4 km. Once found it is marked `CAPTURABLE <name>` — on the tactical map
+while it is open, in the 3D view while it is not, yellow when nobody holds it and orange when
+somebody does — and it **stays** marked for the rest of the mission, whether or not you still have
+anything nearby. Finding one shows up in the battle log. Scouting the map is therefore worth doing
+on its own.
+
+**Right-click a base you have found and do not own** — in the 3D view or on the tactical map — and
+the selected units go and take it. That is the whole interface, and it is deliberately just an order, so it
+composes with everything else: queue travel points across the map with the waypoint key and make
+the last one a base, and the route ends in a capture. The order snaps to open ground inside the
+capture ring, so your units stop somewhere that actually counts rather than wherever the cursor
+landed — and somewhere they are not trying to drive through the terminal building to reach.
+
+**A base being taken shows a progress bar** on its marker, in the 3D view and on the map:
+`CAPTURING MARIS AIRPORT [####------] 40%` in green while it is going your way, `CONTESTED` in red
+while somebody else is pulling it the other way. The game itself shows this nowhere, so without it
+a squad standing in the ring looks like a squad doing nothing.
+
+**To send a capture squad somewhere else, just order it there.** The capture snap covers the whole
+ring, so a squad already standing on a base would otherwise have every order near that base pulled
+straight back to the middle of it. A squad already committed to a base is treated as being
+redirected instead, and you get a `LEAVING <BASE>` toast to confirm it. Adding units to the
+selection that were *not* sent there still reads as reinforcing the capture.
+
+There is no CAPTURE button. Placing the order on the marker *is* the interface, and a button that
+did the same thing to the nearest base only hid that.
+
+The mod tells you how many of the selected units can actually move the capture bar. It does not
+refuse the order when none of them can — which units carry troops is not obvious, and an order
+that silently does nothing is worse than one that warns. The first time a mission loads, the
+BepInEx console also names every vehicle in your faction that carries capture strength.
+
+**Aircraft can take a base too.** Put the order on a capture marker with aircraft selected and they
+fly to that airfield, land on it, and hold it until it falls, then take off again on their own —
+give them any other order and they take off immediately. Each aircraft parked in the ring is worth
+about a light vehicle to the capture — **aircraft capture strength** in `Settings > Gameplay`,
+where 0 turns it off entirely. It exists because in the base game an aeroplane contributes nothing
+at all to a capture unless it happens to be carrying a troop pod. An airfield taken this way still wants ground units to hold it,
+because parked aeroplanes are easy to kill.
+
+Capturing works on any mission, and it is a core feature, so it is there whether or not advanced
+mode is on.
+
+**The enemy commander expands too.** It reviews every twenty seconds: nearest base nobody holds,
+up to three of its capture-capable units committed, and it keeps them pointed at the ring until
+the base changes hands. If it has nothing that can take ground it buys one before anything else —
+and an empty base always outranks a defended one, however far away. Captures by either side raise
+a toast and land in the battle log.
+
+Capturing is worth doing beyond denying the other side: a base you hold is somewhere to launch
+from, a new circle to build in, and one more base the enemy has to take off you before the
+lose condition below catches you.
+
+> The enemy commander's expansion is still carried by ground vehicles, so its expansion is a drive,
+> not a raid. Landing troops from a helicopter is the fast version and is not built for it yet —
+> say if you want it.
+
+## Winning and losing
+
+**A faction that is left holding no airbase loses the match**, and everyone else wins it. This is
+the mod's own rule and it applies on every mission, so the round always has an end even where the
+mission author never wrote a capture objective for a particular base. It is also why the build
+radius matters: lose your last base and you can neither launch nor build, so the game is over.
+
+## Ground Control Duel (the mission that ships with the mod)
+
+The mod installs one mission of its own, **Ground Control Duel**, into your mission list the
+first time it loads. Nothing extra to download — but the whole `GroundControlRts` folder has
+to be in `BepInEx\plugins`, not just the DLL. Host it from the normal mission list.
+
+It is a **1v1 commander duel, base against base**:
+
+- Each side starts with a single highway airstrip, two vehicle depots and a few AA mounts.
+  Every other airbase on the map is shut, so there is nowhere else to fly from and nowhere to
+  divert to. The two strips sit about 20 km apart.
+- Nothing else is placed. No armies, no industry, no front line. Both sides open with the same
+  faction balance, the same aircraft pool and the same buildings.
+- You grow from there with `CMD → BUILD`: gold mines for income, factories for units, radars
+  and defences from the structures catalogue, and the depots to buy ground forces outright. That
+  is the whole match — economy first, then the army it pays for.
+- **Win by capturing the enemy airstrip.** A faction left holding no airbase loses the match
+  outright — on this map that is the one strip it started with. Everything either commander builds is a building, so
+  bombing the other commander's economy is as legitimate as killing their tanks — and both of you
+  can pay a crew to put it back up.
+- **Three neutral airbases are in play**: Maris Airport, Sandrift Airbase and South Boscali
+  General Aviation, sitting between and around the two strips. Nobody owns them at the start and
+  either side can take one. The map's stock airbases are not symmetric — Maris is 9 km from the
+  Boscali strip, while Primeva's nearest two are 18 and 23 km — so this is a compromise rather
+  than a mirror. Tell me if it plays lopsided.
+- **The sky starts empty.** Neither side is given a free AI air force the way a normal mission is,
+  and neither side is given free airframes: every AI aircraft in the duel is one a commander paid
+  for and launched. Yours come out of the AIR window, the opponent's out of its own funds. The jet
+  **you** fly is unaffected — that comes out of your own allocation, as in any mission.
+- No nukes: the escalation thresholds are out of reach and the warheads are restricted.
+- Advanced features are on automatically, and **the enemy commander is already MATCHED when the
+  match starts** — on the duel it is the opponent, not a setting you have to find. The Gameplay
+  button reads `MATCHED  (SET BY MISSION)`, and its first purchase and first gold mine go in
+  immediately rather than up to half a minute later.
+
+**The duel opponent plays harder than the enemy commander does elsewhere**, on purpose — a duel
+you are never attacked in is not a duel:
+
+- It opens with **half again your starting balance**, and it keeps building its economy to four
+  gold mines and two factories instead of stopping at two and one.
+- It spends **45% of its pot every 30 seconds, on up to five vehicles**, instead of a quarter on
+  three, so its convoys keep coming out of its depots rather than trickling.
+- It **buys and launches its own aircraft**, up to eight in the air at once, choosing the airbase
+  first and then an airframe that airbase will actually take — so nothing it buys writes itself off
+  trying to use a strip it does not fit — and then **gives each aeroplane a strike mission** over
+  your base, which is what turns bought aircraft into air raids.
+- It **composes a wing rather than repeating one aeroplane**: air superiority the moment you put
+  an aircraft up and it has no fighter, a couple of transport helicopters while you have an army on
+  the ground, ground attack the rest of the time. Inside a role it buys the cheapest airframe that
+  fits until it is running two of them and only then spends up, so the opening minutes are cheap
+  light aircraft and the expensive ground-attack jets arrive when its economy can carry them.
+- It **knows where your base is** — every building you own is on its map from the moment you put
+  it down. Your tanks and aircraft are not: it knows the address, not your army. That is what
+  points its convoys and its strike aircraft at you instead of leaving them milling around their
+  own strip.
+
+Everything after the opening balance is still earned at your rates, so it is a head start, not a
+cheat: kill its convoys and bomb its mines and it stalls exactly like you would.
+
+Only the host can construct buildings, because buildings are spawned server-side. In a
+two-human duel the guest commander plays the depots, the orders and the air war, and the host
+builds.
+
+The mission is mod content: it is rewritten from the plugin folder whenever the shipped copy
+changes, so save it under a different name before editing it.
 
 ## Enemy commander
 
-Off by default. Cycle it in **Settings → Gameplay**.
+Off by default on every mission except **Ground Control Duel**, which forces it on. Cycle it in
+**Settings → Gameplay**.
 
 The base game only ever deploys the fixed vehicle reserve a mission was authored with — no
 opposing faction ever spends money. Turning this on gives every hostile faction a commander that
-reviews its funds every 30 seconds, buys reinforcements into its reserve, and shapes the buy
-against what you are fielding: if you are flying a lot, it buys air defence.
+reviews its funds every 30 seconds and buys reinforcements into its reserve.
 
-- **Cautious** — one unit per review, a quarter of the surplus.
-- **Standard** — two units per review.
-- **Aggressive** — four units per review, half the surplus, plus a small income stipend for the
-  enemy faction. This one is deliberately a cheat.
+**It starts where you start, and it earns what you earn.** There is no difficulty slider and no
+stipend: both commanders buy ground units out of `factionFunds` at the same rate, so the only
+thing that decides the ground war is what each of you spends it on.
+
+- **Matched** — the enemy is put on your faction's economy the first time it reviews: your
+  faction's authored starting balance, your kill reward, your tax rate. Turn it on at mission
+  start; it mirrors the opening position, not whatever you happen to be holding.
+- **Mission funds** — same commander, but it keeps the balance and income the mission author
+  gave it. Use this on missions that are meant to be lopsided.
+
+Both modes spend a quarter of the pot per review, up to three vehicles, which is a tempo limit
+rather than an advantage — it stops either side dumping its whole balance in the first minute.
+
+### Tactical plans
+
+Every 30 seconds the enemy commander reads what you are fielding and commits to the plan that
+counters it. It takes **two** reviews of the same read to switch, so a counter you just paid for
+gets a minute to work before it answers.
+
+| You are fielding | It builds | Because |
+| --- | --- | --- |
+| Aircraft | **Air defence** — SAMs and AAA | An umbrella is the cheapest answer to air power |
+| Massed armour | **Fire support** — artillery behind a screen | Guns break a column faster than trading tank for tank |
+| A static line of guns and launchers | **Spearhead** — MBTs and AFVs | Armour runs through a line before it can range |
+| Nothing dominant | **Recon screen** — light vehicles | Cheap mass, take ground while you decide |
+
+Its current plan and balance are shown under your funds readout, openly — a plan you cannot see
+is a plan you cannot answer. Shift your own composition and its plan flips, which is the game:
+massing armour pulls it onto artillery, so bring air; leaning on air pulls it onto SAMs, so bring
+armour. Whatever the plan says, it will still buy one launcher first if you are flying and it has
+no air defence left at all.
 
 Bought units are deployed and driven by the base game's own depot and ground AI, so they behave
 like any other enemy convoy. Requires advanced features, and only runs in singleplayer or when
 hosting.
+
+### What it does with what it owns
+
+Four things the commander does that are not "buy another tank":
+
+- **It defends its base.** A share of its ground force is posted on a ring around every base it
+  holds instead of being sent at you — air-defence vehicles first, because a launcher gives an
+  attack the least and a base the most. Anything hostile inside 15 km of one of its bases **on its
+  own radar picture**, or any hit on anything it owns, puts it in a defence posture for two
+  minutes: the ring roughly doubles, pulled back out of the attack, and stands down again once the
+  raid is over so it does not turtle for the rest of the match. Its readout on the HUD says
+  **DEFENDING** while it is up. Come in low, under its radar, and you meet the resting ring
+  instead. If it cannot man the ring out of what it owns it buys AAA and SAM vehicles for it,
+  ahead of whatever plan it is running, and it keeps one **radar building at every base** —
+  rebuilding it when you bomb it, because a base with no radar cannot see you coming. It puts
+  defensive structures around its bases too, once its economy is running.
+
+- **It flies its aircraft at you.** On the duel, every airframe it owns is given a real strike
+  mission over your territory out of the same Air Command machinery your own aircraft use, with
+  one in three flying air superiority instead once you have aircraft up. Without that the game's
+  own pilot AI turns for home after fifteen ticks with nothing found, which is most of the way
+  across the map — an enemy that bought aircraft and never once bombed anything. Duel-only: every
+  other mission launches its own AI aircraft and may script what they do.
+- **It puts out a radar screen.** It is short of a radar vehicle before it is short of anything
+  else in its plan, and it drives the ones it has out to standing overwatch posts on the
+  approaches from your territory, on the highest ground near each post. It has always been handed
+  the location of your *buildings* — without that it has nothing to attack — but never anything
+  about your army. This is how it earns that instead: everything it sees that way, it sees because
+  a truck is parked somewhere you can shoot it.
+- **It goes to sea.** It builds its own naval dock on the nearest coast to a base it holds,
+  upgrades it, and buys hulls under exactly the same level gate you are on.
+
+Airframes and hulls are both bought out of **saved** funds rather than a per-review slice: an
+aircraft is worth several ground vehicles, and a share that expires with the review it was set in
+never once adds up to one. Either fund hands its surplus back to the ground spender after a few
+reviews, so a faction that can never put anything up does not withhold money from its convoys
+forever.
+
+Its **buildings** are saved for the same way, and for the same reason. The unit spender used to
+take its share off the top every review, so the balance never climbed to a factory's price and the
+enemy commander spent whole matches building nothing but gold mines. Whatever it wants next — a
+mine, then a factory, then a naval dock — is now held back from the unit spender until it is
+bought, and released again if the map turns out to have nowhere to put it.
 
 ## Unit systems
 
@@ -262,6 +615,13 @@ hosting.
   adjustable target altitude.
 - Force Jacknifes to repair the nearest valid target instead of the highest-priority one.
 - Relocate containers using nearby tractors or flatbeds.
+
+## Game speed
+
+`CMD` carries a **1x / 2x / 4x** row. An RTS spends a lot of its time watching a convoy cross a
+map. It writes the game's own time scale — the same knob its slow-motion binding uses — so it is
+**host only**, and it drops back to 1x when you leave commander mode, so nothing carries a
+fast-forward into flying or into the next mission.
 
 ## Experimental
 
@@ -284,6 +644,13 @@ hosting.
   rearm truck to top up ammo rather than to heal.
 - Automatic retreat only triggers for units that currently hold a RTS order. The RETREAT
   button works on anything.
+- Buildings and repair crews are spawned through the server, so only a host (or singleplayer)
+  can build or dispatch them. The BUILD menu says so rather than failing quietly.
+- A repair crew is a real vehicle, not a heal timer. If the faction fields no repair truck, or the
+  crew is destroyed on the way in, the repair does not happen.
+- A factory's production interval is registered once, when it is built, and cannot be changed
+  afterwards. That is a base-game limitation, and it is why an upgrade raises the batch size
+  instead of the rate.
 - Nothing here is balanced yet.
 
 ## Building from source

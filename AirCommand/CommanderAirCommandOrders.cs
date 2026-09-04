@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using NuclearOption.Networking;
@@ -41,6 +41,7 @@ internal sealed partial class CommanderAirCommandService
             && aircraft.Player == null
             && aircraft.pilots != null
             && aircraft.pilots.Length > 0
+            && HasPlanePilot(aircraft)
             && CommanderGameAccess.IsFriendlyUnit(aircraft, CommanderGameAccess.GetLocalHq());
     }
 
@@ -58,11 +59,40 @@ internal sealed partial class CommanderAirCommandService
         pendingAreaSelection = null;
         pendingMissionRelocation = null;
         pendingAdoption = aircraft;
-        tacticalMapService.OpenFullscreen();
-        tacticalMapService.SuppressMapFollow = true;
-        mapClickTracker.Reset();
+        OpenOrderMap();
         UpdatePendingAreaPreview();
         SetStatus($"Select the {GetModeLabel(selectedMode)} mission area for {CommanderGameAccess.GetUnitLabel(aircraft)}.");
+    }
+
+    /// <summary>
+    /// Puts a mission on an aircraft that belongs to a faction the player does not command, which is
+    /// how the enemy commander tasks the airframes it buys. Everything downstream of a mission is
+    /// already faction-agnostic — <c>ChooseMissionTarget</c> reads <c>aircraft.NetworkHQ</c> and that
+    /// HQ's own tracking database — so this is the mission record and nothing else: no pin in the
+    /// player's unit list, no status line, no map circle on the player's map.
+    /// <para>
+    /// It is load-bearing, not decoration. Without a mission the Basegame <c>NoTarget</c> timer flies
+    /// a freshly launched AI aircraft home after 15 ticks with nothing found, which is exactly why
+    /// an enemy that was buying aircraft was never seen making an attack run.
+    /// </para>
+    /// </summary>
+    internal bool TryTaskAiAircraft(Aircraft? aircraft, AirCommandMode mode, GlobalPosition center, float radius)
+    {
+        FactionHQ? hq = aircraft?.NetworkHQ;
+        if (aircraft == null
+            || hq == null
+            || aircraft.disabled
+            || aircraft.Player != null
+            || aircraft.pilots == null
+            || aircraft.pilots.Length == 0
+            || !HasPlanePilot(aircraft)
+            || missions.ContainsKey(aircraft))
+        {
+            return false;
+        }
+
+        missions[aircraft] = new AirMission(hq, mode, center, radius, 0f, false, false, false, 0f);
+        return true;
     }
 
     private bool TryAdoptAircraft(Aircraft aircraft, AirCommandMode mode, GlobalPosition center, float radius)
@@ -127,6 +157,10 @@ internal sealed partial class CommanderAirCommandService
             DestroyMissionMapVisual(mission);
         }
 
+        // Any plain order supersedes a landing order, which is what gets an aircraft parked on a
+        // base it was told to take back into the air the moment the player wants it elsewhere.
+        ClearLandingOrder(aircraft, mission, release: true);
+
         if (!append)
         {
             mission.Route.Clear();
@@ -156,6 +190,7 @@ internal sealed partial class CommanderAirCommandService
             return;
         }
 
+        ClearLandingOrder(aircraft, mission, release: true);
         mission.Route.Clear();
         mission.RouteIndex = 0;
         mission.ForcedTarget = null;
@@ -199,9 +234,7 @@ internal sealed partial class CommanderAirCommandService
         pendingAreaSelection = null;
         pendingMissionRelocation = aircraft;
         selectedMissionAircraft = aircraft;
-        tacticalMapService.OpenFullscreen();
-        tacticalMapService.SuppressMapFollow = true;
-        mapClickTracker.Reset();
+        OpenOrderMap();
         UpdatePendingAreaPreview();
         RefreshMissionMapVisuals();
         SetStatus("Select the new mission-area center on the tactical map or in the 3D world.");
@@ -246,13 +279,50 @@ internal sealed partial class CommanderAirCommandService
             return;
         }
 
+        // Refuse before the map opens, not after the area is placed. SpawnMission checks the same
+        // thing, but by then the player has picked a target and watched nothing happen, which reads
+        // as a broken button rather than an empty treasury.
+        FactionHQ? hq = CommanderGameAccess.GetLocalHq();
+        if (hq != null
+            && hq.GetUnitSupply(option.Definition) <= 0
+            && hq.factionFunds < option.Definition.value)
+        {
+            string price = UnitConverter.ValueReading(option.Definition.value)
+                ?? option.Definition.value.ToString("F1");
+            SetStatus($"Cannot afford {GetAircraftLabel(option.Definition)} ({price}). "
+                + $"Faction funds {CommanderEconomyService.FundsLabel(hq.factionFunds)}.");
+            return;
+        }
+
         pendingMissionRelocation = null;
         pendingAreaSelection = new PendingAreaSelection(option, airbase.Airbase);
-        tacticalMapService.OpenFullscreen();
-        tacticalMapService.SuppressMapFollow = true;
-        mapClickTracker.Reset();
+        OpenOrderMap();
         UpdatePendingAreaPreview();
         SetStatus("Select the mission area on the tactical map or in the 3D world. The game's Cancel binding cancels.");
+    }
+
+    /// <summary>
+    /// Arms the map an order is placed on. That is the mod's own tactical map, never the fullscreen
+    /// game map: an order that swapped the whole screen out from under the player and back again is
+    /// the reason this pair exists. The flag records whether this order is what opened the map, so
+    /// only an order that opened it puts it away.
+    /// </summary>
+    private void OpenOrderMap()
+    {
+        openedMapForOrder = tacticalMapService.OpenForPlacement();
+        tacticalMapService.SuppressMapFollow = true;
+        mapClickTracker.Reset();
+    }
+
+    private void CloseOrderMap()
+    {
+        tacticalMapService.SuppressMapFollow = false;
+        mapClickTracker.Reset();
+        if (openedMapForOrder)
+        {
+            tacticalMapService.Close();
+        }
+        openedMapForOrder = false;
     }
 
     internal bool TrySetAreaFromWorld(Vector2 screenPosition)

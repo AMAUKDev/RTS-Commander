@@ -337,7 +337,7 @@ internal sealed partial class CommanderSamSiteService
     {
         site.InitialSupply = 40000f;
         SpawnFoundation(site);
-        site.JacknifeDefinition = FindFactionJacknifeDefinition();
+        site.JacknifeDefinition = CommanderGameAccess.FindRepairVehicleDefinition();
         site.JacknifeInventory = site.JacknifeDefinition != null ? MaxJacknifeInventory : 0;
         for (int i = 0; i < site.Layout.Count; i++)
         {
@@ -353,23 +353,6 @@ internal sealed partial class CommanderSamSiteService
         site.SamBatteryQueued = true;
         site.Phase = ConstructionPhase.Ready;
         site.Status = $"Debug site complete. Jacknife inventory: {site.JacknifeInventory}/{MaxJacknifeInventory}.";
-    }
-
-    private static VehicleDefinition? FindFactionJacknifeDefinition()
-    {
-        List<VehicleDefinition> factionVehicles = new();
-        CommanderGameAccess.CollectFactionVehicleDefinitions(factionVehicles);
-        return factionVehicles.FirstOrDefault(definition =>
-        {
-            if (definition?.unitPrefab == null)
-            {
-                return false;
-            }
-            string identity = $"{definition.unitName} {definition.code} {definition.jsonKey}";
-            return identity.IndexOf("jacknife", StringComparison.OrdinalIgnoreCase) >= 0
-                || identity.IndexOf("jackknife", StringComparison.OrdinalIgnoreCase) >= 0
-                || definition.unitPrefab.GetComponentInChildren<Repairer>(true) != null;
-        });
     }
 
     private void HandleFoundationCargoActivated(int siteId, Unit cargo)
@@ -1215,62 +1198,11 @@ internal sealed partial class CommanderSamSiteService
         }
     }
 
+    // The shared helper lives in CommanderGameAccess because gold mine placement needs the
+    // same drop-to-terrain.
     private static GlobalPosition SnapConstructionTargetToTerrain(GlobalPosition target)
     {
-        Vector2[] offsets =
-        {
-            Vector2.zero,
-            new(3f, 0f),
-            new(-3f, 0f),
-            new(0f, 3f),
-            new(0f, -3f),
-            new(6f, 0f),
-            new(-6f, 0f),
-            new(0f, 6f),
-            new(0f, -6f),
-            new(8f, 8f),
-            new(-8f, 8f),
-            new(8f, -8f),
-            new(-8f, -8f)
-        };
-        for (int i = 0; i < offsets.Length; i++)
-        {
-            Vector3 local = new GlobalPosition(
-                target.x + offsets[i].x,
-                target.y,
-                target.z + offsets[i].y).ToLocalPosition();
-            Vector3 origin = new(local.x, Datum.LocalSeaY + 10000f, local.z);
-            if (GameAssets.i == null)
-            {
-                continue;
-            }
-
-            RaycastHit[] hits = Physics.RaycastAll(
-                origin,
-                Vector3.down,
-                20000f,
-                PhysicsLayers.StaticsMask,
-                QueryTriggerInteraction.Ignore);
-            float highestTerrainY = float.MinValue;
-            Vector3 terrainPoint = default;
-            for (int hitIndex = 0; hitIndex < hits.Length; hitIndex++)
-            {
-                RaycastHit hit = hits[hitIndex];
-                if (hit.collider != null
-                    && hit.collider.sharedMaterial == GameAssets.i.terrainMaterial
-                    && hit.point.y > highestTerrainY)
-                {
-                    highestTerrainY = hit.point.y;
-                    terrainPoint = hit.point;
-                }
-            }
-            if (highestTerrainY > float.MinValue)
-            {
-                return terrainPoint.ToGlobalPosition();
-            }
-        }
-
-        return target;
+        return CommanderGameAccess.SnapToTerrain(target);
     }
 
     private static void TeleportGroundVehicle(GroundVehicle vehicle, GlobalPosition target)

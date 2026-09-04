@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using NuclearOption.Networking;
 using UnityEngine;
 
@@ -18,6 +18,8 @@ internal static class CommanderTacticalMapControlsPatch
     private static bool leftButtonHeld;
     private static Vector2 leftButtonDownPosition;
     private static bool leftButtonMoved;
+    private static Vector2 lastMousePosition;
+    private static bool dragTracking;
 
     private static readonly AccessTools.FieldRef<DynamicMap, bool> FollowingCamera =
         AccessTools.FieldRefAccess<DynamicMap, bool>("followingCamera");
@@ -40,6 +42,11 @@ internal static class CommanderTacticalMapControlsPatch
         {
             CommanderMapControls(__instance);
         }
+        else
+        {
+            // Dragging off the map and back must not arrive as one huge jump.
+            dragTracking = false;
+        }
 
         UpdateCameraTracking(__instance);
         return false;
@@ -53,24 +60,39 @@ internal static class CommanderTacticalMapControlsPatch
             map.SetZoomLevel(Mathf.Clamp(map.mapScaleCenter.transform.localScale.x * (zoomAxis + 1f), 1f, 40f));
         }
 
-        float zoomScale = Mathf.Max(map.mapScaleCenter.localScale.x, 0.01f);
+        // Screen pixels per map unit, which is what the Basegame uses for its own cursor maths.
+        // The old code divided only by the zoom level and so ignored the fact that the compact
+        // Tactical Map is a scaled-down copy of the fullscreen one - which is exactly why
+        // dragging the modded map crawled while the fullscreen map felt normal.
+        float pixelsPerMapUnit = Mathf.Max(map.mapImage.transform.lossyScale.x, 0.0001f);
         float keyboardHorizontal = CommanderGameInput.GetAxis("Move Map Horizontal");
         float keyboardVertical = CommanderGameInput.GetAxis("Move Map Vertical");
         if (keyboardHorizontal != 0f || keyboardVertical != 0f)
         {
-            float speed = 300f * Time.unscaledDeltaTime / zoomScale;
+            float speed = 600f * Time.unscaledDeltaTime / pixelsPerMapUnit;
             PositionOffset(map) += new Vector2(keyboardHorizontal * speed, keyboardVertical * speed);
         }
 
         // A plain left drag pans, exactly like the Basegame map. The middle button keeps
         // panning too, and a left drag with the box-select modifier belongs to the box.
         bool boxDragging = CommanderBoxSelectService.Instance?.DraggingOnMap == true;
+        Vector2 mousePosition = Input.mousePosition;
         if (Input.GetMouseButton(2) || (Input.GetMouseButton(0) && !boxDragging))
         {
-            float dragSpeed = 150f * Mathf.Min(Time.unscaledDeltaTime, 0.03f) / zoomScale;
-            PositionOffset(map) += new Vector2(
-                -Input.GetAxisRaw("Mouse X") * dragSpeed,
-                -Input.GetAxisRaw("Mouse Y") * dragSpeed);
+            // Real cursor pixels, not Unity's smoothed mouse axis, so the map sticks to the
+            // cursor at a speed of 1 no matter the zoom, the window size or the framerate.
+            if (dragTracking)
+            {
+                PositionOffset(map) -= (mousePosition - lastMousePosition)
+                    * (CommanderSettings.MapDragSpeed / pixelsPerMapUnit);
+            }
+
+            lastMousePosition = mousePosition;
+            dragTracking = true;
+        }
+        else
+        {
+            dragTracking = false;
         }
 
         FollowingCamera(map) = PositionOffset(map) == Vector2.zero;

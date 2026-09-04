@@ -10,6 +10,7 @@ internal static class CommanderFeatureGate
         "Confrontation",
         "Domination",
         "Escalation",
+        "Ground Control",
         "Terminal Control"
     };
 

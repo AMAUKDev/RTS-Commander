@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -59,6 +59,14 @@ internal sealed partial class CommanderOverlayUi
             unitListUi.Toggle();
         }
         y += 42f;
+
+        // No CAPTURE button. Expansion is an ordinary order: drop a travel point on the yellow
+        // capture marker and the selection goes and takes the base. A button that did the same
+        // thing to the nearest target only ever competed with the order the player was already
+        // making, and it hid the fact that a route can end on a base.
+
+        y = DrawTimeControls(y, oldEnabled);
+
         GUI.enabled = oldEnabled && advanced;
         GUI.Label(new Rect(12f, y, panelRect.width - 24f, 18f), "GROUND UNITS", CommanderUiTheme.MutedLabel);
         y += 20f;
@@ -91,6 +99,7 @@ internal sealed partial class CommanderOverlayUi
                 panelVisible = false;
                 reserveWindowVisible = false;
                 supplyHeliUi.Hide();
+                economyUi.Hide();
                 depotUi.Reset();
                 airCommandUi.Show();
             }
@@ -103,9 +112,22 @@ internal sealed partial class CommanderOverlayUi
         {
             navalPurchaseUi.Toggle();
         }
+        y += 44f;
+
+        GUI.Label(new Rect(12f, y, panelRect.width - 24f, 18f), "ECONOMY", CommanderUiTheme.MutedLabel);
+        y += 20f;
+        if (GUI.Button(new Rect(12f, y, panelRect.width - 24f, 34f), "BUILD",
+            economyUi.Visible ? CommanderUiTheme.SelectedButton : CommanderUiTheme.PrimaryButton))
+        {
+            showBuildUi = true;
+            CommanderSettings.ShowBuildUi = true;
+            economyUi.Toggle();
+        }
         y += 40f;
 
-        string helper = supplyHeliService.AwaitingTargetSelection
+        string helper = economyService.AwaitingPlacement
+            ? economyService.PlacementStatus
+            : supplyHeliService.AwaitingTargetSelection
             ? "Select the cargo destination in the 3D world. The game's Cancel binding cancels."
             : airCommandService.AwaitingAreaSelection
                 ? "Select the Air Command mission area on the tactical map or in the 3D world."
@@ -152,4 +174,47 @@ internal sealed partial class CommanderOverlayUi
 
         GUI.DragWindow(new Rect(0f, 0f, panelRect.width - 72f, 28f));
     }
+
+    /// <summary>
+    /// Game speed. An RTS spends a lot of its time waiting for a convoy to cross the map, so this
+    /// is the button that makes the mod's own pacing bearable.
+    /// </summary>
+    /// <remarks>
+    /// It writes <c>TimeScaleManager.Scale</c>, which is the game's own knob — the same one the
+    /// slow-motion binding and the pause menu use. That means it is <b>host-only</b>: on a pure
+    /// multiplayer client the clock is the server's, and speeding up the local one would only
+    /// desynchronise what you are looking at. The game already treats speed as a single-player
+    /// affordance, and so does this.
+    /// <para>
+    /// It is deliberately not a saved setting. A persisted 4× would apply itself the moment the next
+    /// mission loaded, before anyone chose it.
+    /// </para>
+    /// </remarks>
+    private float DrawTimeControls(float y, bool oldEnabled)
+    {
+        FactionHQ? hq = CommanderGameAccess.GetLocalHq();
+        bool host = hq == null || hq.IsServer;
+        GUI.Label(new Rect(12f, y, panelRect.width - 24f, 18f),
+            host ? "GAME SPEED" : "GAME SPEED   (HOST ONLY)", CommanderUiTheme.MutedLabel);
+        y += 20f;
+
+        float width = (panelRect.width - 24f - 8f) / 3f;
+        GUI.enabled = oldEnabled && host;
+        for (int i = 0; i < TimeScaleSteps.Length; i++)
+        {
+            float scale = TimeScaleSteps[i];
+            bool current = Mathf.Approximately(Time.timeScale, scale);
+            if (GUI.Button(
+                new Rect(12f + i * (width + 4f), y, width, 30f),
+                $"{scale:0}x",
+                current ? CommanderUiTheme.SelectedButton : CommanderUiTheme.Button))
+            {
+                TimeScaleManager.Scale = scale;
+            }
+        }
+        GUI.enabled = oldEnabled;
+        return y + 38f;
+    }
+
+    private static readonly float[] TimeScaleSteps = { 1f, 2f, 4f };
 }

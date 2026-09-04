@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -11,6 +11,9 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
     private const float DepotSpawnDetectionRadius = 180f;
     private const float RallyExitToleranceMeters = 12f;
     private const float RallyFormationSpacingMeters = 25f;
+
+    /// <summary>How far past the depot exit newly bought vehicles park when no rally point is set.</summary>
+    private const float DefaultStagingDistanceMeters = 150f;
     private const float StatusDurationSeconds = 4f;
 
     private readonly CommanderSelectionService selectionService;
@@ -56,6 +59,11 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
 
     internal VehicleDepot? SelectedDepot { get; private set; }
     internal bool AwaitingRallyPointSelection => awaitingRallyPointSelection;
+
+    internal void CancelRallyPointSelection()
+    {
+        awaitingRallyPointSelection = false;
+    }
     internal string StatusText => Time.unscaledTime <= statusUntil ? statusText : string.Empty;
 
     public void Activate()
@@ -457,7 +465,8 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
         queue.HasRallyPoint = false;
         queue.PendingRallyUnits.Clear();
         queue.NextRallySlot = 0;
-        SetStatus("Cleared rally point.");
+        ApplyDefaultRallyPoint(queue);
+        SetStatus("Cleared rally point. New units stage beside the depot.");
     }
 
     internal bool TrySetRallyPointFromWorld(Vector2 screenPosition)
@@ -508,7 +517,7 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
             return "Not set";
         }
 
-        return queue.RallyPoint.ToString();
+        return queue.IsDefaultRallyPoint ? "Staging beside depot" : queue.RallyPoint.ToString();
     }
 
     internal List<string> GetPendingSummaryLines()
@@ -604,6 +613,7 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
         }
 
         queue.HasRallyPoint = true;
+        queue.IsDefaultRallyPoint = false;
         queue.RallyPoint = rallyPoint;
         queue.NextRallySlot = 0;
         for (int i = 0; i < queue.PendingRallyUnits.Count; i++)
@@ -1001,9 +1011,39 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
         }
 
         queue = new DepotSpawnQueue(depot);
+        ApplyDefaultRallyPoint(queue);
         depotQueues[depot] = queue;
         SnapshotKnownFriendlyUnits(queue);
         return queue;
+    }
+
+    /// <summary>
+    /// Parks a depot's output in a staging block beside the depot until the player orders it
+    /// somewhere.
+    /// </summary>
+    /// <remarks>
+    /// Left alone, a bought vehicle drives itself at the enemy. <c>GroundVehicle.CheckObstacles</c>
+    /// re-targets any vehicle that is not holding position and has no <i>player</i> command onto the
+    /// nearest mission objective or tracked enemy, and <c>VehicleDepot.TrySpawnVehicle</c>'s exit
+    /// nudge is issued with <c>playerCommand: false</c> — so the unit is out of the gate and off to
+    /// the front before the player has seen it. A default rally point is a real player command, which
+    /// is what pins it: no auto-walk, no held-position anchoring, and the first move order the player
+    /// gives simply overrides it. Setting a rally point of your own replaces this; clearing one puts
+    /// it back rather than turning staging off.
+    /// </remarks>
+    private static void ApplyDefaultRallyPoint(DepotSpawnQueue queue)
+    {
+        Transform? spawnTransform = CommanderGameAccess.GetDepotSpawnTransform(queue.Depot);
+        if (spawnTransform == null)
+        {
+            return;
+        }
+
+        queue.RallyPoint = (spawnTransform.position + spawnTransform.forward * DefaultStagingDistanceMeters)
+            .ToGlobalPosition();
+        queue.HasRallyPoint = true;
+        queue.IsDefaultRallyPoint = true;
+        queue.NextRallySlot = 0;
     }
 
     private void SnapshotKnownFriendlyUnits(DepotSpawnQueue queue)
@@ -1085,6 +1125,9 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
         internal bool PendingSummaryDirty { get; set; } = true;
         internal int ReinforceGroup { get; set; }
         internal bool HasRallyPoint { get; set; }
+
+        /// <summary>True while the rally point is the automatic staging block, not one the player placed.</summary>
+        internal bool IsDefaultRallyPoint { get; set; }
         internal GlobalPosition RallyPoint { get; set; }
         internal int NextRallySlot { get; set; }
     }

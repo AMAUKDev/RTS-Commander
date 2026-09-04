@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using NuclearOption.Networking;
@@ -159,9 +159,7 @@ internal sealed partial class CommanderAirCommandService
         pendingMissionRelocation = null;
         pendingAdoption = null;
         DestroyPendingAreaPreview();
-        tacticalMapService.SuppressMapFollow = false;
-        mapClickTracker.Reset();
-        if (!uiVisible) tacticalMapService.CloseFullscreen();
+        CloseOrderMap();
         if (relocationAircraft != null && missions.TryGetValue(relocationAircraft, out AirMission relocationMission))
         {
             relocationMission.AreaCenter = target;
@@ -202,16 +200,87 @@ internal sealed partial class CommanderAirCommandService
         pendingMissionRelocation = null;
         pendingAdoption = null;
         DestroyPendingAreaPreview();
-        tacticalMapService.SuppressMapFollow = false;
-        mapClickTracker.Reset();
-        if (!uiVisible && tacticalMapService.IsFullscreenOpen)
-        {
-            tacticalMapService.CloseFullscreen();
-        }
+        CloseOrderMap();
         if (showStatus)
         {
             SetStatus("Air mission area selection cancelled.");
         }
+    }
+
+    /// <summary>Altitude a commander-launched AI airframe enters the map at, over its own base.</summary>
+    private const float LaunchAltitudeMeters = 1200f;
+
+    /// <summary>
+    /// Puts one AI airframe in the air over <paramref name="airbase"/>, pointed at
+    /// <paramref name="facing"/>, at a speed the flight model can hold. Returns null if it could
+    /// not be spawned.
+    /// </summary>
+    /// <remarks>
+    /// This exists because <c>Airbase.TrySpawnAircraft</c> is not survivable for an AI pilot on
+    /// this mod's maps. A hangar spawn hands the airframe to <c>AIPilotTaxiState</c> and then
+    /// <c>AIPilotTakeoffState</c>, and neither copes with a highway strip: there is no taxi
+    /// network, so the pilot drives a straight line at the runway threshold, and both states
+    /// answer any trouble at all — a stuck timer, a scrape, a wing that touches anything — with
+    /// <c>StartEjectionSequence</c>. That is the enemy's aircraft dying beside the hangar over and
+    /// over, and it applies just as much to an airframe the player's AIR window buys; a player
+    /// never sees it only because a player flies the aeroplane themselves.
+    /// <c>Pilot.SetStartingAiState</c> already has the branch that avoids all of it: an aircraft
+    /// whose <c>radarAlt</c> is above its spawn offset skips taxi and takeoff and starts in
+    /// <c>AIPilotCombatModes</c> — the one state every Air Command patch in this mod targets. It is
+    /// also how a mission spawns its own aircraft in flight (<c>Spawner.TrySpawnAircraft</c> on a
+    /// <c>SavedAircraft</c> with a starting speed), so this is a supported path, not a trick.
+    /// The airbase still decides *which* airframes exist — <c>CanSpawnAircraft</c> is the roster —
+    /// it just no longer has to be taxied off. Callers own their own supply bookkeeping, because
+    /// no hangar runs here to do it for them.
+    /// </remarks>
+    internal static Aircraft? LaunchAiAircraft(
+        FactionHQ hq,
+        Airbase airbase,
+        AircraftDefinition definition,
+        LiveryKey livery,
+        Loadout loadout,
+        float fuel,
+        GlobalPosition facing)
+    {
+        Spawner? spawner = NetworkSceneSingleton<Spawner>.i;
+        if (spawner == null || airbase.center == null || definition.unitPrefab == null)
+        {
+            return null;
+        }
+
+        Vector3 origin = airbase.center.position + Vector3.up * LaunchAltitudeMeters;
+        Vector3 heading = facing.ToLocalPosition() - origin;
+        heading.y = 0f;
+        heading = heading.sqrMagnitude < 1f ? airbase.center.forward : heading.normalized;
+
+        // A stationary air spawn falls out of the sky before the autopilot has any airspeed to
+        // work with, so it enters at a speed the airframe is happy at.
+        float speed = Mathf.Max(
+            definition.aircraftParameters.PIDReferenceAirspeed,
+            definition.aircraftParameters.takeoffSpeed * 1.5f,
+            120f);
+        Aircraft aircraft = spawner.SpawnAircraft(
+            null,
+            definition.unitPrefab,
+            loadout,
+            fuel,
+            livery,
+            origin.ToGlobalPosition(),
+            Quaternion.LookRotation(heading, Vector3.up),
+            heading * speed,
+            null,
+            hq,
+            null,
+            1f,
+            0.5f);
+        if (aircraft != null && loadout == null)
+        {
+            // Hangar.SpawnAircraft's fallback: an AI airframe with no standard loadout otherwise
+            // arrives with empty pylons.
+            aircraft.Networkloadout = aircraft.weaponManager.SelectAIAircraftWeapons(airbase);
+        }
+
+        return aircraft;
     }
 
     private void SpawnMission(AirMissionOption option, Airbase airbase, GlobalPosition target)
@@ -281,13 +350,14 @@ internal sealed partial class CommanderAirCommandService
             SetStatus(loadoutError);
             return;
         }
-        Airbase.TrySpawnResult result = airbase.TrySpawnAircraft(
-            null,
-            option.Definition,
-            new LiveryKey(liveryIndex),
-            loadout,
-            option.Definition.aircraftParameters.DefaultFuelLevel);
-        if (!result.Allowed)
+        if (LaunchAiAircraft(
+                hq,
+                airbase,
+                option.Definition,
+                new LiveryKey(liveryIndex),
+                loadout,
+                option.Definition.aircraftParameters.DefaultFuelLevel,
+                target) == null)
         {
             pendingAircraftSpawn = null;
             if (purchased)
@@ -298,6 +368,11 @@ internal sealed partial class CommanderAirCommandService
             SetStatus("The selected airbase rejected the aircraft spawn.");
             return;
         }
+
+        // Hangar.TrySpawnAircraft used to take the airframe out of stock on the way out of the
+        // door. LaunchAiAircraft does not go through a hangar, so the stock comes off here: it
+        // cancels the purchase's +1 above, or consumes one the faction already had.
+        hq.ModifyUnitSupply(option.Definition, -1);
 
         SetStatus($"{GetModeLabel(option.Mode)} mission launched: {GetAircraftLabel(option.Definition)} / {option.LoadoutName}.");
     }

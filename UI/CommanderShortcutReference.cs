@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -26,7 +26,13 @@ internal static class CommanderShortcutReference
             CommanderSettings.CameraRight)));
         buffer.Add(new Entry("Rise / descend", Keys(CommanderSettings.CameraUp, CommanderSettings.CameraDown)));
         buffer.Add(new Entry("Speed boost", Key(CommanderSettings.CameraBoost), "Hold."));
-        buffer.Add(new Entry("Look around", Key(CommanderSettings.CameraFreeLook), "Hold and move the mouse."));
+        buffer.Add(new Entry("Zoom", "Mouse wheel", "Moves toward whatever the cursor is over."));
+        buffer.Add(new Entry("Look around", Key(CommanderSettings.CameraFreeLook),
+            CommanderSettings.CameraOrbitLook
+                ? "Hold: orbits the point under the cursor."
+                : "Hold: turns the camera in place."));
+        buffer.Add(new Entry("Edge scroll", "Cursor to a screen edge",
+            CommanderSettings.CameraEdgeScroll ? "On." : "Off in Settings > Camera."));
         buffer.Add(new Entry("Centre on selection", Key(CommanderSettings.CameraCenterFollow),
             "Tap to centre, hold to centre and follow."));
         buffer.Add(new Entry("Recall camera view", "F1 - F4",
@@ -76,7 +82,9 @@ internal static class CommanderShortcutReference
 
         buffer.Add(Entry.Section("PRODUCTION AND UNITS"));
         buffer.Add(new Entry("Repeat deployment", Key(CommanderSettings.RepeatDeployment),
-            "Hold while placing a supply target."));
+            "Hold while placing a supply target or siting a building."));
+        buffer.Add(new Entry("Cancel placement", Key(CommanderSettings.SecondaryAction),
+            "Backs out of an armed build, supply, area or trailer placement. Escape also works."));
         buffer.Add(new Entry("Delete instead of pin", Key(CommanderSettings.DeleteUnitModifier),
             "Hold to turn the PIN button into DEL."));
 

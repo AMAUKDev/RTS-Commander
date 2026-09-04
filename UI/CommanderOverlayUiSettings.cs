@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -36,11 +36,12 @@ internal sealed partial class CommanderOverlayUi
         }
 
         float y = settingsHelpVisible ? 118f : 38f;
-        float tabWidth = (settingsWindowRect.width - 30f) / 4f;
+        float tabWidth = (settingsWindowRect.width - 30f) / 5f;
         DrawSettingsTab(new Rect(12f, y, tabWidth, 32f), "GAMEPLAY", 0);
         DrawSettingsTab(new Rect(12f + tabWidth, y, tabWidth, 32f), "UI / HIDE", 1);
         DrawSettingsTab(new Rect(12f + tabWidth * 2f, y, tabWidth, 32f), "CONTROLS", 2);
         DrawSettingsTab(new Rect(12f + tabWidth * 3f, y, tabWidth, 32f), "SHORTCUTS", 3);
+        DrawSettingsTab(new Rect(12f + tabWidth * 4f, y, tabWidth, 32f), "CAMERA", 4);
         y += 44f;
 
         if (settingsTab == 0)
@@ -54,6 +55,10 @@ internal sealed partial class CommanderOverlayUi
         else if (settingsTab == 3)
         {
             DrawShortcutList(y);
+        }
+        else if (settingsTab == 4)
+        {
+            DrawCameraSettings(y);
         }
         else
         {
@@ -133,68 +138,201 @@ internal sealed partial class CommanderOverlayUi
             CommanderUiTheme.Toggle);
 
         float commandY = y + 104f;
-        GUI.Box(new Rect(12f, commandY, settingsWindowRect.width - 24f, 430f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(12f, commandY, settingsWindowRect.width - 24f, 512f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(new Rect(24f, commandY + 10f, settingsWindowRect.width - 48f, 22f), "COMMAND", CommanderUiTheme.Header);
-        CommanderSettings.AutoFollowSelection = GUI.Toggle(
-            new Rect(24f, commandY + 40f, settingsWindowRect.width - 48f, 30f),
-            CommanderSettings.AutoFollowSelection,
-            "Centre and follow the camera on selection",
-            CommanderUiTheme.Toggle);
         CommanderSettings.GroupHotkeys = GUI.Toggle(
-            new Rect(24f, commandY + 74f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 40f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.GroupHotkeys,
             "Control group hotkeys 1-9",
             CommanderUiTheme.Toggle);
         CommanderSettings.AttackMoveIntoRange = GUI.Toggle(
-            new Rect(24f, commandY + 108f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 74f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.AttackMoveIntoRange,
             "Attack orders stop at weapon range",
             CommanderUiTheme.Toggle);
         CommanderSettings.RetargetAfterKill = GUI.Toggle(
-            new Rect(24f, commandY + 142f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 108f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.RetargetAfterKill,
             "Keep attacking after the target dies, then hold the ground",
             CommanderUiTheme.Toggle);
         CommanderSettings.CameraBookmarks = GUI.Toggle(
-            new Rect(24f, commandY + 176f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 142f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.CameraBookmarks,
             "Camera bookmarks F1-F4 (assign key + F1-F4 stores)",
             CommanderUiTheme.Toggle);
         CommanderSettings.OrderFeedback = GUI.Toggle(
-            new Rect(24f, commandY + 210f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 176f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.OrderFeedback,
             "Flash a marker where an order was given",
             CommanderUiTheme.Toggle);
         CommanderSettings.AttackMoveRoutes = GUI.Toggle(
-            new Rect(24f, commandY + 244f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 210f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.AttackMoveRoutes,
             "Attack-move: Free Fire units engage hostiles they pass",
             CommanderUiTheme.Toggle);
         CommanderSettings.GuardOrders = GUI.Toggle(
-            new Rect(24f, commandY + 278f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 244f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.GuardOrders,
             "Right click a friendly unit to guard it",
             CommanderUiTheme.Toggle);
         CommanderSettings.AutoRetreatDamaged = GUI.Toggle(
-            new Rect(24f, commandY + 312f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 278f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.AutoRetreatDamaged,
             $"Retreat to repair below {CommanderSettings.RetreatConditionPercent:0}% condition",
             CommanderUiTheme.Toggle);
         CommanderSettings.CombatAlerts = GUI.Toggle(
-            new Rect(24f, commandY + 346f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 312f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.CombatAlerts,
             "Alert when units are attacked or lost",
             CommanderUiTheme.Toggle);
 
-        int enemyLevel = CommanderSettings.EnemyCommanderLevel;
+        int enemySetting = CommanderSettings.EnemyCommanderMode;
+        int enemyMode = CommanderEnemyCommanderService.EffectiveMode;
         if (GUI.Button(
-            new Rect(24f, commandY + 384f, settingsWindowRect.width - 48f, 32f),
-            $"ENEMY COMMANDER: {CommanderEnemyCommanderService.GetLevelLabel(enemyLevel)}"
-                + (enemyLevel > 0 ? $"   ({CommanderEnemyCommanderService.Instance?.TotalPurchases ?? 0} bought)" : string.Empty),
-            enemyLevel > 0 ? CommanderUiTheme.DangerButton : CommanderUiTheme.Button))
+            new Rect(24f, commandY + 350f, settingsWindowRect.width - 48f, 32f),
+            $"ENEMY COMMANDER: {CommanderEnemyCommanderService.GetModeLabel(enemyMode)}"
+                + (enemySetting == CommanderEnemyCommanderService.ModeOff && enemyMode != CommanderEnemyCommanderService.ModeOff
+                    ? "  (SET BY MISSION)"
+                    : string.Empty)
+                + (enemyMode > 0 ? $"   ({CommanderEnemyCommanderService.Instance?.TotalPurchases ?? 0} bought)" : string.Empty),
+            enemyMode > 0 ? CommanderUiTheme.DangerButton : CommanderUiTheme.Button))
         {
-            CommanderSettings.EnemyCommanderLevel = enemyLevel >= 3 ? 0 : enemyLevel + 1;
+            CommanderSettings.EnemyCommanderMode =
+                enemySetting >= CommanderEnemyCommanderService.ModeMission ? 0 : enemySetting + 1;
         }
+
+        // Both radii are here rather than only in the config file because both are map-dependent:
+        // how tight a base perimeter feels, and whether a faction can reach the coast at all, are
+        // answers you only get by looking at the map you are on.
+        CommanderSettings.BuildRadiusKm = DrawRadiusSlider(
+            commandY + 390f,
+            "Build radius",
+            CommanderSettings.BuildRadiusKm,
+            1f,
+            15f);
+        CommanderSettings.NavalDockRadiusKm = DrawRadiusSlider(
+            commandY + 428f,
+            "Naval dock radius",
+            CommanderSettings.NavalDockRadiusKm,
+            1f,
+            25f);
+
+        // How much an aircraft parked in a capture ring is worth. It is a balance number the mod
+        // invents - the base game gives an aeroplane no capture strength at all - so it belongs
+        // where it can be turned down, or off, without editing a config file.
+        float capture = CommanderSettings.AircraftCaptureStrength;
+        GUI.Label(
+            new Rect(24f, commandY + 466f, 250f, 24f),
+            $"Aircraft capture strength   {capture:0.#}",
+            CommanderUiTheme.Label);
+        CommanderSettings.AircraftCaptureStrength = Mathf.Round(
+            Mathf.Clamp(
+                GUI.HorizontalSlider(
+                    new Rect(280f, commandY + 472f, settingsWindowRect.width - 304f, 20f),
+                    capture,
+                    0f,
+                    10f),
+                0f,
+                10f) * 2f) * 0.5f;
+    }
+
+    /// <summary>A labelled kilometre slider, snapped to a half kilometre so the readout is honest.</summary>
+    private float DrawRadiusSlider(float y, string label, float value, float min, float max)
+    {
+        GUI.Label(
+            new Rect(24f, y, 220f, 24f),
+            $"{label}   {value:0.#} km",
+            CommanderUiTheme.Label);
+        float slid = GUI.HorizontalSlider(
+            new Rect(250f, y + 6f, settingsWindowRect.width - 274f, 20f),
+            value,
+            min,
+            max);
+        return Mathf.Round(Mathf.Clamp(slid, min, max) * 2f) * 0.5f;
+    }
+
+    /// <summary>
+    /// Everything about how the camera feels. It is a whole tab rather than a few config lines
+    /// because a camera is tuned by moving it, not by reading numbers: every value here wants to
+    /// be dragged while the game is running.
+    /// </summary>
+    private void DrawCameraSettings(float y)
+    {
+        float width = settingsWindowRect.width - 24f;
+        GUI.Box(new Rect(12f, y, width, 268f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(24f, y + 10f, width - 24f, 22f), "MOVEMENT", CommanderUiTheme.Header);
+        CommanderSettings.CameraPanSpeed = DrawCameraSlider(
+            y + 40f, "Pan speed", CommanderSettings.CameraPanSpeed, 50f, 1200f, "0", " m/s");
+        CommanderSettings.CameraZoomSpeed = DrawCameraSlider(
+            y + 78f, "Zoom speed", CommanderSettings.CameraZoomSpeed, 0.2f, 3f, "0.0#", "x");
+        CommanderSettings.CameraLookSensitivity = DrawCameraSlider(
+            y + 116f, "Look sensitivity", CommanderSettings.CameraLookSensitivity, 0.1f, 4f, "0.0#", "x");
+        CommanderSettings.CameraSmoothing = DrawCameraSlider(
+            y + 154f, "Smoothing", CommanderSettings.CameraSmoothing, 0f, 0.4f, "0.00", " s");
+        CommanderSettings.CameraHeightScaledSpeed = GUI.Toggle(
+            new Rect(24f, y + 190f, width - 48f, 30f),
+            CommanderSettings.CameraHeightScaledSpeed,
+            "Pan speed scales with height above ground",
+            CommanderUiTheme.Toggle);
+        CommanderSettings.CameraEdgeScroll = GUI.Toggle(
+            new Rect(24f, y + 224f, width - 48f, 30f),
+            CommanderSettings.CameraEdgeScroll,
+            "Edge scrolling (push the cursor into a screen edge)",
+            CommanderUiTheme.Toggle);
+
+        float lookY = y + 280f;
+        GUI.Box(new Rect(12f, lookY, width, 116f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(24f, lookY + 10f, width - 24f, 22f), "LOOKING AROUND", CommanderUiTheme.Header);
+        CommanderSettings.CameraOrbitLook = GUI.Toggle(
+            new Rect(24f, lookY + 40f, width - 48f, 30f),
+            CommanderSettings.CameraOrbitLook,
+            "Hold look to orbit the point under the cursor",
+            CommanderUiTheme.Toggle);
+        GUI.Label(
+            new Rect(24f, lookY + 74f, width - 48f, 34f),
+            $"Hold {CommanderSettings.CameraFreeLook} and move the mouse. Off, the camera turns in place and "
+                + "whatever you were watching slides off screen. The wheel zooms toward the cursor.",
+            CommanderUiTheme.MutedLabel);
+
+        float followY = lookY + 128f;
+        GUI.Box(new Rect(12f, followY, width, 152f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(24f, followY + 10f, width - 24f, 22f), "SELECTION AND FOLLOW", CommanderUiTheme.Header);
+        CommanderSettings.AutoFollowSelection = GUI.Toggle(
+            new Rect(24f, followY + 40f, width - 48f, 30f),
+            CommanderSettings.AutoFollowSelection,
+            "Follow the camera on the selected unit",
+            CommanderUiTheme.Toggle);
+        CommanderSettings.AutoFrameSelection = GUI.Toggle(
+            new Rect(24f, followY + 74f, width - 48f, 30f),
+            CommanderSettings.AutoFrameSelection,
+            "Travel to a selected unit only when it is off screen",
+            CommanderUiTheme.Toggle);
+        GUI.Label(
+            new Rect(24f, followY + 108f, width - 48f, 34f),
+            $"Selecting something you can already see leaves the camera alone. {CommanderSettings.CameraCenterFollow} "
+                + "always centres on the selection immediately.",
+            CommanderUiTheme.MutedLabel);
+
+        float mapY = followY + 164f;
+        GUI.Box(new Rect(12f, mapY, width, 82f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(24f, mapY + 10f, width - 24f, 22f), "TACTICAL MAP", CommanderUiTheme.Header);
+        CommanderSettings.MapDragSpeed = DrawCameraSlider(
+            mapY + 40f, "Map drag speed", CommanderSettings.MapDragSpeed, 0.25f, 4f, "0.0#", "x");
+    }
+
+    /// <summary>A labelled slider that shows the value it is about to write.</summary>
+    private float DrawCameraSlider(float y, string label, float value, float min, float max, string format, string suffix)
+    {
+        GUI.Label(
+            new Rect(24f, y, 230f, 24f),
+            $"{label}   {value.ToString(format)}{suffix}",
+            CommanderUiTheme.Label);
+        float slid = GUI.HorizontalSlider(
+            new Rect(260f, y + 6f, settingsWindowRect.width - 284f, 20f),
+            value,
+            min,
+            max);
+        return Mathf.Clamp(slid, min, max);
     }
 
     private void DrawUiSettings(float y)
@@ -216,6 +354,7 @@ internal sealed partial class CommanderOverlayUi
         showWorldMarkers = GUI.Toggle(new Rect(left, y + 186f, width, 28f), showWorldMarkers, "World markers", CommanderUiTheme.Toggle);
         showSamAnalyzerUi = GUI.Toggle(new Rect(right, y + 186f, width, 28f), showSamAnalyzerUi, "SAM analyzer UI", CommanderUiTheme.Toggle);
         showUnitListUi = GUI.Toggle(new Rect(left, y + 220f, width, 28f), showUnitListUi, "Order of battle", CommanderUiTheme.Toggle);
+        showBuildUi = GUI.Toggle(new Rect(right, y + 220f, width, 28f), showBuildUi, "Build UI", CommanderUiTheme.Toggle);
 
         SaveUiVisibilitySettings();
         GUI.Label(
@@ -247,6 +386,7 @@ internal sealed partial class CommanderOverlayUi
         CommanderSettings.ShowSamAnalyzerUi = showSamAnalyzerUi;
         CommanderSettings.ShowWorldMarkers = showWorldMarkers;
         CommanderSettings.ShowUnitListUi = showUnitListUi;
+        CommanderSettings.ShowBuildUi = showBuildUi;
     }
 
     private void DrawControlSettings(float y)
@@ -459,6 +599,7 @@ internal sealed partial class CommanderOverlayUi
         airCommandUi.ResetPosition();
         navalPurchaseUi.ResetPosition();
         samSiteAnalyzerUi.ResetPosition();
+        economyUi.ResetPosition();
         depotUi.ResetPosition();
         unitListUi.ResetPosition();
         CommanderAlertUi.Instance?.ResetPosition();

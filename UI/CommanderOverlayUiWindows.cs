@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -7,6 +7,9 @@ namespace GroundControlRts;
 
 internal sealed partial class CommanderOverlayUi
 {
+    /// <summary>The building whose DESTROY button is armed, so a stray click cannot level a mine.</summary>
+    private Unit? demolishArmedUnit;
+
     private void DrawPinnedWindow(int windowId)
     {
         bool hasManualPins = selectionService.PinnedUnits.Count > 0;
@@ -138,6 +141,8 @@ internal sealed partial class CommanderOverlayUi
                         ? "Basegame repair targeting weighs damage, structure value and distance. NEAREST REPAIR instead targets the closest damaged friendly repairable structure on each Basegame repair scan."
                     : focusedUnit is Ship
                         ? "Request a paid Basegame UH-90K naval-supply run for this ship. Purchased airframes are refunded after a successful return. Enemy ships cannot request supply."
+                    : CommanderEconomyService.IsCommanderBuilt(focusedUnit)
+                        ? "A building this commander put down. Upgrade it here or from the BUILD window; DESTROY levels it with no refund and asks for a second click first."
                     : "Switch the selected unit's local radar emissions. Aircraft use the Basegame networked radar toggle; enemy-unit controls are disabled.");
         }
         float y = radarHelpVisible ? 146f : 38f;
@@ -249,6 +254,11 @@ internal sealed partial class CommanderOverlayUi
             y += 40f;
             GUI.Label(new Rect(12f, y, radarWindowRect.width - 24f, 38f), repairService.StatusText, CommanderUiTheme.MutedLabel);
             y += 42f;
+        }
+
+        if (CommanderEconomyService.IsCommanderBuilt(focusedUnit))
+        {
+            y = DrawStructureControls(focusedUnit, friendly, oldEnabled, y);
         }
 
         if (focusedUnit is Ship ship)
@@ -519,6 +529,138 @@ internal sealed partial class CommanderOverlayUi
         return y + 74f;
     }
 
+    /// <summary>
+    /// Level and demolition for a building this commander put down. Upgrading here is the same
+    /// call the BUILD window makes; DESTROY arms on the first click and fires on the second,
+    /// because there is no undo and no refund.
+    /// </summary>
+    private float DrawStructureControls(Unit building, bool friendly, bool oldEnabled, float y)
+    {
+        float width = radarWindowRect.width - 24f;
+        FactionHQ? hq = CommanderGameAccess.GetLocalHq();
+        float funds = hq != null ? hq.factionFunds : 0f;
+
+        if (economyService.IsBuiltMine(building))
+        {
+            int level = economyService.GetMineLevel(building);
+            float cost = CommanderEconomyService.GetMineUpgradeCost(level);
+            GUI.Label(
+                new Rect(12f, y, width, 22f),
+                $"GOLD MINE   LVL {level}/{CommanderEconomyService.MaxLevel}   "
+                    + $"+{CommanderEconomyService.FundsLabel(CommanderEconomyService.GetMineIncomePerMinute(level))}/min",
+                CommanderUiTheme.Header);
+            y += 26f;
+            y = DrawUpgradeButton(width, y, level, cost, funds, friendly, oldEnabled,
+                () => economyService.UpgradeMine(building));
+        }
+        else if (economyService.IsBuiltNavalDock(building))
+        {
+            int level = economyService.GetNavalDockLevel(building);
+            float cost = CommanderEconomyService.GetNavalDockUpgradeCost(level);
+            GUI.Label(
+                new Rect(12f, y, width, 22f),
+                $"NAVAL DOCK   LVL {level}/{CommanderEconomyService.MaxLevel}   "
+                    + CommanderNavalPurchaseService.GetLevelUnlockLabel(level).ToUpperInvariant(),
+                CommanderUiTheme.Header);
+            y += 26f;
+            y = DrawUpgradeButton(width, y, level, cost, funds, friendly, oldEnabled,
+                () => economyService.UpgradeNavalDock(building));
+        }
+        else if (building.TryGetComponent(out Factory factory) && factory.ProductionUnit != null)
+        {
+            int level = economyService.GetFactoryLevel(factory);
+            float cost = CommanderEconomyService.GetFactoryUpgradeCost(level);
+            GUI.Label(
+                new Rect(12f, y, width, 22f),
+                $"{factory.ProductionUnit.code} FACTORY   LVL {level}/{CommanderEconomyService.MaxLevel}"
+                    + $"   {level} PER RUN",
+                CommanderUiTheme.Header);
+            y += 24f;
+            // "1/cycle" said nothing without knowing how long a cycle is, so the interval and the
+            // time left on the current one are spelled out here rather than left to the log.
+            GUI.Label(
+                new Rect(12f, y, width, 20f),
+                $"NEXT {level} x {factory.ProductionUnit.code} IN {FormatCountdown(factory)}"
+                    + $"   (EVERY {FormatDuration(factory.ProductionInterval)})",
+                CommanderUiTheme.MutedLabel);
+            y += 24f;
+            y = DrawUpgradeButton(width, y, level, cost, funds, friendly, oldEnabled,
+                () => economyService.UpgradeFactory(factory));
+        }
+
+        bool armed = ReferenceEquals(demolishArmedUnit, building);
+        GUI.enabled = oldEnabled && friendly;
+        if (GUI.Button(
+            new Rect(12f, y, width, 36f),
+            armed ? "CONFIRM DEMOLITION" : "DESTROY BUILDING",
+            CommanderUiTheme.DangerButton))
+        {
+            if (armed)
+            {
+                economyService.Demolish(building);
+                demolishArmedUnit = null;
+            }
+            else
+            {
+                demolishArmedUnit = building;
+            }
+        }
+        GUI.enabled = oldEnabled;
+        y += 40f;
+
+        GUI.Label(
+            new Rect(12f, y, width, 38f),
+            armed ? "No refund. Click again to level it." : economyService.StatusText,
+            CommanderUiTheme.MutedLabel);
+        return y + 42f;
+    }
+
+    /// <summary>
+    /// Time left on the factory's current production run. <c>Factory.GetNextProduction(true)</c> is
+    /// the game's own answer, off the same <c>lastProductionTime</c> SyncVar the production
+    /// SlowUpdate writes, so this stays right on a client as well as on the host.
+    /// </summary>
+    private static string FormatCountdown(Factory factory)
+    {
+        if (factory.ProductionInterval <= 0f)
+        {
+            return "--:--";
+        }
+
+        return FormatDuration(Mathf.Max(factory.GetNextProduction(true), 0f));
+    }
+
+    private static string FormatDuration(float seconds)
+    {
+        int total = Mathf.Max(Mathf.RoundToInt(seconds), 0);
+        return $"{total / 60}:{total % 60:00}";
+    }
+
+    private static float DrawUpgradeButton(
+        float width,
+        float y,
+        int level,
+        float cost,
+        float funds,
+        bool friendly,
+        bool oldEnabled,
+        Action upgrade)
+    {
+        if (level >= CommanderEconomyService.MaxLevel)
+        {
+            GUI.Label(new Rect(12f, y, width, 24f), "FULLY UPGRADED", CommanderUiTheme.MutedLabel);
+            return y + 30f;
+        }
+
+        GUI.enabled = oldEnabled && friendly && funds >= cost;
+        if (GUI.Button(new Rect(12f, y, width, 36f), $"UPGRADE   {cost:0}", CommanderUiTheme.PrimaryButton))
+        {
+            upgrade();
+        }
+        GUI.enabled = oldEnabled;
+        return y + 42f;
+    }
+
     private bool TryGetUnitSystemsTarget(out Unit unit, out CommanderRadarService.RadarState? state)
     {
         unit = selectionService.FocusedSelection!;
@@ -538,7 +680,8 @@ internal sealed partial class CommanderOverlayUi
             || unit is Ship
             || repairService.IsRepairUnit(unit)
             || mobileEmplacementService.IsMoveableTrailer(unit)
-            || samSiteService.IsConstructionCore(unit);
+            || samSiteService.IsConstructionCore(unit)
+            || CommanderEconomyService.IsCommanderBuilt(unit);
     }
 
     private void DrawReserveWindow(int windowId)

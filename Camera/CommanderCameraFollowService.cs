@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using NuclearOption.MissionEditorScripts;
 using System.Collections.Generic;
 using System.Reflection;
@@ -11,6 +11,8 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
     private const float PovMouseLookScale = 2f;
     private const float PovNearClipPlane = 0.05f;
     private const int BookmarkCount = 4;
+    private const float GlideSmoothing = 0.12f;
+    private const float GlideTimeoutSeconds = 1.5f;
     private static readonly FieldInfo? FreeCameraPanField = AccessTools.Field(typeof(CameraFreeState), "panView");
     private static readonly FieldInfo? FreeCameraTiltField = AccessTools.Field(typeof(CameraFreeState), "tiltView");
 
@@ -38,6 +40,11 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
     private bool spaceHeld;
     private bool longSpaceTriggered;
     private int lastSelectionRevision = -1;
+    private Vector3 followAnchor;
+    private Vector3 followVelocity;
+    private Vector3 glideViewDirection = Vector3.forward;
+    private float glideElapsed;
+    private bool gliding;
     private readonly CameraBookmark[] bookmarks = new CameraBookmark[BookmarkCount];
 
     internal CommanderCameraFollowService(CommanderSelectionService selectionService)
@@ -77,7 +84,10 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
         }
 
         target = selected;
-        lastGlobalPosition = selected.GlobalPosition().AsVector3();
+        followAnchor = GetFollowAnchor(selected);
+        lastGlobalPosition = followAnchor;
+        followVelocity = Vector3.zero;
+        gliding = false;
         Enabled = true;
     }
 
@@ -176,16 +186,37 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
     }
 
     /// <summary>
-    /// Centers on the selection. A single unit is framed close up; a group (convoy, control
-    /// group, box selection) is framed so that every selected unit fits on screen.
+    /// Centers on the selection right now. A single unit is framed close up; a group (convoy,
+    /// control group, box selection) is framed so that every selected unit fits on screen.
     /// </summary>
     internal void CenterOnSelection()
     {
         Unit? selected = selectionService.FocusedSelection;
         CameraStateManager? cameraManager = SceneSingleton<CameraStateManager>.i;
-        if (selected == null || selected.disabled || cameraManager == null)
+        if (selected == null || cameraManager == null
+            || !TryGetFramingPose(cameraManager.transform.forward, out Vector3 position, out Quaternion rotation))
         {
             return;
+        }
+
+        gliding = false;
+        cameraManager.transform.SetPositionAndRotation(position, rotation);
+        cameraManager.cameraVelocity = Vector3.zero;
+        FinishCameraMove(cameraManager, selected);
+    }
+
+    /// <summary>
+    /// Where the camera has to sit to frame the selection, looking along <paramref name="viewDirection"/>
+    /// so a jump reads as travelling rather than as being spun around.
+    /// </summary>
+    private bool TryGetFramingPose(Vector3 viewDirection, out Vector3 position, out Quaternion rotation)
+    {
+        position = Vector3.zero;
+        rotation = Quaternion.identity;
+        Unit? selected = selectionService.FocusedSelection;
+        if (selected == null || selected.disabled)
+        {
+            return false;
         }
 
         float length = selected.definition != null ? selected.definition.length : selected.maxRadius * 2f;
@@ -197,18 +228,30 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
             targetPosition = center + Vector3.up * Mathf.Max(1f, selected.maxRadius * 0.35f);
             distance = Mathf.Max(distance, extent * 2.2f + 60f);
         }
-        Vector3 viewDirection = cameraManager.transform.forward;
+
         if (viewDirection.sqrMagnitude < 0.1f)
         {
             viewDirection = -selected.transform.forward;
         }
 
-        cameraManager.transform.position = targetPosition - viewDirection.normalized * distance;
-        cameraManager.transform.rotation = Quaternion.LookRotation(targetPosition - cameraManager.transform.position, Vector3.up);
-        cameraManager.cameraVelocity = Vector3.zero;
+        position = targetPosition - viewDirection.normalized * distance;
+        rotation = Quaternion.LookRotation(targetPosition - position, Vector3.up);
+        return true;
+    }
 
+    /// <summary>
+    /// The bookkeeping every camera jump shares. Writing the angles back is the important part:
+    /// the free camera lerps its rotation toward its own stored pan/tilt every frame, so a jump
+    /// that sets only transform.rotation is unwound within a few frames - which is why the camera
+    /// could end up following a unit while pointing somewhere else entirely.
+    /// </summary>
+    private void FinishCameraMove(CameraStateManager cameraManager, Unit selected)
+    {
+        SyncFreeCameraAngles(cameraManager);
         target = selected;
-        lastGlobalPosition = selected.GlobalPosition().AsVector3();
+        followAnchor = GetFollowAnchor(selected);
+        lastGlobalPosition = followAnchor;
+        followVelocity = Vector3.zero;
         if (PovMode)
         {
             povCrewIndex = -1;
@@ -216,6 +259,78 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
             CapturePovOffset();
             TryMoveToFirstCrewPosition();
         }
+    }
+
+    /// <summary>
+    /// True when the selection already sits comfortably on screen. Selecting something you can
+    /// see should never move the camera you just aimed.
+    /// </summary>
+    private bool IsComfortablyFramed(Unit unit)
+    {
+        Camera? camera = SceneSingleton<CameraStateManager>.i?.mainCamera;
+        if (camera == null)
+        {
+            return false;
+        }
+
+        Vector3 point = unit.transform.position;
+        if (selectionService.SelectedUnits.Count > 1 && TryGetSelectionBounds(out Vector3 center, out _))
+        {
+            point = center;
+        }
+
+        return CommanderCameraTuning.IsFramed(
+            camera.WorldToViewportPoint(point),
+            Vector3.Distance(camera.transform.position, point));
+    }
+
+    /// <summary>
+    /// Travels to the framing pose over a fraction of a second instead of teleporting, and hands
+    /// the camera straight back the moment the player touches it.
+    /// </summary>
+    private void TickAutoFrameGlide(CameraStateManager cameraManager, Vector3 currentAnchor)
+    {
+        glideElapsed += Time.unscaledDeltaTime;
+        followAnchor = currentAnchor;
+        if (CommanderFreeCameraInputPatch.PlayerMovedCameraThisFrame
+            || glideElapsed > GlideTimeoutSeconds
+            || !TryGetFramingPose(glideViewDirection, out Vector3 position, out Quaternion rotation))
+        {
+            gliding = false;
+            return;
+        }
+
+        float blend = CommanderCameraTuning.SmoothBlend(GlideSmoothing, Time.unscaledDeltaTime);
+        cameraManager.transform.SetPositionAndRotation(
+            Vector3.Lerp(cameraManager.transform.position, position, blend),
+            Quaternion.Slerp(cameraManager.transform.rotation, rotation, blend));
+        cameraManager.cameraVelocity = Vector3.zero;
+        SyncFreeCameraAngles(cameraManager);
+        if (Vector3.Distance(cameraManager.transform.position, position) < 5f)
+        {
+            gliding = false;
+        }
+    }
+
+    /// <summary>
+    /// How far ahead of a moving unit the camera sits. Off by default: leading is a taste knob,
+    /// and it only earns its keep on something fast enough to outrun the frame.
+    /// </summary>
+    private Vector3 LeadOffset(Vector3 currentAnchor)
+    {
+        float lead = CommanderSettings.FollowLeadSeconds;
+        float deltaTime = Time.unscaledDeltaTime;
+        if (lead <= 0f || deltaTime <= 0f)
+        {
+            followVelocity = Vector3.zero;
+            return Vector3.zero;
+        }
+
+        followVelocity = Vector3.Lerp(
+            followVelocity,
+            (currentAnchor - lastGlobalPosition) / deltaTime,
+            CommanderCameraTuning.SmoothBlend(0.25f, deltaTime));
+        return followVelocity * lead;
     }
 
     /// <summary>
@@ -232,14 +347,6 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
 
         Enabled = true;
         CenterOnSelection();
-    }
-
-    internal void CenterOnSelectionIfFollowing()
-    {
-        if (Enabled)
-        {
-            CenterOnSelection();
-        }
     }
 
     /// <summary>World-space centre and radius of everything currently selected.</summary>
@@ -290,8 +397,9 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
     }
 
     /// <summary>
-    /// Snaps to and starts following whatever was just selected. Called once per selection
-    /// change so panning away afterwards is not fought by the follow logic.
+    /// Starts following whatever was just selected. It deliberately does not centre: yanking the
+    /// camera on every click is what made selecting a unit feel violent. It only travels when the
+    /// unit is off screen, hugging an edge, or too far away to read - and then it glides.
     /// </summary>
     private void HandleSelectionChanged()
     {
@@ -310,10 +418,23 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
             return;
         }
 
+        CameraStateManager? cameraManager = SceneSingleton<CameraStateManager>.i;
         target = selected;
         Enabled = true;
-        CenterOnSelection();
-        lastGlobalPosition = GetFollowAnchor(selected);
+        followAnchor = GetFollowAnchor(selected);
+        lastGlobalPosition = followAnchor;
+        followVelocity = Vector3.zero;
+        glideElapsed = 0f;
+        gliding = CommanderSettings.AutoFrameSelection
+            && cameraManager != null
+            && !PovMode
+            && !IsComfortablyFramed(selected);
+        if (gliding && cameraManager != null)
+        {
+            // Locked in at the start: re-reading it every frame would let the target pose chase
+            // its own rotation while the camera slerps toward it.
+            glideViewDirection = cameraManager.transform.forward;
+        }
     }
 
     public void TickActive()
@@ -344,6 +465,8 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
             povCrewIndex = -1;
             BindPovEffectsAircraft(PovMode ? selected as Aircraft : null);
             lastGlobalPosition = currentGlobalPosition;
+            followAnchor = currentGlobalPosition;
+            followVelocity = Vector3.zero;
             CapturePovOffset();
             TryMoveToFirstCrewPosition();
             return;
@@ -358,9 +481,21 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
                 cameraManager.transform.rotation = selected.transform.rotation * povLocalRotation;
                 SyncFreeCameraAngles(cameraManager);
             }
+            else if (gliding)
+            {
+                TickAutoFrameGlide(cameraManager, currentGlobalPosition);
+            }
             else
             {
-                cameraManager.transform.position += currentGlobalPosition - lastGlobalPosition;
+                // The camera tracks a damped anchor rather than copying the unit's exact movement
+                // frame by frame, so an aircraft's jitter no longer arrives as camera shake.
+                Vector3 desired = currentGlobalPosition + LeadOffset(currentGlobalPosition);
+                Vector3 next = Vector3.Lerp(
+                    followAnchor,
+                    desired,
+                    CommanderCameraTuning.SmoothBlend(CommanderSettings.FollowSmoothing, Time.unscaledDeltaTime));
+                cameraManager.transform.position += next - followAnchor;
+                followAnchor = next;
             }
         }
         lastGlobalPosition = currentGlobalPosition;
@@ -405,6 +540,8 @@ internal sealed class CommanderCameraFollowService : ICommanderDeactivate, IComm
     {
         ExitPovMode();
         Enabled = false;
+        gliding = false;
+        followVelocity = Vector3.zero;
         target = null;
     }
 

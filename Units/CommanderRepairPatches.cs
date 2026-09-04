@@ -23,8 +23,17 @@ internal static class CommanderRepairPatches
             return false;
         }
 
+        // A crew the commander paid for goes to the building it was paid for, ahead of both the
+        // nearest-target override and the Basegame priority scoring. That is the whole product.
+        CommanderRepairService? repairService = CommanderRepairService.Instance;
+        Unit? assignedTarget = null;
+        if (repairService != null && repairService.TryGetAssignedTarget(repairerUnit, out Unit paidTarget))
+        {
+            assignedTarget = paidTarget;
+        }
+
         if (repairerUnit == null
-            || CommanderRepairService.Instance?.ShouldUseNearestTarget(repairerUnit) != true
+            || (assignedTarget == null && repairService?.ShouldUseNearestTarget(repairerUnit) != true)
             || LastRepairCheckField == null
             || UnitToRepairField == null
             || RepairInProgressField == null)
@@ -51,7 +60,7 @@ internal static class CommanderRepairPatches
         LastRepairCheckField.SetValue(__instance, Time.timeSinceLevelLoad);
 
         Unit? previous = UnitToRepairField.GetValue(__instance) as Unit;
-        Unit? nearest = FindNearestRepairTarget(repairerUnit);
+        Unit? nearest = assignedTarget ?? FindNearestRepairTarget(repairerUnit);
         UnitToRepairField.SetValue(__instance, nearest);
         if (nearest != null && !ReferenceEquals(previous, nearest) && repairerUnit is ICommandable commandable)
         {

@@ -47,7 +47,10 @@ internal sealed partial class CommanderAirCommandService
         }
 
         result = Instance.ChooseMissionTarget(aircraft, stations, mission);
-        if (result.outOfAmmo)
+        // An empty rack ends a *mission*, not an order. A commanded aircraft with travel points
+        // still to fly keeps flying them — otherwise a transport or a gun-only airframe turned for
+        // home the instant it was told to go somewhere, which reads as the order being ignored.
+        if (result.outOfAmmo && mission.RouteIndex >= mission.Route.Count)
         {
             mission.Returning = true;
         }
