@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using NuclearOption.Networking;
@@ -12,6 +12,7 @@ internal static class CommanderGameAccess
     private static readonly FieldInfo? UnitMarkerField = AccessTools.Field(typeof(CombatHUD), "unitMarker");
     private static readonly FieldInfo? OnFollowingUnitSetField = AccessTools.Field(typeof(CameraStateManager), "onFollowingUnitSet");
     private static readonly FieldInfo? VehicleDepotSpawnTransformField = AccessTools.Field(typeof(VehicleDepot), "spawnTransform");
+    private static readonly List<VehicleDefinition> RepairVehicleScratch = new();
 
     internal static FactionHQ? GetLocalHq()
     {
@@ -69,7 +70,11 @@ internal static class CommanderGameAccess
             return false;
         }
 
-        if (unit is Building && unit.GetComponent<Factory>() != null)
+        // Mission-authored factories are everywhere and would bury the marker layer, but one this
+        // commander paid for is a thing you need to click on to upgrade.
+        if (unit is Building
+            && unit.GetComponent<Factory>() != null
+            && !CommanderEconomyService.IsCommanderBuilt(unit))
         {
             return false;
         }
@@ -133,7 +138,8 @@ internal static class CommanderGameAccess
         }
 
         if (HasFriendlyDepot(unit, localHq)
-            || CommanderSamSiteCoreRegistry.IsTrackedSiteUnit(unit))
+            || CommanderSamSiteCoreRegistry.IsTrackedSiteUnit(unit)
+            || CommanderEconomyService.IsCommanderBuilt(unit))
         {
             return true;
         }
@@ -384,6 +390,69 @@ internal static class CommanderGameAccess
         return true;
     }
 
+    /// <summary>
+    /// Drops a position onto the terrain surface, probing a small ring of offsets so a point that
+    /// lands inside a building or on water still finds ground nearby. Only hits carrying the
+    /// terrain material count: a roof is not ground.
+    /// </summary>
+    internal static GlobalPosition SnapToTerrain(GlobalPosition target)
+    {
+        Vector2[] offsets =
+        {
+            Vector2.zero,
+            new(3f, 0f),
+            new(-3f, 0f),
+            new(0f, 3f),
+            new(0f, -3f),
+            new(6f, 0f),
+            new(-6f, 0f),
+            new(0f, 6f),
+            new(0f, -6f),
+            new(8f, 8f),
+            new(-8f, 8f),
+            new(8f, -8f),
+            new(-8f, -8f)
+        };
+        for (int i = 0; i < offsets.Length; i++)
+        {
+            Vector3 local = new GlobalPosition(
+                target.x + offsets[i].x,
+                target.y,
+                target.z + offsets[i].y).ToLocalPosition();
+            Vector3 origin = new(local.x, Datum.LocalSeaY + 10000f, local.z);
+            if (GameAssets.i == null)
+            {
+                continue;
+            }
+
+            RaycastHit[] hits = Physics.RaycastAll(
+                origin,
+                Vector3.down,
+                20000f,
+                PhysicsLayers.StaticsMask,
+                QueryTriggerInteraction.Ignore);
+            float highestTerrainY = float.MinValue;
+            Vector3 terrainPoint = default;
+            for (int hitIndex = 0; hitIndex < hits.Length; hitIndex++)
+            {
+                RaycastHit hit = hits[hitIndex];
+                if (hit.collider != null
+                    && hit.collider.sharedMaterial == GameAssets.i.terrainMaterial
+                    && hit.point.y > highestTerrainY)
+                {
+                    highestTerrainY = hit.point.y;
+                    terrainPoint = hit.point;
+                }
+            }
+            if (highestTerrainY > float.MinValue)
+            {
+                return terrainPoint.ToGlobalPosition();
+            }
+        }
+
+        return target;
+    }
+
     internal static bool TryRaycastWaterPosition(Vector2 screenPosition, out GlobalPosition position)
     {
         position = default;
@@ -401,6 +470,19 @@ internal static class CommanderGameAccess
 
         position = GlobalPositionExtensions.ToGlobalPosition(ray.GetPoint(distance));
         return true;
+    }
+
+    /// <summary>
+    /// True when a global position is under water. Sea level in the <see cref="GlobalPosition"/>
+    /// frame is a flat <c>y = 0</c> (<c>Datum.SeaLevel</c>); <c>Datum.LocalSeaY</c> is the same
+    /// plane expressed in the *local* frame, and the floating origin shifts that on every axis
+    /// including y once the camera climbs past 1024 m. Comparing a global y against
+    /// <c>LocalSeaY</c> therefore reads "underwater" as "below the camera", which is how the naval
+    /// dock's shoreline probes stopped finding water the moment the RTS camera gained any altitude.
+    /// </summary>
+    internal static bool IsBelowSeaLevel(GlobalPosition position)
+    {
+        return position.y < 0f;
     }
 
     internal static bool ShouldAllowCommanderMove(Unit? unit)
@@ -661,8 +743,13 @@ internal static class CommanderGameAccess
 
     internal static void CollectFactionVehicleDefinitions(List<VehicleDefinition> buffer)
     {
+        CollectFactionVehicleDefinitions(buffer, GetSupplyHq());
+    }
+
+    /// <summary>The ground units <paramref name="hq"/>'s faction fields, from its convoy groups.</summary>
+    internal static void CollectFactionVehicleDefinitions(List<VehicleDefinition> buffer, FactionHQ? hq)
+    {
         buffer.Clear();
-        FactionHQ? hq = GetSupplyHq();
         if (hq?.faction == null)
         {
             return;
@@ -682,6 +769,34 @@ internal static class CommanderGameAccess
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// The faction's repair vehicle — the Jacknife on every stock faction. Matched by name first
+    /// and by an actual <see cref="Repairer"/> component second, because a faction that renames
+    /// the truck still has to carry the component for the Basegame repair loop to work at all.
+    /// </summary>
+    internal static VehicleDefinition? FindRepairVehicleDefinition(FactionHQ? hq = null)
+    {
+        CollectFactionVehicleDefinitions(RepairVehicleScratch, hq ?? GetSupplyHq());
+        for (int i = 0; i < RepairVehicleScratch.Count; i++)
+        {
+            VehicleDefinition definition = RepairVehicleScratch[i];
+            if (definition?.unitPrefab == null)
+            {
+                continue;
+            }
+
+            string identity = $"{definition.unitName} {definition.code} {definition.jsonKey}";
+            if (identity.IndexOf("jacknife", System.StringComparison.OrdinalIgnoreCase) >= 0
+                || identity.IndexOf("jackknife", System.StringComparison.OrdinalIgnoreCase) >= 0
+                || definition.unitPrefab.GetComponentInChildren<Repairer>(true) != null)
+            {
+                return definition;
+            }
+        }
+
+        return null;
     }
 
     internal static string GetUnitLabel(Unit? unit)

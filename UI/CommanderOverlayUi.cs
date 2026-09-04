@@ -28,10 +28,12 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
     private readonly CommanderNavalPurchaseService navalPurchaseService;
     private readonly CommanderSamSiteAnalyzerService samSiteAnalyzerService;
     private readonly CommanderSamSiteService samSiteService;
+    private readonly CommanderEconomyService economyService;
     private readonly CommanderSupplyHeliUi supplyHeliUi;
     private readonly CommanderAirCommandUi airCommandUi;
     private readonly CommanderNavalPurchaseUi navalPurchaseUi;
     private readonly CommanderSamSiteAnalyzerUi samSiteAnalyzerUi;
+    private readonly CommanderEconomyUi economyUi;
     private readonly CommanderDepotUi depotUi;
     private readonly CommanderUnitListUi unitListUi;
     private readonly CommanderWorldMarkerRenderer worldMarkerRenderer;
@@ -72,10 +74,12 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
     private bool showSamAnalyzerUi = CommanderSettings.ShowSamAnalyzerUi;
     private bool showWorldMarkers = CommanderSettings.ShowWorldMarkers;
     private bool showUnitListUi = CommanderSettings.ShowUnitListUi;
+    private bool showBuildUi = CommanderSettings.ShowBuildUi;
     private bool reserveShowsUnits;
     private bool positionsInitialized;
     private Rect launcherRect;
     private Rect moneyRect;
+    private Rect enemyPlanRect;
     private Rect panelRect;
     private Rect reserveWindowRect;
     private Rect selectionBarRect;
@@ -119,6 +123,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         CommanderNavalPurchaseService navalPurchaseService,
         CommanderSamSiteAnalyzerService samSiteAnalyzerService,
         CommanderSamSiteService samSiteService,
+        CommanderEconomyService economyService,
         Action unlockAdvancedFeatures,
         Action exitCommander)
     {
@@ -136,6 +141,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         this.navalPurchaseService = navalPurchaseService;
         this.samSiteAnalyzerService = samSiteAnalyzerService;
         this.samSiteService = samSiteService;
+        this.economyService = economyService;
         this.unlockAdvancedFeatures = unlockAdvancedFeatures;
         this.exitCommander = exitCommander;
         supplyHeliUi = new CommanderSupplyHeliUi(supplyHeliService);
@@ -145,6 +151,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
             samSiteAnalyzerService,
             samSiteService,
             supplyHeliService);
+        economyUi = new CommanderEconomyUi(economyService, repairService);
         depotUi = new CommanderDepotUi(spawnService);
         unitListUi = new CommanderUnitListUi(selectionService, groupService);
         worldMarkerRenderer = new CommanderWorldMarkerRenderer(
@@ -166,6 +173,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         airCommandUi.Hide();
         navalPurchaseUi.Hide();
         samSiteAnalyzerUi.Hide();
+        economyUi.Hide();
         depotUi.Reset();
         unitListUi.Hide();
         ResetScreenshotUi();
@@ -186,8 +194,17 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         airCommandUi.Hide();
         navalPurchaseUi.Hide();
         samSiteAnalyzerUi.Hide();
+        economyUi.Hide();
         depotUi.Reset();
         unitListUi.Hide();
+
+        // Fast-forward is a commander-view affordance. Leaving RTS mode — including on a scene
+        // change or shutdown, which also land here — puts the clock back, so nobody ends up flying
+        // at 4x or dropping into the next mission already sped up.
+        if (!UnityEngine.Mathf.Approximately(UnityEngine.Time.timeScale, 1f))
+        {
+            TimeScaleManager.Scale = 1f;
+        }
     }
 
     public void TickActive()
@@ -197,13 +214,16 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         {
             MaintainAllUiHidden();
         }
-        if (!showTacticalMap && CommanderTacticalMapService.Instance?.IsOpen == true)
+        // Air Command places its mission areas on this map, so it keeps it up whatever the
+        // Tactical map setting says — closing it here would fight that window's own reopen.
+        if (!showTacticalMap && !airCommandUi.Visible && CommanderTacticalMapService.Instance?.IsOpen == true)
         {
             CommanderTacticalMapService.Instance.Close();
         }
         float centerY = CommanderUiScale.Height * 0.5f;
         launcherRect = new Rect(10f, centerY - 42f, 52f, 84f);
         moneyRect = new Rect((CommanderUiScale.Width - 250f) * 0.5f, 10f, 250f, 38f);
+        enemyPlanRect = new Rect(moneyRect.x, moneyRect.yMax + 4f, 250f, 30f);
 
         if (!positionsInitialized)
         {
@@ -227,7 +247,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
                 430f,
                 608f);
             float settingsWidth = Mathf.Min(680f, CommanderUiScale.Width - 24f);
-            float settingsHeight = Mathf.Min(720f, CommanderUiScale.Height - 24f);
+            float settingsHeight = Mathf.Min(790f, CommanderUiScale.Height - 24f);
             settingsWindowRect = new Rect(
                 Mathf.Max(12f, (CommanderUiScale.Width - settingsWidth) * 0.5f),
                 Mathf.Max(12f, (CommanderUiScale.Height - settingsHeight) * 0.5f),
@@ -241,7 +261,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
             reserveWindowRect.width = Mathf.Min(590f, CommanderUiScale.Width - 24f);
             reserveWindowRect.height = Mathf.Min(610f, CommanderUiScale.Height - 24f);
             settingsWindowRect.width = Mathf.Min(680f, CommanderUiScale.Width - 24f);
-            settingsWindowRect.height = Mathf.Min(720f, CommanderUiScale.Height - 24f);
+            settingsWindowRect.height = Mathf.Min(790f, CommanderUiScale.Height - 24f);
         }
         panelRect = CommanderUiTheme.ClampWindow(panelRect);
         reserveWindowRect = CommanderUiTheme.ClampWindow(reserveWindowRect);
@@ -298,7 +318,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         }
         return CommanderAlertUi.Instance?.ContainsScreenPoint(screenPoint) == true
             || launcherRect.Contains(guiPoint)
-            || (advanced && showFactionMoney && moneyRect.Contains(guiPoint))
+            || (advanced && showFactionMoney && (moneyRect.Contains(guiPoint) || enemyPlanRect.Contains(guiPoint)))
             || (panelVisible && panelRect.Contains(guiPoint))
             || (advanced && reserveWindowVisible && reserveWindowRect.Contains(guiPoint))
             || (showSelectionBar && selectionService.SelectedUnits.Count > 0 && selectionBarRect.Contains(guiPoint))
@@ -311,6 +331,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
             || (advanced && showAirCommandUi && airCommandUi.ContainsScreenPoint(screenPoint))
             || (advanced && showNavalUi && navalPurchaseUi.ContainsScreenPoint(screenPoint))
             || (advanced && showSamAnalyzerUi && samSiteAnalyzerUi.ContainsScreenPoint(screenPoint))
+            || (advanced && showBuildUi && economyUi.ContainsScreenPoint(screenPoint))
             || (settingsVisible && settingsWindowRect.Contains(guiPoint));
     }
 
@@ -358,6 +379,13 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         if (advanced && showFactionMoney)
         {
             GUI.Box(moneyRect, $"FACTION FUNDS   {spawnService.GetFactionFundsLabel()}", CommanderUiTheme.Money);
+            // The enemy plan is shown openly on purpose: countering it is the game, and a plan
+            // you cannot see is a plan you cannot answer.
+            string enemyStatus = CommanderEnemyCommanderService.Instance?.StatusLine ?? string.Empty;
+            if (enemyStatus.Length > 0)
+            {
+                GUI.Box(enemyPlanRect, $"ENEMY   {enemyStatus}", CommanderUiTheme.Money);
+            }
         }
 
         if (panelVisible)
@@ -399,6 +427,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         if (advanced && showAirCommandUi) airCommandUi.Draw();
         if (advanced && showNavalUi) navalPurchaseUi.Draw();
         if (advanced && showSamAnalyzerUi) samSiteAnalyzerUi.Draw();
+        if (advanced && showBuildUi) economyUi.Draw();
         if (showSelectionBar) DrawSelectionBar();
         DrawSettingsWindowIfVisible();
     }
@@ -406,7 +435,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
     private bool screenshotUiHidden => screenshotUiStage != 0;
     internal bool CommanderUiHidden => screenshotUiHidden;
     internal bool ShowTacticalMapUi => CommanderFeatureGate.AdvancedFeaturesEnabled
-        && showTacticalMap
+        && (showTacticalMap || airCommandUi.Visible)
         && !screenshotUiHidden;
     internal void ToggleScreenshotUi()
     {

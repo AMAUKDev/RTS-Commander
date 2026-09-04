@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using NuclearOption.Networking;
 using UnityEngine;
 
@@ -67,7 +67,9 @@ internal static class CommanderTacticalMapControlsPatch
         bool boxDragging = CommanderBoxSelectService.Instance?.DraggingOnMap == true;
         if (Input.GetMouseButton(2) || (Input.GetMouseButton(0) && !boxDragging))
         {
-            float dragSpeed = 150f * Mathf.Min(Time.unscaledDeltaTime, 0.03f) / zoomScale;
+            // Mouse axes are already a per-frame delta, so no deltaTime here: multiplying by it
+            // made the pan crawl, and crawl worse the higher the framerate ran.
+            float dragSpeed = CommanderSettings.MapDragSensitivity / zoomScale;
             PositionOffset(map) += new Vector2(
                 -Input.GetAxisRaw("Mouse X") * dragSpeed,
                 -Input.GetAxisRaw("Mouse Y") * dragSpeed);

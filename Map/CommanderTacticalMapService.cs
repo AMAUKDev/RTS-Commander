@@ -117,6 +117,17 @@ internal sealed class CommanderTacticalMapService : ICommanderTickActive, IComma
         return true;
     }
 
+    /// <summary>
+    /// Opens the mod's own map for a placement click — an air mission area, a naval rally point —
+    /// and answers whether this call is the one that opened it, so the caller knows whether to put
+    /// it away again. The compact RTS map is the only map the mod ever asks the player to work on:
+    /// swapping to the fullscreen game map mid-order and back was the whole complaint.
+    /// </summary>
+    internal bool OpenForPlacement()
+    {
+        return !IsOpen && Open();
+    }
+
     internal bool OpenFullscreen()
     {
         if (IsOpen)

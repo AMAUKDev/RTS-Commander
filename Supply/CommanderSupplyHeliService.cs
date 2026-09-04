@@ -182,6 +182,14 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
         uiVisible = visible;
     }
 
+    internal void CancelTargetSelection()
+    {
+        if (AwaitingTargetSelection)
+        {
+            CancelTargetSelection(showStatus: true);
+        }
+    }
+
     internal void CancelDeploymentSelection()
     {
         CancelTargetSelection(showStatus: false);

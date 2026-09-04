@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -154,6 +154,35 @@ internal sealed class CommanderAlertService : ICommanderTickPersistent, ICommand
         return state.Attacker;
     }
 
+    /// <summary>
+    /// A base changed hands. This raises a real toast and ignores
+    /// <see cref="CommanderSettings.CombatAlerts"/>: losing or taking an airfield is the single
+    /// biggest thing that can happen in a match, and it used to reach the player only as a line in
+    /// a battle log they were not looking at. The toast carries no unit — an airbase is not a
+    /// <see cref="Unit"/> — so clicking it just dismisses it.
+    /// </summary>
+    internal void NotifyCapture(string text)
+    {
+        Raise(LogKind.Capture, text, null);
+    }
+
+    /// <summary>
+    /// A capture order the player just gave. This one does raise a toast, and deliberately ignores
+    /// <see cref="CommanderSettings.CombatAlerts"/>: it is the confirmation that a button press or
+    /// a right-click did something, so it has to be on screen. Falls back to the log when there is
+    /// no unit to anchor the toast to, because clicking a toast focuses its unit.
+    /// </summary>
+    internal void NotifyCaptureOrder(string text, Unit? anchor)
+    {
+        if (anchor == null)
+        {
+            AddLog(LogKind.Capture, text, null);
+            return;
+        }
+
+        Raise(LogKind.Capture, text, anchor);
+    }
+
     internal void DismissAlert(Alert alert)
     {
         alerts.Remove(alert);
@@ -220,7 +249,7 @@ internal sealed class CommanderAlertService : ICommanderTickPersistent, ICommand
         }
     }
 
-    private void Raise(LogKind kind, string text, Unit unit)
+    private void Raise(LogKind kind, string text, Unit? unit)
     {
         for (int i = 0; i < alerts.Count; i++)
         {
@@ -255,11 +284,12 @@ internal sealed class CommanderAlertService : ICommanderTickPersistent, ICommand
         Loss,
         Kill,
         Arrival,
+        Capture,
     }
 
     internal sealed class Alert
     {
-        internal Alert(LogKind kind, string text, Unit unit)
+        internal Alert(LogKind kind, string text, Unit? unit)
         {
             Kind = kind;
             Text = text;
@@ -269,7 +299,7 @@ internal sealed class CommanderAlertService : ICommanderTickPersistent, ICommand
 
         internal LogKind Kind { get; }
         internal string Text { get; }
-        internal Unit Unit { get; }
+        internal Unit? Unit { get; }
         internal float RaisedAt { get; set; }
     }
 

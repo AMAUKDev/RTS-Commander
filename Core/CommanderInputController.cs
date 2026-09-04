@@ -17,6 +17,7 @@ internal sealed class CommanderInputController
     private readonly CommanderSupplyHeliService supplyHeliService;
     private readonly CommanderMobileEmplacementService mobileEmplacementService;
     private readonly CommanderAirCommandService airCommandService;
+    private readonly CommanderEconomyService economyService;
     private readonly CommanderBoxSelectService boxSelectService;
     private CommanderPovCrewUi? povCrewUi;
     private Unit? lastClickedUnit;
@@ -32,6 +33,7 @@ internal sealed class CommanderInputController
         CommanderSupplyHeliService supplyHeliService,
         CommanderMobileEmplacementService mobileEmplacementService,
         CommanderAirCommandService airCommandService,
+        CommanderEconomyService economyService,
         CommanderBoxSelectService boxSelectService)
     {
         this.overlayUi = overlayUi;
@@ -43,6 +45,7 @@ internal sealed class CommanderInputController
         this.supplyHeliService = supplyHeliService;
         this.mobileEmplacementService = mobileEmplacementService;
         this.airCommandService = airCommandService;
+        this.economyService = economyService;
         this.boxSelectService = boxSelectService;
     }
 
@@ -82,7 +85,7 @@ internal sealed class CommanderInputController
         }
 
         // Placement modes own the click outright; no selection or ordering while one is armed.
-        if (TryHandlePlacementClick(mousePosition))
+        if (TryHandlePlacementClick(mousePosition, overMap))
         {
             boxSelectService.Cancel();
             return;
@@ -129,17 +132,35 @@ internal sealed class CommanderInputController
         }
     }
 
-    private bool TryHandlePlacementClick(Vector2 mousePosition)
+    private bool TryHandlePlacementClick(Vector2 mousePosition, bool overMap)
     {
         if (!supplyHeliService.AwaitingTargetSelection
             && !airCommandService.AwaitingAreaSelection
             && !mobileEmplacementService.AwaitingDestination
+            && !economyService.AwaitingPlacement
             && !spawnService.AwaitingRallyPointSelection)
         {
             return false;
         }
 
-        if (!CommanderShortcutInput.IsDown(CommanderSettings.PrimaryAction)
+        // Right-click backs out of an armed placement. Without it the only way out was finding the
+        // CANCEL button again, which is the wrong instinct in an RTS.
+        if (CommanderShortcutInput.IsDown(CommanderSettings.SecondaryAction))
+        {
+            supplyHeliService.CancelTargetSelection();
+            airCommandService.CancelAreaSelection();
+            mobileEmplacementService.CancelDestinationSelection();
+            economyService.CancelBuild();
+            spawnService.CancelRallyPointSelection();
+            return true;
+        }
+
+        // Over the map, the click belongs to whichever service is watching the map — an air
+        // mission area, a naval rally point — and never to the world raycast below, which would
+        // read the terrain hidden behind the map canvas. Consumed either way, so nothing under the
+        // map gets selected or ordered.
+        if (overMap
+            || !CommanderShortcutInput.IsDown(CommanderSettings.PrimaryAction)
             || overlayUi.ContainsScreenPoint(mousePosition))
         {
             return true;
@@ -156,6 +177,10 @@ internal sealed class CommanderInputController
         else if (mobileEmplacementService.AwaitingDestination)
         {
             mobileEmplacementService.TrySetDestinationFromWorld(mousePosition);
+        }
+        else if (economyService.AwaitingPlacement)
+        {
+            economyService.TryPlaceBuildingFromWorld(mousePosition);
         }
         else
         {

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using NuclearOption.Networking;
@@ -314,9 +314,23 @@ internal sealed partial class CommanderAirCommandService
         }
     }
 
-    private static bool HasPlanePilot(AircraftDefinition definition)
+    /// <summary>
+    /// True when this airframe is flown by a fixed-wing AI pilot, which is the only kind an Air
+    /// Command mission can steer. Everything the mod does to a commanded aircraft — the idle-timer
+    /// prefix, the route destination, the altitude hold — is a patch on
+    /// <c>AIPilotCombatModes</c>, and only <c>PilotType.Plane</c> uses that state machine:
+    /// <c>Pilot.SetStartingAiState</c> puts helicopters and tiltwings on <c>AIHeloCombatState</c>
+    /// instead. Handing one of those a mission applies the target half of it and none of the flying
+    /// half, which is how the enemy's VTOLs ended up nosing into the ground shortly after takeoff.
+    /// </summary>
+    internal static bool HasPlanePilot(AircraftDefinition definition)
     {
-        Aircraft? aircraft = definition.unitPrefab.GetComponent<Aircraft>();
+        return definition.unitPrefab != null
+            && HasPlanePilot(definition.unitPrefab.GetComponent<Aircraft>());
+    }
+
+    internal static bool HasPlanePilot(Aircraft? aircraft)
+    {
         if (aircraft?.pilots == null)
         {
             return false;
@@ -325,6 +339,36 @@ internal sealed partial class CommanderAirCommandService
         for (int i = 0; i < aircraft.pilots.Length; i++)
         {
             if (aircraft.pilots[i] != null && aircraft.pilots[i].pilotType == Pilot.PilotType.Plane)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when the Basegame AI has a flight model for this airframe at all.
+    /// <c>Pilot.SetStartingAiState</c> hands <c>PilotType.Plane</c> to <c>AIPilotCombatModes</c> and
+    /// <c>Helo</c>/<c>Tiltwing</c> to <c>AIHeloCombatState</c>, and gives <c>PilotType.VTOL</c>
+    /// **nothing at all** — a VTOL with an AI pilot has no state, no autopilot input and falls out
+    /// of the sky. Nothing the mod can do fixes that, so nothing may buy one.
+    /// </summary>
+    internal static bool CanAiFly(AircraftDefinition definition)
+    {
+        Aircraft? prefab = definition.unitPrefab != null ? definition.unitPrefab.GetComponent<Aircraft>() : null;
+        if (prefab?.pilots == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < prefab.pilots.Length; i++)
+        {
+            Pilot? pilot = prefab.pilots[i];
+            if (pilot != null
+                && (pilot.pilotType == Pilot.PilotType.Plane
+                    || pilot.pilotType == Pilot.PilotType.Helo
+                    || pilot.pilotType == Pilot.PilotType.Tiltwing))
             {
                 return true;
             }

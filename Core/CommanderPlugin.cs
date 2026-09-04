@@ -1,4 +1,4 @@
-using BepInEx;
+﻿using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
@@ -27,7 +27,13 @@ public sealed class CommanderPlugin : BaseUnityPlugin
         harmony = new Harmony(PluginInfo.Guid);
         harmony.PatchAll();
 
+        CommanderMissionInstaller.InstallShippedMissions();
         CommanderServiceRegistryCheck.Run();
+        CommanderScheduler.SelfCheck();
+        CommanderEnemyCommanderService.SelfCheck();
+        CommanderEconomyService.SelfCheck();
+        CommanderCaptureService.SelfCheck();
+        CommanderBuildPreview.SelfCheck();
         modeController = gameObject.AddComponent<CommanderModeController>();
         Logger.LogInfo($"{PluginInfo.Name} {PluginInfo.Version} loaded");
     }

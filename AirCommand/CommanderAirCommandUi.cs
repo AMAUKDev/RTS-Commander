@@ -24,6 +24,7 @@ internal sealed class CommanderAirCommandUi
     private Rect missionWindowRect;
     private Vector2 missionScroll;
     private bool missionPositionInitialized;
+    private bool openedMap;
     private string hoverTooltip = string.Empty;
 
     internal static CommanderAirCommandUi? Instance { get; private set; }
@@ -53,7 +54,10 @@ internal sealed class CommanderAirCommandUi
         airbaseScroll = Vector2.zero;
         openHardpointGroup = -1;
         altitudeDropdownOpen = false;
-        CommanderTacticalMapService.Instance?.OpenFullscreen();
+        // The mod's own map, not the game's. Air Command used to swap the whole screen for the
+        // fullscreen map and swap it back on close, which is what made picking a mission area feel
+        // like leaving the RTS layer and coming back to it.
+        openedMap = CommanderTacticalMapService.Instance?.OpenForPlacement() == true;
     }
 
     internal void Hide()
@@ -63,14 +67,13 @@ internal sealed class CommanderAirCommandUi
         service.SetUiVisible(false);
         service.ClearMissionAircraftSelection();
         CommanderSelectionService.Instance?.DeselectAll();
-        if (CommanderTacticalMapService.Instance?.IsFullscreenOpen == true)
+        // Only put the map away if this window is what put it up, and only when the player was not
+        // running the tactical map anyway.
+        if (openedMap && !CommanderSettings.ShowTacticalMap)
         {
-            CommanderTacticalMapService.Instance.CloseFullscreen();
-            if (CommanderPlugin.Instance?.IsCommanderModeActive == true && CommanderSettings.ShowTacticalMap)
-            {
-                CommanderTacticalMapService.Instance.Open();
-            }
+            CommanderTacticalMapService.Instance?.Close();
         }
+        openedMap = false;
     }
 
     internal bool HandleMapKey()
@@ -88,9 +91,9 @@ internal sealed class CommanderAirCommandUi
 
     internal void Tick()
     {
-        if (Visible && CommanderTacticalMapService.Instance?.IsFullscreenOpen != true)
+        if (Visible && CommanderTacticalMapService.Instance?.IsOpen != true)
         {
-            CommanderTacticalMapService.Instance?.OpenFullscreen();
+            openedMap |= CommanderTacticalMapService.Instance?.Open() == true;
         }
         float width = Mathf.Min(760f, CommanderUiScale.Width - 390f);
         float height = Mathf.Min(900f, CommanderUiScale.Height - 32f);
@@ -111,8 +114,10 @@ internal sealed class CommanderAirCommandUi
         }
         if (!missionPositionInitialized)
         {
+            // Beside the AIR COMMAND window rather than against the right edge: the tactical map
+            // lives in the top-right corner and the mission list used to sit on top of it.
             missionWindowRect = new Rect(
-                Mathf.Max(12f, CommanderUiScale.Width - 342f),
+                Mathf.Min(windowRect.xMax + 8f, Mathf.Max(12f, CommanderUiScale.Width - 342f)),
                 16f,
                 326f,
                 Mathf.Min(520f, CommanderUiScale.Height - 32f));
@@ -167,7 +172,7 @@ internal sealed class CommanderAirCommandUi
         {
             CommanderUiTheme.DrawHelpOverlay(
                 new Rect(12f, y, windowRect.width - 24f, 86f),
-                "Select a mission and loadout, then choose a departure airbase from the list or directly on the map. Only airbases that can currently spawn the aircraft are shown. Place the mission area on the fullscreen map. Active aircraft and RTB are listed on the right.");
+                "Select a mission and loadout, then choose a departure airbase from the list or directly on the map. Only airbases that can currently spawn the aircraft are shown. Place the mission area on the tactical map beside this window, or in the 3D world. Active aircraft and RTB are listed on the right.");
             y += 94f;
         }
 

@@ -76,7 +76,9 @@ internal static class CommanderShortcutReference
 
         buffer.Add(Entry.Section("PRODUCTION AND UNITS"));
         buffer.Add(new Entry("Repeat deployment", Key(CommanderSettings.RepeatDeployment),
-            "Hold while placing a supply target."));
+            "Hold while placing a supply target or siting a building."));
+        buffer.Add(new Entry("Cancel placement", Key(CommanderSettings.SecondaryAction),
+            "Backs out of an armed build, supply, area or trailer placement. Escape also works."));
         buffer.Add(new Entry("Delete instead of pin", Key(CommanderSettings.DeleteUnitModifier),
             "Hold to turn the PIN button into DEL."));
 

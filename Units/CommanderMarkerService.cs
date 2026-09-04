@@ -26,7 +26,7 @@ internal sealed class CommanderMarkerService : ICommanderActivate, ICommanderDea
 
     public void Activate()
     {
-        nextRefreshTime = CommanderScheduler.Stagger("markers.bindings", RefreshIntervalSeconds, 0.35f);
+        nextRefreshTime = CommanderScheduler.StaggerRealtime("markers.bindings", RefreshIntervalSeconds, 0.35f);
         EnsureMarkerRoot();
         RefreshBindings();
         SyncExistingUnits();
@@ -43,7 +43,7 @@ internal sealed class CommanderMarkerService : ICommanderActivate, ICommanderDea
     {
         EnsureMarkerRoot();
 
-        if (!CommanderScheduler.IsDue(ref nextRefreshTime, RefreshIntervalSeconds))
+        if (!CommanderScheduler.IsDueRealtime(ref nextRefreshTime, RefreshIntervalSeconds))
         {
             UpdateMarkerViews();
             return;

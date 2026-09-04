@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -16,6 +16,17 @@ internal sealed class CommanderWorldMarkerRenderer
     private readonly List<GlobalPosition> routePoints = new();
     private readonly List<CommanderSamSiteAnalyzerService.SiteLayoutMarker> samSiteLayout = new();
     private readonly List<CommanderSamSiteAnalyzerService.SiteCandidate> samSiteProposals = new();
+    private readonly List<CommanderCaptureService.CaptureTarget> captureTargets = new();
+
+    private static readonly Color NeutralBaseColor = new(1f, 0.86f, 0.25f, 0.95f);
+    private static readonly Color HostileBaseColor = new(1f, 0.48f, 0.28f, 0.95f);
+    private static readonly Color CapturingBaseColor = new(0.35f, 1f, 0.5f, 0.98f);
+    private static readonly Color LosingBaseColor = new(1f, 0.3f, 0.3f, 0.98f);
+
+    /// <summary>Cells in the capture bar. ASCII, because the IMGUI font guarantees nothing else.</summary>
+    private const int CaptureBarCells = 10;
+
+    private static readonly System.Text.StringBuilder captureBar = new();
 
     internal CommanderWorldMarkerRenderer(
         CommanderSelectionService selectionService,
@@ -47,6 +58,7 @@ internal sealed class CommanderWorldMarkerRenderer
         }
 
         CommanderOrderPing.Draw(camera);
+        DrawCaptureTargets(camera);
 
         for (int i = 0; i < selectionService.SelectedUnits.Count; i++)
         {
@@ -293,6 +305,73 @@ internal sealed class CommanderWorldMarkerRenderer
     {
         Vector2 guiPoint = CommanderUiScale.ScreenToGui(Input.mousePosition);
         CommanderUiTheme.DrawWorldMarker(new Vector2(guiPoint.x, guiPoint.y + 30f), label, color, 22f);
+    }
+
+    /// <summary>
+    /// Marks every capturable base the player has found — on the tactical map while it is open, in
+    /// the 3D view while it is not, the same split the route markers use. Found bases stay marked
+    /// for the rest of the mission, so the map is a record of where there is ground to take rather
+    /// than of what happens to be in sensor range right now.
+    /// </summary>
+    private void DrawCaptureTargets(Camera camera)
+    {
+        CommanderCaptureService? capture = CommanderCaptureService.Instance;
+        if (capture == null)
+        {
+            return;
+        }
+
+        capture.CopyDiscoveredTargets(captureTargets);
+        if (captureTargets.Count == 0)
+        {
+            return;
+        }
+
+        bool mapOpen = DynamicMap.mapMaximized;
+        CommanderTacticalMapService? map = CommanderTacticalMapService.Instance;
+        for (int i = 0; i < captureTargets.Count; i++)
+        {
+            CommanderCaptureService.CaptureTarget target = captureTargets[i];
+            Color color = target.HeldByOther ? HostileBaseColor : NeutralBaseColor;
+            // ASCII only: the IMGUI font has no guarantee about symbols.
+            string label = $"CAPTURABLE  {target.Label.ToUpperInvariant()}";
+            float progress = target.CaptureProgress;
+            if (progress > 0.005f)
+            {
+                // The base game shows capture progress nowhere outside its debug overlay, so
+                // without this a squad standing in the ring looks like a squad doing nothing.
+                bool ours = target.CapturingHq == null
+                    || ReferenceEquals(target.CapturingHq, CommanderGameAccess.GetLocalHq());
+                color = ours ? CapturingBaseColor : LosingBaseColor;
+                label = $"{(ours ? "CAPTURING" : "CONTESTED")}  {target.Label.ToUpperInvariant()}  "
+                    + BuildCaptureBar(progress);
+            }
+            if (!mapOpen)
+            {
+                DrawWorldPoint(camera, target.HoldPoint, label, color, 34f);
+            }
+            else if (map != null && map.TryWorldToMapScreen(target.HoldPoint, out Vector2 mapPoint))
+            {
+                CommanderUiTheme.DrawWorldMarker(CommanderUiScale.ScreenToGui(mapPoint), label, color, 24f);
+            }
+        }
+    }
+
+    /// <summary>An ASCII progress bar, e.g. <c>[####------] 42%</c>.</summary>
+    private static string BuildCaptureBar(float progress)
+    {
+        int filled = Mathf.Clamp(Mathf.RoundToInt(progress * CaptureBarCells), 0, CaptureBarCells);
+        captureBar.Length = 0;
+        captureBar.Append('[');
+        for (int i = 0; i < CaptureBarCells; i++)
+        {
+            captureBar.Append(i < filled ? '#' : '-');
+        }
+
+        captureBar.Append("] ");
+        captureBar.Append(Mathf.RoundToInt(Mathf.Clamp01(progress) * 100f));
+        captureBar.Append('%');
+        return captureBar.ToString();
     }
 
     private static void DrawMarker(Camera camera, GlobalPosition position, string label, Color color)

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -133,7 +133,7 @@ internal sealed partial class CommanderOverlayUi
             CommanderUiTheme.Toggle);
 
         float commandY = y + 104f;
-        GUI.Box(new Rect(12f, commandY, settingsWindowRect.width - 24f, 430f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(12f, commandY, settingsWindowRect.width - 24f, 546f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(new Rect(24f, commandY + 10f, settingsWindowRect.width - 48f, 22f), "COMMAND", CommanderUiTheme.Header);
         CommanderSettings.AutoFollowSelection = GUI.Toggle(
             new Rect(24f, commandY + 40f, settingsWindowRect.width - 48f, 30f),
@@ -186,15 +186,69 @@ internal sealed partial class CommanderOverlayUi
             "Alert when units are attacked or lost",
             CommanderUiTheme.Toggle);
 
-        int enemyLevel = CommanderSettings.EnemyCommanderLevel;
+        int enemySetting = CommanderSettings.EnemyCommanderMode;
+        int enemyMode = CommanderEnemyCommanderService.EffectiveMode;
         if (GUI.Button(
             new Rect(24f, commandY + 384f, settingsWindowRect.width - 48f, 32f),
-            $"ENEMY COMMANDER: {CommanderEnemyCommanderService.GetLevelLabel(enemyLevel)}"
-                + (enemyLevel > 0 ? $"   ({CommanderEnemyCommanderService.Instance?.TotalPurchases ?? 0} bought)" : string.Empty),
-            enemyLevel > 0 ? CommanderUiTheme.DangerButton : CommanderUiTheme.Button))
+            $"ENEMY COMMANDER: {CommanderEnemyCommanderService.GetModeLabel(enemyMode)}"
+                + (enemySetting == CommanderEnemyCommanderService.ModeOff && enemyMode != CommanderEnemyCommanderService.ModeOff
+                    ? "  (SET BY MISSION)"
+                    : string.Empty)
+                + (enemyMode > 0 ? $"   ({CommanderEnemyCommanderService.Instance?.TotalPurchases ?? 0} bought)" : string.Empty),
+            enemyMode > 0 ? CommanderUiTheme.DangerButton : CommanderUiTheme.Button))
         {
-            CommanderSettings.EnemyCommanderLevel = enemyLevel >= 3 ? 0 : enemyLevel + 1;
+            CommanderSettings.EnemyCommanderMode =
+                enemySetting >= CommanderEnemyCommanderService.ModeMission ? 0 : enemySetting + 1;
         }
+
+        // Both radii are here rather than only in the config file because both are map-dependent:
+        // how tight a base perimeter feels, and whether a faction can reach the coast at all, are
+        // answers you only get by looking at the map you are on.
+        CommanderSettings.BuildRadiusKm = DrawRadiusSlider(
+            commandY + 424f,
+            "Build radius",
+            CommanderSettings.BuildRadiusKm,
+            1f,
+            15f);
+        CommanderSettings.NavalDockRadiusKm = DrawRadiusSlider(
+            commandY + 462f,
+            "Naval dock radius",
+            CommanderSettings.NavalDockRadiusKm,
+            1f,
+            25f);
+
+        // How much an aircraft parked in a capture ring is worth. It is a balance number the mod
+        // invents - the base game gives an aeroplane no capture strength at all - so it belongs
+        // where it can be turned down, or off, without editing a config file.
+        float capture = CommanderSettings.AircraftCaptureStrength;
+        GUI.Label(
+            new Rect(24f, commandY + 500f, 250f, 24f),
+            $"Aircraft capture strength   {capture:0.#}",
+            CommanderUiTheme.Label);
+        CommanderSettings.AircraftCaptureStrength = Mathf.Round(
+            Mathf.Clamp(
+                GUI.HorizontalSlider(
+                    new Rect(280f, commandY + 506f, settingsWindowRect.width - 304f, 20f),
+                    capture,
+                    0f,
+                    10f),
+                0f,
+                10f) * 2f) * 0.5f;
+    }
+
+    /// <summary>A labelled kilometre slider, snapped to a half kilometre so the readout is honest.</summary>
+    private float DrawRadiusSlider(float y, string label, float value, float min, float max)
+    {
+        GUI.Label(
+            new Rect(24f, y, 220f, 24f),
+            $"{label}   {value:0.#} km",
+            CommanderUiTheme.Label);
+        float slid = GUI.HorizontalSlider(
+            new Rect(250f, y + 6f, settingsWindowRect.width - 274f, 20f),
+            value,
+            min,
+            max);
+        return Mathf.Round(Mathf.Clamp(slid, min, max) * 2f) * 0.5f;
     }
 
     private void DrawUiSettings(float y)
@@ -216,6 +270,7 @@ internal sealed partial class CommanderOverlayUi
         showWorldMarkers = GUI.Toggle(new Rect(left, y + 186f, width, 28f), showWorldMarkers, "World markers", CommanderUiTheme.Toggle);
         showSamAnalyzerUi = GUI.Toggle(new Rect(right, y + 186f, width, 28f), showSamAnalyzerUi, "SAM analyzer UI", CommanderUiTheme.Toggle);
         showUnitListUi = GUI.Toggle(new Rect(left, y + 220f, width, 28f), showUnitListUi, "Order of battle", CommanderUiTheme.Toggle);
+        showBuildUi = GUI.Toggle(new Rect(right, y + 220f, width, 28f), showBuildUi, "Build UI", CommanderUiTheme.Toggle);
 
         SaveUiVisibilitySettings();
         GUI.Label(
@@ -247,6 +302,7 @@ internal sealed partial class CommanderOverlayUi
         CommanderSettings.ShowSamAnalyzerUi = showSamAnalyzerUi;
         CommanderSettings.ShowWorldMarkers = showWorldMarkers;
         CommanderSettings.ShowUnitListUi = showUnitListUi;
+        CommanderSettings.ShowBuildUi = showBuildUi;
     }
 
     private void DrawControlSettings(float y)
@@ -459,6 +515,7 @@ internal sealed partial class CommanderOverlayUi
         airCommandUi.ResetPosition();
         navalPurchaseUi.ResetPosition();
         samSiteAnalyzerUi.ResetPosition();
+        economyUi.ResetPosition();
         depotUi.ResetPosition();
         unitListUi.ResetPosition();
         CommanderAlertUi.Instance?.ResetPosition();

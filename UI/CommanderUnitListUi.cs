@@ -76,7 +76,7 @@ internal sealed class CommanderUnitListUi
         }
         windowRect = CommanderUiTheme.ClampWindow(windowRect);
 
-        if (CommanderScheduler.IsDue(ref nextRefreshAt, RefreshIntervalSeconds))
+        if (CommanderScheduler.IsDueRealtime(ref nextRefreshAt, RefreshIntervalSeconds))
         {
             Refresh();
         }
@@ -188,6 +188,7 @@ internal sealed class CommanderUnitListUi
             CommanderAlertService.LogKind.Kill => new Color(0.6f, 1f, 0.65f, 1f),
             CommanderAlertService.LogKind.Arrival => new Color(0.7f, 0.88f, 1f, 1f),
             CommanderAlertService.LogKind.Loss => new Color(1f, 0.6f, 0.5f, 1f),
+            CommanderAlertService.LogKind.Capture => new Color(1f, 0.9f, 0.35f, 1f),
             _ => new Color(1f, 0.82f, 0.5f, 1f),
         };
     }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using NuclearOption.Networking;
@@ -38,6 +38,7 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     private float statusUntil;
     private string statusText = string.Empty;
     private bool uiVisible;
+    private bool openedMapForOrder;
     private Rect areaSelectionBlockingRect;
     private Rect areaSelectionSecondaryBlockingRect;
     private Aircraft? selectedMissionAircraft;
@@ -83,7 +84,22 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         : pendingMissionRelocation != null && missions.TryGetValue(pendingMissionRelocation, out AirMission relocationMission)
             ? relocationMission.Radius
             : 0f;
-    internal int ActiveMissionCount => missions.Count;
+    internal int ActiveMissionCount
+    {
+        get
+        {
+            FactionHQ? hq = CommanderGameAccess.GetLocalHq();
+            int count = 0;
+            foreach (Aircraft aircraft in missions.Keys)
+            {
+                if (CommanderGameAccess.IsFriendlyUnit(aircraft, hq))
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+    }
     internal bool IsUiVisible => uiVisible;
     internal bool CanLaunchSelected => SelectedOption != null
         && SelectedPrimaryWeapon != null
@@ -180,6 +196,7 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         {
             PruneMissions();
             RefreshMissionMapVisuals();
+            TickLandingOrders();
             ProcessReturningMissions();
         }
 
@@ -320,9 +337,15 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     internal void CollectMissionAircraft(List<Aircraft> aircraft)
     {
         aircraft.Clear();
+        // The enemy commander tasks its own airframes through this same dictionary, so the player's
+        // mission list has to filter by faction or it offers an RTB button for their bombers.
+        FactionHQ? localHq = CommanderGameAccess.GetLocalHq();
         foreach (Aircraft unit in missions.Keys)
         {
-            if (unit != null && !unit.disabled) aircraft.Add(unit);
+            if (unit != null && !unit.disabled && CommanderGameAccess.IsFriendlyUnit(unit, localHq))
+            {
+                aircraft.Add(unit);
+            }
         }
         aircraft.Sort((left, right) => string.Compare(
             CommanderGameAccess.GetUnitLabel(left), CommanderGameAccess.GetUnitLabel(right), StringComparison.OrdinalIgnoreCase));
@@ -349,9 +372,15 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
             : CommanderGameAccess.GetUnitLabel(aircraft);
     }
 
+    /// <summary>
+    /// RTB is a resupply run: the aircraft is routed to the nearest field its faction holds and put
+    /// down there, which is what recovers the airframe into stock. The bare landing-state switch is
+    /// the fallback for a faction with no base left to go home to.
+    /// </summary>
     internal void RequestReturnToBase(Aircraft aircraft)
     {
         if (!missions.TryGetValue(aircraft, out AirMission mission)) return;
+        if (ResupplyAircraft(aircraft)) return;
         mission.Returning = true;
         IssueReturnToBase(aircraft, mission);
         SetStatus($"{CommanderGameAccess.GetUnitLabel(aircraft)} ordered to RTB.");

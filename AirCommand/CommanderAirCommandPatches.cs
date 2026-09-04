@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
@@ -11,6 +11,10 @@ internal static class CommanderAirCommandPatches
     private static readonly FieldInfo? DestinationField = AccessTools.Field(typeof(PilotBaseState), "destination");
     private static readonly FieldInfo? TimeWithoutTargetField = AccessTools.Field(typeof(AIPilotCombatModes), "timeWithoutTarget");
     private static readonly FieldInfo? TargetHeightField = AccessTools.Field(typeof(AIPilotCombatModes), "targetHeight");
+    private static readonly FieldInfo? LandingModeField = AccessTools.Field(typeof(AIPilotLandingState), "landingMode");
+    private static readonly FieldInfo? LandingAirbaseField = AccessTools.Field(typeof(AIPilotLandingState), "airbase");
+    private static readonly FieldInfo? LandingRunwayUsageField = AccessTools.Field(typeof(AIPilotLandingState), "runwayUsage");
+    private static readonly FieldInfo? LandingSpeedField = AccessTools.Field(typeof(AIPilotLandingState), "adjustedLandingSpeed");
 
     [HarmonyPatch(typeof(CombatAI), nameof(CombatAI.ChooseHQTarget))]
     [HarmonyPrefix]
@@ -42,6 +46,23 @@ internal static class CommanderAirCommandPatches
 
         __result = targetCount;
         return false;
+    }
+
+    /// <summary>
+    /// The Basegame idle timer is what was flying commanded aircraft home: <c>NoTarget</c> counts
+    /// every tick without a target and switches to the landing state after 15 of them, before the
+    /// postfix below ever gets to write the destination — which is why an aircraft ordered to the
+    /// enemy base landed at its own with most of its fuel left. Zeroing the counter on the way in
+    /// means a commanded aircraft never reaches that threshold.
+    /// </summary>
+    [HarmonyPatch(typeof(AIPilotCombatModes), "NoTarget")]
+    [HarmonyPrefix]
+    private static void NoTargetPrefix(AIPilotCombatModes __instance)
+    {
+        if (CommanderAirCommandService.TryGetMissionHoldPoint(__instance, out _))
+        {
+            TimeWithoutTargetField?.SetValue(__instance, 0f);
+        }
     }
 
     [HarmonyPatch(typeof(AIPilotCombatModes), "NoTarget")]
@@ -90,6 +111,24 @@ internal static class CommanderAirCommandPatches
     private static void DisableUnitPostfix(Unit __instance)
     {
         CommanderAirCommandService.NotifyUnitDisabled(__instance);
+    }
+
+    /// <summary>
+    /// The landing state only ever looks for an airbase its own faction holds, so an aircraft
+    /// ordered onto a neutral field could never actually land on it. This substitutes the commanded
+    /// field; with no commanded field it does nothing and the Basegame search runs unchanged.
+    /// </summary>
+    [HarmonyPatch(typeof(AIPilotLandingState), "LandingState_SearchAirbase")]
+    [HarmonyPrefix]
+    private static bool LandingSearchAirbasePrefix(AIPilotLandingState __instance)
+    {
+        return !CommanderAirCommandService.TryOverrideLandingAirbase(
+            __instance,
+            StateAircraftField,
+            LandingModeField,
+            LandingAirbaseField,
+            LandingRunwayUsageField,
+            LandingSpeedField);
     }
 
     internal static Aircraft? GetStateAircraft(AIPilotCombatModes state)
