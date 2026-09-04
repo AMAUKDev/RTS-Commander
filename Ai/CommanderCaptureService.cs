@@ -678,7 +678,11 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
                 return;
             }
 
-            if (id.TryGetUnit(out Unit unit) && CanCapture(unit))
+            // A vehicle standing on the commander's own base ring is spoken for: the home guard
+            // pins it with a player command and this would order it away again every review.
+            if (id.TryGetUnit(out Unit unit)
+                && CanCapture(unit)
+                && !CommanderEnemyCommanderService.IsDefendingUnit(unit))
             {
                 squad.Add(unit);
             }
