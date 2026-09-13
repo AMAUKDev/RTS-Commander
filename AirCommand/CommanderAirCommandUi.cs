@@ -271,18 +271,6 @@ internal sealed class CommanderAirCommandUi
             y += 38f;
         }
 
-        {
-            bool oldHangar = GUI.enabled;
-            GUI.enabled = oldHangar && !dropdownOpen && !service.AwaitingAreaSelection;
-            service.LaunchFromHangar = GUI.Toggle(
-                new Rect(12f, y, windowRect.width - 24f, 32f),
-                service.LaunchFromHangar,
-                "HANGAR LAUNCH  |  taxi and take off instead of spawning airborne",
-                CommanderUiTheme.Toggle);
-            GUI.enabled = oldHangar;
-            y += 38f;
-        }
-
         if (service.SelectedMode == CommanderAirCommandService.AirCommandMode.StrategicStrike)
         {
             GUI.Box(new Rect(12f, y, windowRect.width - 24f, 34f), string.Empty, CommanderUiTheme.Panel);
@@ -541,7 +529,9 @@ internal sealed class CommanderAirCommandUi
     {
         float y = 34f;
         float tabWidth = (missionWindowRect.width - 26f) * 0.5f;
-        if (GUI.Button(new Rect(10f, y, tabWidth, 26f), $"ACTIVE ({missionAircraft.Count})",
+        int queued = service.PendingRelaunchCount;
+        if (GUI.Button(new Rect(10f, y, tabWidth, 26f),
+            queued > 0 ? $"ACTIVE ({missionAircraft.Count}, {queued} QUEUED)" : $"ACTIVE ({missionAircraft.Count})",
             showIdleAircraft ? CommanderUiTheme.Button : CommanderUiTheme.SelectedButton))
         {
             showIdleAircraft = false;
@@ -554,6 +544,15 @@ internal sealed class CommanderAirCommandUi
             missionScroll = Vector2.zero;
         }
         y += 32f;
+
+        // A queued relaunch that is not happening says why, right under the tabs, because
+        // "QUEUED" on its own reads as broken when the real answer is "saving up".
+        if (queued > 0 && service.RelaunchWaitReason.Length > 0)
+        {
+            GUI.Label(new Rect(12f, y, missionWindowRect.width - 24f, 22f),
+                $"RELAUNCH WAITING: {service.RelaunchWaitReason}", CommanderUiTheme.MutedLabel);
+            y += 24f;
+        }
 
         if (showIdleAircraft)
         {
@@ -580,11 +579,19 @@ internal sealed class CommanderAirCommandUi
         {
             Aircraft aircraft = missionAircraft[i];
             float rowY = 2f + i * 58f;
-            if (GUI.Button(new Rect(2f, rowY, inner.width - 120f, 52f),
+            if (GUI.Button(new Rect(2f, rowY, inner.width - 178f, 52f),
                 service.GetMissionAircraftLabel(aircraft),
                 service.IsMissionAircraftSelected(aircraft) ? CommanderUiTheme.SelectedButton : CommanderUiTheme.Button))
             {
                 service.ToggleMissionAircraft(aircraft);
+            }
+            // AUTO: relaunch this mission whenever the aircraft is lost or recovered. Greyed for
+            // adopted airframes, which Air Command never launched and so has no recipe for.
+            GUI.enabled = oldEnabled && service.CanToggleAutoRecreate(aircraft);
+            if (GUI.Button(new Rect(inner.width - 172f, rowY, 54f, 52f), "AUTO",
+                service.IsAutoRecreate(aircraft) ? CommanderUiTheme.SelectedButton : CommanderUiTheme.Button))
+            {
+                service.ToggleAutoRecreate(aircraft);
             }
             GUI.enabled = oldEnabled && !service.AwaitingAreaSelection;
             if (GUI.Button(new Rect(inner.width - 114f, rowY, 54f, 52f), "AREA", CommanderUiTheme.Button))

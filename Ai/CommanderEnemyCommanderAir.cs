@@ -238,7 +238,9 @@ internal sealed partial class CommanderEnemyCommanderService
             StandardLoadout? standard = choice.aircraftParameters.GetRandomStandardLoadout(choice, hq);
             if (standard != null)
             {
-                loadout = standard.loadout;
+                // Same INTERNAL CANNONS rule as the player's AIR window, so an AI airframe with its
+                // missiles spent goes home instead of strafing on its gun ammunition.
+                loadout = CommanderAirCommandService.WithoutInternalCannons(standard.loadout);
                 fuel = standard.FuelRatio;
             }
 
@@ -250,7 +252,7 @@ internal sealed partial class CommanderEnemyCommanderService
             GlobalPosition facing = player == null
                 ? airbase.center.GlobalPosition()
                 : GetStrikeTarget(state, CommanderPlayerCommanderService.ChooseOpponent(hq, player));
-            if (CommanderAirCommandService.LaunchAiAircraft(hq, airbase, choice, livery, loadout, fuel, facing) == null)
+            if (!CommanderAirCommandService.TryLaunchAiAircraft(hq, airbase, choice, livery, loadout, fuel, facing))
             {
                 continue;
             }
@@ -259,9 +261,8 @@ internal sealed partial class CommanderEnemyCommanderService
             hq.AddFunds(-cost);
             RecordPurchase(hq);
             state.LastAirDenial = string.Empty;
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} launched a {choice.unitName} "
-                    + $"({GetAirRole(choice)}) from {airbase.name} for {cost:0}.");
+            CommanderAiLog.Note(
+                hq, $"launched a {choice.unitName} ({GetAirRole(choice)}) from {airbase.name} for {cost:0}.");
             return cost;
         }
 
@@ -387,7 +388,7 @@ internal sealed partial class CommanderEnemyCommanderService
         }
 
         state.LastAirDenial = reason;
-        CommanderPlugin.Log.LogInfo($"{CommanderPlayerCommanderService.CommanderLabel(hq)} bought no aircraft: {reason}.");
+        CommanderAiLog.Note(hq, $"bought no aircraft: {reason}.");
     }
 
     /// <summary>
@@ -430,9 +431,9 @@ internal sealed partial class CommanderEnemyCommanderService
             if (airCommand.TryTaskAiAircraft(aircraft, mode, centre, radius))
             {
                 tasked++;
-                CommanderPlugin.Log.LogInfo(
-                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} tasked {CommanderGameAccess.GetUnitLabel(aircraft)} "
-                        + $"with {CommanderAirCommandService.GetModeLabel(mode)}.");
+                CommanderAiLog.Note(
+                    hq,
+                    $"tasked {CommanderGameAccess.GetUnitLabel(aircraft)} with {CommanderAirCommandService.GetModeLabel(mode)}.");
             }
         }
     }
@@ -504,9 +505,7 @@ internal sealed partial class CommanderEnemyCommanderService
         for (int i = 0; i < lostAircraft.Count; i++)
         {
             Aircraft aircraft = lostAircraft[i];
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} lost an airframe after "
-                    + $"{Time.time - airborneSince[aircraft]:0} s in the air.");
+            CommanderAiLog.Note(hq, $"lost an airframe after {Time.time - airborneSince[aircraft]:0} s in the air.");
             airborneSince.Remove(aircraft);
         }
 

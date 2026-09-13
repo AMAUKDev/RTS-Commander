@@ -205,11 +205,23 @@ internal sealed class CommanderInputController
 
         if (clicked == null)
         {
+            // A strategic point takes the click before it counts as empty ground — otherwise
+            // clicking a village or hilltop (no Unit to hit-test against) always fell through to
+            // clearing the selection.
+            if (CommanderStrategicPointService.Instance?.TryFocusPointAt(mousePosition) == true)
+            {
+                return;
+            }
+
             lastClickedUnit = null;
             if (!additive)
             {
                 selectionService.DeselectAll();
+                // Clicking empty ground clears a focused point exactly as it clears a selection —
+                // held additive keeps both.
+                CommanderStrategicPointService.Instance?.ClearFocus();
             }
+
             return;
         }
 

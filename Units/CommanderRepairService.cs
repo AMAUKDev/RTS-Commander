@@ -182,8 +182,7 @@ internal sealed class CommanderRepairService : ICommanderTickActive, ICommanderR
             return false;
         }
 
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} sent a repair crew to {CommanderGameAccess.GetUnitLabel(worst)}.");
+        CommanderAiLog.Note(hq, $"sent a repair crew to {CommanderGameAccess.GetUnitLabel(worst)}.");
         return true;
     }
 

@@ -36,6 +36,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
     private readonly CommanderEconomyUi economyUi;
     private readonly CommanderDepotUi depotUi;
     private readonly CommanderUnitListUi unitListUi;
+    private readonly CommanderAiLogUi aiLogUi;
     private readonly CommanderWorldMarkerRenderer worldMarkerRenderer;
     private readonly Action unlockAdvancedFeatures;
     private readonly Action exitCommander;
@@ -155,6 +156,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         economyUi = new CommanderEconomyUi(economyService, repairService);
         depotUi = new CommanderDepotUi(spawnService);
         unitListUi = new CommanderUnitListUi(selectionService, groupService);
+        aiLogUi = new CommanderAiLogUi();
         worldMarkerRenderer = new CommanderWorldMarkerRenderer(
             selectionService,
             moveService,
@@ -177,6 +179,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         economyUi.Hide();
         depotUi.Reset();
         unitListUi.Hide();
+        aiLogUi.Hide();
         ResetScreenshotUi();
         settingsVisible = false;
         bindingCapture = null;
@@ -198,6 +201,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         economyUi.Hide();
         depotUi.Reset();
         unitListUi.Hide();
+        aiLogUi.Hide();
 
         // Fast-forward is a commander-view affordance. Leaving RTS mode — including on a scene
         // change or shutdown, which also land here — puts the clock back, so nobody ends up flying
@@ -286,7 +290,13 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         // it to fit its loadout instead, two weapons per row.
         RefreshLoadout();
         float loadoutHeight = loadoutRows.Count > 0 ? (loadoutRows.Count + 1) / 2 * LoadoutRowHeight + 4f : 0f;
-        float selectionBarHeight = (selectionService.SelectedUnits.Count > 1 ? 112f : 74f + loadoutHeight) + 44f;
+        // No selection but a focused strategic point draws the same card shape as a single unit
+        // without a loadout — see DrawFocusedPointCard.
+        float selectionBarHeight = (selectionService.SelectedUnits.Count > 1
+            ? 112f
+            : selectionService.SelectedUnits.Count == 1
+                ? 74f + loadoutHeight
+                : 74f) + 44f;
         selectionBarRect = new Rect(
             Mathf.Max(12f, (CommanderUiScale.Width - 680f) * 0.5f),
             CommanderUiScale.Height - 84f - selectionBarHeight,
@@ -297,6 +307,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         {
             unitListUi.Tick();
         }
+        aiLogUi.Tick();
         if (CommanderFeatureGate.AdvancedFeaturesEnabled)
         {
             supplyHeliUi.Tick();
@@ -324,11 +335,14 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
                 && (moneyRect.Contains(guiPoint) || enemyPlanRect.Contains(guiPoint) || playerPlanRect.Contains(guiPoint)))
             || (panelVisible && panelRect.Contains(guiPoint))
             || (advanced && reserveWindowVisible && reserveWindowRect.Contains(guiPoint))
-            || (showSelectionBar && selectionService.SelectedUnits.Count > 0 && selectionBarRect.Contains(guiPoint))
+            || (showSelectionBar
+                && (selectionService.SelectedUnits.Count > 0 || CommanderStrategicPointService.Instance?.FocusedPoint != null)
+                && selectionBarRect.Contains(guiPoint))
             || (selectionHelpVisible && selectionHelpRect.Contains(guiPoint))
             || (showPinnedUnits && HasPinEntries && (pinnedLauncherRect.Contains(guiPoint) || (pinnedWindowVisible && pinnedWindowRect.Contains(guiPoint))))
             || (advanced && showUnitSystems && TryGetUnitSystemsTarget(out _, out _) && radarWindowRect.Contains(guiPoint))
             || (showUnitListUi && unitListUi.ContainsScreenPoint(screenPoint))
+            || aiLogUi.ContainsScreenPoint(screenPoint)
             || (advanced && showDepotUi && depotUi.ContainsScreenPoint(screenPoint))
             || (advanced && showSupplyUi && supplyHeliUi.ContainsScreenPoint(screenPoint))
             || (advanced && showAirCommandUi && airCommandUi.ContainsScreenPoint(screenPoint))
@@ -433,6 +447,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         }
 
         if (showUnitListUi) unitListUi.Draw();
+        aiLogUi.Draw();
         if (advanced && showDepotUi) depotUi.Draw();
         if (advanced && showSupplyUi) supplyHeliUi.Draw();
         if (advanced && showAirCommandUi) airCommandUi.Draw();

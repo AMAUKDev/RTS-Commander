@@ -119,6 +119,7 @@ internal sealed partial class CommanderAirCommandService
             mission.Mode = mode;
             mission.AreaCenter = center;
             mission.Radius = radius;
+            mission.RememberArea();
         }
 
         mission.Returning = false;
@@ -154,6 +155,7 @@ internal sealed partial class CommanderAirCommandService
         {
             mission.Mode = mode;
             mission.AreaCenter = center;
+            mission.RememberArea();
             DestroyMissionMapVisual(mission);
         }
 

@@ -92,6 +92,7 @@ internal sealed partial class CommanderAirCommandService
 
         DestroyMissionMapVisual(mission);
         missions.Remove(aircraft);
+        QueueAutoRecreate(aircraft, mission);
         if (ReferenceEquals(selectedMissionAircraft, aircraft)) selectedMissionAircraft = null;
         if (ReferenceEquals(pendingMissionRelocation, aircraft))
         {

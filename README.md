@@ -627,6 +627,79 @@ stands. Host only, same as the enemy commander.
 
 Config keys: `Gameplay/PlayerCommanderEnabled` and `Keybinds/TogglePlayerCommander`.
 
+## Strategic points
+
+Map-driven economy: geography, not proximity to your own base, decides what is worth building on
+and fighting over. Runs once per mission, host only; a pure multiplayer client sees no points at
+all.
+
+### What is on the map
+
+- **Resource sites** (diamond markers) — every industrial or ammunition-storage building on the
+  map, plus generated fill sites so a map with little industry still gets a spread. A gold mine can
+  only be built on a site: arm BUILD GOLD MINE and the ghost snaps to the nearest free site within
+  reach (`Points/MineSnapMeters`, 1 km by default) and refuses everywhere else. A map that yields no
+  sites at all is treated as a failed pass rather than a rule: discovery retries twice more at
+  half-minute intervals, and while there are no sites the pre-points rule (build anywhere inside
+  your base radius) stays in force for the player ghost and both AI commanders alike, so nobody is
+  ever locked out of building a mine.
+- **Villages** (square markers) — clusters of `Points/VillageMinBuildings` or more civilian
+  buildings within `Points/VillageClusterMeters` of each other, at the cluster's centroid.
+- **Hilltops** (dot markers, labelled HILLTOP n) — local high points found on a height-map scan: the highest point
+  within `Points/HilltopRingMeters` and at least `Points/HilltopMinProminenceMeters` above the ring's
+  mean height.
+- **Outposts** (labelled OUTPOST n) — a civilian cluster too small to qualify as a village (a
+  farmstead or hamlet), still worth marking rather than dropping.
+- **Crossroads** (labelled CROSSROADS n) — a road-network junction with at least
+  `Points/CrossroadsMinRoads` roads meeting or passing through it, found on the level's road network
+  rather than on any building or terrain feature.
+- **Roadside points** (labelled ROAD POINT n) — generated every `Points/RoadsideSpacingMeters` along
+  a road, so a long empty stretch still has something to hold; skipped near a crossroads or inside
+  an airbase.
+- **Bases** — every airbase. Ownership is read live from the game, the same as everywhere else in
+  the mod; it is never stored here.
+
+Discovery spacing (grid size, minimum distance between points, the exclusion ring around an
+airbase) is config-file-only, under the `Points` section — retuning it is a map-authoring decision,
+not a player setting. Resource sites and control points are capped separately
+(`Points/MaxResourceSites` and `Points/MaxControlPoints`, with per-kind ceilings `MaxCrossroads`, `MaxOutposts` and `MaxRoadPoints` inside the latter): one shared cap let a full set of sites
+starve the control points entirely. Villages, crossroads and outposts get first claim on that cap,
+then hilltops, then roadside points last.
+
+### Holding and earning
+
+A resource site is owned by the mine standing on it and pays through the mine's own income and
+upgrades, unchanged. Every other kind of point — village, hilltop, outpost, crossroads or roadside —
+is held by **presence**: one faction alone with at least `Points/MinGarrison` ground vehicles (2 by
+default) in the ring, for `Points/HoldSeconds` (60 by default) cumulative — driving through takes
+nothing. Below the minimum, or both factions present at once, and the point pays nobody; two
+factions present at once freezes it as **contested** until one side leaves. Villages and crossroads
+pay 10/min held, hilltops and outposts 5/min, roadside points 3/min, bases 30/min, all on the same
+15 s tick the gold mine income already used. Every rate is a slider, along with the minimum garrison
+and hold seconds, on **Settings → POINTS**.
+
+Both commanders — the enemy AI and your own AI when the player commander switch is on — build their
+mines on sites instead of stacking them at the base, and post a small garrison (one vehicle over the
+minimum) on the nearest few control points within reach of a base they hold, capped at three points
+per commander so the home guard is never starved. A mine's build reach also extends to any control
+point that commander currently holds, on top of the ordinary base radius.
+
+Owners are not saved across a mission reload — the same stance the mod already takes with mine
+upgrade levels.
+
+### Watching the AI
+
+**CMD → COMMANDER LOG**, next to ORDER OF BATTLE. One tab per faction — **YOU** first (filled in
+once the player commander switch is on), then every other commanded faction — showing funds, income
+per minute by source (bases, villages, hilltops, a combined CONTROL PTS figure for outposts,
+crossroads and roadside points, and mines), the current buy plan and the reserve
+target, above a scrolling log of every decision that faction's commander has made, newest first,
+with mission-time stamps. The same lines still go to `BepInEx\LogOutput.log` exactly as before; the
+window reads from the same log, it does not replace it. If the console lines are not appearing
+where you expect them, check that the BepInEx console is enabled
+(`BepInEx/config/BepInEx.cfg`, `[Logging.Console]` → `Enabled = true`) — this is a one-time
+developer setting, not something the mod's own settings window controls.
+
 ## Unit systems
 
 - Toggle compatible radar systems on or off, and show radar coverage on the map at an

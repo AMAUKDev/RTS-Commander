@@ -101,11 +101,95 @@ internal sealed partial class CommanderOverlayUi
         }
     }
 
+    /// <summary>
+    /// Departure 3's card: what the selection bar shows instead of a unit when nothing is selected
+    /// but a control point or free site has been clicked. Same rect, same panel, so the readout
+    /// always lives in one place on screen whether it is describing a unit or a point.
+    /// </summary>
+    private void DrawFocusedPointCard()
+    {
+        CommanderStrategicPoint? point = CommanderStrategicPointService.Instance?.FocusedPoint;
+        if (point == null)
+        {
+            return;
+        }
+
+        GUI.Box(selectionBarRect, string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(
+            new Rect(selectionBarRect.x + 12f, selectionBarRect.y + 3f, 200f, 24f),
+            "STRATEGIC POINT",
+            CommanderUiTheme.MutedLabel);
+
+        string kindLabel = point.Kind switch
+        {
+            StrategicPointKind.Site => "SITE",
+            StrategicPointKind.Village => "VILLAGE",
+            StrategicPointKind.Hilltop => "HILLTOP",
+            StrategicPointKind.Outpost => "OUTPOST",
+            StrategicPointKind.Crossroads => "CROSSROADS",
+            StrategicPointKind.Roadside => "ROAD POINT",
+            _ => "BASE",
+        };
+        GUI.Label(
+            new Rect(selectionBarRect.x + 14f, selectionBarRect.y + 37f, selectionBarRect.width - 32f, 24f),
+            $"{point.Label}  |  {kindLabel}",
+            CommanderUiTheme.Header);
+
+        string body;
+        if (point.Kind == StrategicPointKind.Site)
+        {
+            bool free = point.Mine == null || point.Mine.disabled;
+            if (free)
+            {
+                body = "FREE  —  build a gold mine here";
+            }
+            else
+            {
+                int level = CommanderEconomyService.Instance?.GetMineLevel(point.Mine!) ?? 1;
+                body = $"MINE L{level} +{CommanderEconomyService.FundsLabel(CommanderEconomyService.GetMineIncomePerMinute(level))}/min";
+            }
+        }
+        else
+        {
+            FactionHQ? owner = point.GetOwner();
+            string ownerLabel = owner == null ? "NEUTRAL" : owner.faction.name.ToUpperInvariant();
+            float rate = point.Kind switch
+            {
+                StrategicPointKind.Village => CommanderSettings.PointsVillageIncomePerMinute,
+                StrategicPointKind.Hilltop => CommanderSettings.PointsHilltopIncomePerMinute,
+                StrategicPointKind.Outpost => CommanderSettings.PointsOutpostIncomePerMinute,
+                StrategicPointKind.Crossroads => CommanderSettings.PointsCrossroadsIncomePerMinute,
+                _ => CommanderSettings.PointsRoadsideIncomePerMinute,
+            };
+            FactionHQ? localHq = CommanderGameAccess.GetLocalHq();
+            int ownCount = localHq != null
+                ? CommanderStrategicPointService.Instance?.GetPresentCount(point, localHq) ?? 0
+                : 0;
+            string contested = point.Hold.Contested ? "  CONTESTED" : string.Empty;
+            body = $"OWNER {ownerLabel}   INCOME +{CommanderEconomyService.FundsLabel(rate)}/min   "
+                + $"GARRISON {ownCount}/{CommanderSettings.PointsMinGarrison}{contested}";
+        }
+
+        GUI.Label(
+            new Rect(selectionBarRect.x + 14f, selectionBarRect.y + 65f, selectionBarRect.width - 140f, 24f),
+            body,
+            CommanderUiTheme.Label);
+
+        if (GUI.Button(new Rect(selectionBarRect.xMax - 120f, selectionBarRect.y + 61f, 100f, 30f), "CENTER", CommanderUiTheme.PrimaryButton))
+        {
+            CommanderTacticalMapService.Instance?.JumpCameraToPosition(point.Position);
+        }
+    }
+
     private void DrawSelectionBar()
     {
         int count = selectionService.SelectedUnits.Count;
         if (count == 0)
         {
+            // Departure 3: a control point has no Unit to select, so a click on one sets
+            // FocusedPoint instead and this card takes the selection bar's place while nothing
+            // else is selected. A site with a mine already selects the mine (IsCommanderBuilt).
+            DrawFocusedPointCard();
             return;
         }
 

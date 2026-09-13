@@ -220,8 +220,7 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             state.NavalFund -= spent;
             RecordPurchase(hq);
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} put a {choice.unitName} to sea for {spent:0}.");
+            CommanderAiLog.Note(hq, $"put a {choice.unitName} to sea for {spent:0}.");
         }
 
         return taken;

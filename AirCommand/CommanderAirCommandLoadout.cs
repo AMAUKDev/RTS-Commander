@@ -203,6 +203,38 @@ internal sealed partial class CommanderAirCommandService
         }
     }
 
+    /// <summary>
+    /// A copy of <paramref name="loadout"/> with every built-in gun left off, for AI-launched
+    /// airframes when INTERNAL CANNONS is off. The commander AIs fly the game's own standard
+    /// loadouts, which include the cannon, and a pilot with cannon rounds left counts them as
+    /// ordnance: it keeps making gun runs instead of going home when the real weapons are spent.
+    /// The same rule the AIR window applies to its own loadouts, applied to the AI's. If stripping
+    /// would leave nothing at all (a gun-only trainer), the original is returned — an unarmed
+    /// aircraft never finds a target and never comes home either.
+    /// </summary>
+    internal static Loadout WithoutInternalCannons(Loadout loadout)
+    {
+        if (loadout?.weapons == null || CommanderSettings.AirIncludeInternalCannons)
+        {
+            return loadout!;
+        }
+
+        Loadout stripped = new();
+        int kept = 0;
+        for (int i = 0; i < loadout.weapons.Count; i++)
+        {
+            WeaponMount? mount = loadout.weapons[i];
+            bool gun = mount != null && mount.info?.gun == true;
+            stripped.weapons.Add(gun ? null! : mount!);
+            if (mount != null && !gun)
+            {
+                kept++;
+            }
+        }
+
+        return kept == 0 ? loadout : stripped;
+    }
+
     private static void EnsureInternalCannons(AirMissionOption option)
     {
         for (int groupIndex = 0; groupIndex < option.HardpointGroups.Count; groupIndex++)
@@ -726,14 +758,19 @@ internal sealed partial class CommanderAirCommandService
         return indices != null && value <= byte.MaxValue && indices.Contains((byte)value);
     }
 
+    /// <param name="fromPicker">True when the loadout was just built from the AIR window's live
+    /// hardpoint picker, so the picker's own selection has to be checked too. A relaunch replays a
+    /// loadout frozen at first launch; whatever the picker shows now is about some other aircraft,
+    /// and checking it is what left a queued relaunch waiting forever on "select a primary weapon".</param>
     private bool ValidateSelectedLoadout(
         AirMissionOption option,
         Loadout loadout,
         Airbase airbase,
         FactionHQ hq,
-        out string error)
+        out string error,
+        bool fromPicker = true)
     {
-        if (SelectedPrimaryWeapon == null || GetPrimaryWeaponCount(option) <= 0)
+        if (fromPicker && (SelectedPrimaryWeapon == null || GetPrimaryWeaponCount(option) <= 0))
         {
             error = "Select a primary weapon supported by the selected aircraft.";
             return false;

@@ -247,8 +247,10 @@ internal sealed partial class CommanderAirCommandService
                 continue;
             }
 
+            // Only a capture is parked by hand. A resupply landing is recovered straight into stock
+            // by RecoverLandedAircraft, which is what stops the Basegame taxi state getting a turn.
             bool onDeck = aircraft.radarAlt < ParkedRadarAltMeters && aircraft.speed < ParkedSpeedMetersPerSecond;
-            if (onDeck && mission.LandingIssued)
+            if (onDeck && mission.LandingIssued && mission.Intent == LandingIntent.Capture)
             {
                 ParkOnDeck(aircraft, mission, airbase);
                 continue;

@@ -42,14 +42,34 @@ Garrison counts }`.
   and with buildable flat ground gets one generated site (flat, off-road, near a road, via the
   existing `CommanderBuildPreview.IsSiteAllowed` rule with the base-radius check disabled).
   Minimum spacing ~2 km between sites; newer one dropped on conflict.
-- **Villages**: civilian buildings (CIV) clustered by proximity (≤ 300 m). Cluster of ≥ 4 → control
+- **Villages**: civilian buildings (CIV) clustered by proximity (≤ 400 m; was 300). Cluster of ≥ 3 (was 4) → control
   point at the centroid, radius 400 m.
 - **Hilltops**: sample the height map on a 1 km grid; a sample that is the highest within 1.5 km and
-  ≥ 60 m above the mean of that ring → control point, radius 300 m. Skip inside an airbase or within
+  ≥ 8 m (was 60, then 30, then 15) above the mean of that ring — and the sample is climbed to the actual summit first (steepest ascent on the height map) → control point, radius 300 m. Thresholds lowered 2026-09-13 after the duel map yielded 0 villages and 0 hilltops at the originals, then again 2026-09-13 alongside the three kinds below. Skip inside an airbase or within
   1 km of a village.
+- **Outposts** (added 2026-09-13): a civilian cluster too small to qualify as a village (1 or 2
+  buildings at the default `VillageMinBuildings = 3`) becomes an outpost at the cluster's centroid
+  instead of being dropped, radius 300 m — a farmstead or hamlet, still worth a platoon's time on
+  otherwise empty farmland.
+- **Crossroads** (added 2026-09-13): built from the level's road network
+  (`NetworkSceneSingleton<LevelInfo>.roadNetwork`, never the sea-lane network). Every road's two
+  endpoints merge into a junction node within `RoadJunctionMergeMeters` (60 m); a node's degree is
+  the number of road endpoints merged into it plus the number of other roads whose segment passes
+  within the same distance without ending there. Degree ≥ `CrossroadsMinRoads` (3) → control point
+  at the node, radius 300 m.
+- **Roadside** (added 2026-09-13): walking each road (≥ 2 points; skips the sea-lane network), a
+  point every `RoadsideSpacingMeters` (6 km) of arc length along it becomes a candidate, radius
+  250 m — skipped within 1 km of a crossroads candidate (already the point of interest there) or
+  inside an airbase.
 - **Bases**: every airbase, kind Base. Ownership read live from the game, never stored.
-- **Caps**: ≤ ~30 non-base points per map; no two within 1.5 km; none within 2 km of an airbase
-  centre. Logged once as a table (kind, position, distance to nearest base).
+- **Caps**: ≤ 30 resource sites and, separately, ≤ 120 control points (villages, hilltops, outposts,
+  crossroads, roadside points; raised from 60 to 120 on 2026-09-13 when three more kinds joined the
+  same allowance) per map — one shared cap let the sites starve the control points (found
+  2026-09-13); no two within 800 m (was 1500 m, lowered 2026-09-13 for the same reason as the cap);
+  none within 2 km of an airbase centre. Selection runs as three staged, spacing-aware passes
+  sharing the one cap: villages + crossroads + outposts, then hilltops (seeded with stage one's
+  survivors), then roadside points (seeded with both). Logged once as a table (kind, position,
+  distance to nearest base).
 - All numbers are config defaults in a new `Points` section of `CommanderSettings`.
 
 ## Section 2 — Owning and earning
@@ -94,7 +114,7 @@ Two existing decisions change; nothing else in the brain.
   one `CommanderAiLog.Note(hq, text)` that every existing AI log line flows through (extending the
   `CommanderLabel` helper from the player-commander track), writing to the BepInEx log as now and to
   a per-faction ring buffer. No second set of strings.
-- **Points on the tactical map and in the world**: diamond = site, square = village, triangle =
+- **Points on the tactical map and in the world**: a filled dot per point (shapes were dropped 2026-09-13: rotated bars skewed under the UI-scale matrix); kind is in the label. Originally diamond = site, square = village, triangle =
   hilltop; colour by owner; striped when contested; label shows garrison `1/2` or mine level.
   Reuses `Units/CommanderMarkerView` / `CommanderWorldMarkerRenderer` / `Map/CommanderMapRouteRenderer`
   patterns. Clicking a point selects it like a building and shows the readout in the selection bar.

@@ -137,13 +137,51 @@ internal static class CommanderTacticalMapControlsPatch
         leftButtonHeld = false;
         if (leftButtonMoved
             || CommanderBoxSelectService.Instance?.Dragging == true
-            || CommanderSpawnService.Instance?.AwaitingRallyPointSelection == true
-            || CommanderNavalPurchaseService.Instance?.AwaitingRallySelection == true)
+            || AnyPlacementArmed())
         {
             return;
         }
 
-        ClickNearestIcon(map);
+        // A strategic point takes the click first — the game's own icon list knows nothing about
+        // villages, hilltops or resource sites, so without this the click always fell through to
+        // whatever unit icon happened to be nearest.
+        if (CommanderStrategicPointService.Instance?.TryFocusPointAt(Input.mousePosition) != true)
+        {
+            ClickNearestIcon(map);
+        }
+    }
+
+    /// <summary>
+    /// True while any Commander placement owns the next click: an air mission area, a building, a
+    /// supply helicopter target, an emplacement destination, a depot or naval rally point. While one
+    /// is armed a map click is a placement, full stop — it must not also pick the unit icon under the
+    /// cursor, which selected that unit and flew the camera to it.
+    /// </summary>
+    /// <summary>
+    /// Frames after a placement completes during which map clicks are still treated as spoken for.
+    /// The placement resolves on mouse-up in whichever Update runs first; the mod's icon pick, the
+    /// Unity pointer click on the icon and the camera-jump tracker all see the same mouse-up later
+    /// in that frame or the next. Two frames is enough for all of them and short enough that the
+    /// player's next deliberate click is never eaten.
+    /// </summary>
+    private const int SwallowClickFrames = 2;
+    private static int swallowClicksUntilFrame = -1;
+
+    /// <summary>Called when a placement finishes so the click that finished it goes no further.</summary>
+    internal static void SwallowMapClicks()
+    {
+        swallowClicksUntilFrame = Time.frameCount + SwallowClickFrames;
+    }
+
+    internal static bool AnyPlacementArmed()
+    {
+        return Time.frameCount <= swallowClicksUntilFrame
+            || CommanderSpawnService.Instance?.AwaitingRallyPointSelection == true
+            || CommanderNavalPurchaseService.Instance?.AwaitingRallySelection == true
+            || CommanderAirCommandService.Instance?.AwaitingAreaSelection == true
+            || CommanderEconomyService.Instance?.AwaitingPlacement == true
+            || CommanderSupplyHeliService.Instance?.AwaitingTargetSelection == true
+            || CommanderMobileEmplacementService.Instance?.AwaitingDestination == true;
     }
 
     /// <summary>Basegame icon picking, reimplemented because the original lives inside MapControls.</summary>
@@ -275,6 +313,22 @@ internal static class CommanderTacticalMapIconScalePatch
     }
 }
 
+/// <summary>
+/// The icon-pick guard above only covers clicks the mod itself resolves. Every map icon is also a
+/// Unity UI click target (<c>MapIcon.OnPointerClick</c> calls <c>ClickIcon</c> straight from the
+/// event system), so a click landing exactly on a unit's icon reached the Basegame selection
+/// without ever passing through <c>MapControls</c>. Same rule, applied at the icon.
+/// </summary>
+[HarmonyPatch(typeof(UnitMapIcon), nameof(UnitMapIcon.ClickIcon))]
+internal static class CommanderUnitMapClickPatch
+{
+    private static bool Prefix()
+    {
+        return CommanderPlugin.Instance?.IsCommanderModeActive != true
+            || !CommanderTacticalMapControlsPatch.AnyPlacementArmed();
+    }
+}
+
 [HarmonyPatch(typeof(AirbaseMapIcon), nameof(AirbaseMapIcon.ClickIcon))]
 internal static class CommanderAirbaseMapClickPatch
 {
@@ -283,6 +337,14 @@ internal static class CommanderAirbaseMapClickPatch
         if (CommanderPlugin.Instance?.IsCommanderModeActive != true)
         {
             return true;
+        }
+
+        // An armed placement owns the click; see CommanderUnitMapClickPatch. The one exception is
+        // Air Command picking its departure base, which is a placement step in its own right.
+        if (CommanderTacticalMapControlsPatch.AnyPlacementArmed()
+            && CommanderAirCommandService.Instance?.IsUiVisible != true)
+        {
+            return false;
         }
 
         CommanderAirCommandService? airCommand = CommanderAirCommandService.Instance;

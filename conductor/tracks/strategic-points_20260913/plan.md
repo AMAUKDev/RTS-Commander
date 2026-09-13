@@ -281,7 +281,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
 
 ## Tasks
 
-- [ ] **T1 — Points settings.** `Core/CommanderSettings.cs`: after `SamScanQueriesPerFrame` (line 103)
+- [x] **T1 — Points settings.** `Core/CommanderSettings.cs`: after `SamScanQueriesPerFrame` (line 103)
   add the 18 `Points` entries from the table (section `"Points"`, keys exactly as in the table:
   `FillGridMeters`, `SiteMinSpacingMeters`, `VillageClusterMeters`, `VillageMinBuildings` (int),
   `VillageRadiusMeters`, `HilltopGridMeters`, `HilltopRingMeters`, `HilltopProminenceMeters`,
@@ -292,7 +292,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   tunes (discovery spacing is config-file-only; garrison/hold/income are on the POINTS tab). Add
   `_ = …;` touches for all 18 after line 210 (`_ = SamScanQueriesPerFrame;`). Build.
 
-- [ ] **T2 — Data type, service skeleton, registration.** Create `Points/CommanderStrategicPoint.cs`:
+- [x] **T2 — Data type, service skeleton, registration.** Create `Points/CommanderStrategicPoint.cs`:
   `internal enum StrategicPointKind { Site, Village, Hilltop, Base }` and
   `internal sealed class CommanderStrategicPoint` with `Kind`, `Position` (`GlobalPosition`, on
   terrain), `Radius` (m), `Label` (e.g. `"SITE 3"`, `"VILLAGE 2"`, `"HILL 5"`, or the airbase name via
@@ -322,7 +322,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   `// T5` marker that T3/T5 remove). `ResetSession()`: clear `points`, `hqOrder`, `discovery =
   Waiting`, re-stagger `nextHoldAt`, `FocusedPoint = null`. Register per ledger row 18. Build.
 
-- [ ] **T3 — Discovery, part 1: resource sites (existing industry + grid fill) and the spacing filter,
+- [x] **T3 — Discovery, part 1: resource sites (existing industry + grid fill) and the spacing filter,
   with self-check and fail-proof.** Create `Points/CommanderStrategicPointDiscovery.cs` (partial).
   `StepDiscovery()` runs one state per call:
   - `Waiting`: return unless `MissionManager.IsRunning` and
@@ -371,19 +371,26 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   fail ("newer of a close pair is dropped", "kept points respect spacing"); restore; build; SHA256
   byte-identical. Write it in the notes.
 
-- [ ] **T4 — Discovery, part 2: villages, hilltops (budgeted), bases, the table.**
+- [x] **T4 — Discovery, part 2: villages, hilltops (budgeted), bases, the table; with self-check and
+  fail-proof for the two threshold comparisons.**
   - `Villages`: from the same `Building[]` (kept from T3 in a field, cleared at `Done`), take
     `BuildingType.CIV` not `IsCommanderBuilt`; single-link clustering: for each building, join the
     first cluster whose *any* member is within `VillageClusterMeters` (O(n²) once; n is a few
-    hundred — say so in a comment). Clusters with ≥ `VillageMinBuildings` → a `Village` at the
-    centroid (`SnapToTerrain` once), `Radius = VillageRadiusMeters`. → `Hilltops`.
+    hundred — say so in a comment). Pure: `internal static bool QualifiesAsVillage(int
+    buildingCount, int minBuildings) => buildingCount >= minBuildings;` — a cluster whose size
+    passes `QualifiesAsVillage(clusterSize, VillageMinBuildings)` → a `Village` at the centroid
+    (`SnapToTerrain` once), `Radius = VillageRadiusMeters`. → `Hilltops`.
   - `Hilltops`: sample grid `HilltopGridMeters` over `mapSize` using
-    `TryGetStrategicTerrainHeight`; a sample is a hilltop when `h > 1f`, it is ≥ every one of 8 ring
-    samples at `HilltopRingMeters` (compass + diagonals) **and** `h − mean(ring) ≥
-    HilltopProminenceMeters` (copy the shape of `SampleAverageHeight`,
-    `…Sampling.cs:148-165`, widened to 8 points); skip a hit inside any airbase's
-    `SavedAirbase.CaptureRange` (`Ai/CommanderCaptureService.cs:186`) or within
-    `HilltopVillageExclusionMeters` of a village. **Budget**: `HilltopSamplesPerFrame = 256` (const,
+    `TryGetStrategicTerrainHeight`; pure: `internal static bool QualifiesAsHilltop(float
+    sampleHeight, float ringMeanHeight, float prominenceMeters, bool isHighestInRing) =>
+    isHighestInRing && sampleHeight - ringMeanHeight >= prominenceMeters;` (boundary: a sample
+    exactly `prominenceMeters` above the ring mean qualifies). A sample is a hilltop when `h > 1f`
+    and `QualifiesAsHilltop(h, mean(ring), HilltopProminenceMeters, isHighestInRing)` is true, where
+    `isHighestInRing` is `h` being ≥ every one of 8 ring samples at `HilltopRingMeters` (compass +
+    diagonals) and `mean(ring)` copies the shape of `SampleAverageHeight` (`…Sampling.cs:148-165`,
+    widened to 8 points); skip a hit inside any airbase's `SavedAirbase.CaptureRange`
+    (`Ai/CommanderCaptureService.cs:186`) or within `HilltopVillageExclusionMeters` of a village.
+    **Budget**: `HilltopSamplesPerFrame = 256` (const,
     summary: 9 height-map reads each, no raycasts, so ~2300 array lookups per frame; a 200 km map is
     40 000 samples ≈ 160 frames ≈ 3 s), with a `hilltopIndex` cursor — the same shape as
     `regionsPerFrame` in `…Sampling.cs:61-66`. Snap accepted hilltops with `SnapToTerrain` (one
@@ -399,9 +406,26 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
     with counts and the wall-clock duration (`Time.realtimeSinceStartup − discoveryStartedAt`, as
     `…Sampling.cs:99-101`). Any site dropped under departure 1 is logged as
     `Strategic point dropped: industrial building {GetUnitLabel} has no clear ground within 350 m.`
-  Build. No new self-check (the invariants are T3's; hilltop and village rules read the live map).
+  Build.
+  **Self-check (village and hilltop thresholds)** — added to the same shared `SelfCheck()` in
+  `Points/CommanderStrategicPointService.cs` as T3/T5/T6/T7/T9 use, at the default `VillageMinBuildings
+  = 4` and `HilltopProminenceMeters = 60`: `!QualifiesAsVillage(3, 4)` ("a cluster of
+  `VillageMinBuildings − 1` does not qualify"); `QualifiesAsVillage(4, 4)` ("a cluster of
+  `VillageMinBuildings` qualifies"); `!QualifiesAsHilltop(159f, 100f, 60f, true)` ("a sample
+  `prominenceMeters − 1` above the ring mean fails"); `QualifiesAsHilltop(160f, 100f, 60f, true)`
+  ("a sample exactly at `prominenceMeters` above the ring mean passes" — the boundary counts as
+  qualifying); `!QualifiesAsHilltop(1000f, 100f, 60f, false)` ("a sample that is not the highest in
+  its ring fails regardless of prominence"). Build. The clustering itself (which buildings join
+  which cluster) and the ring sampling itself (which 8 points a candidate is compared against) stay
+  out of this self-check, because both read live map and building data that a synthetic check
+  cannot construct without re-implementing the terrain query it exists to guard.
+  **Fail-proof**: SHA256 of `Points/CommanderStrategicPointDiscovery.cs`; plant `sampleHeight -
+  ringMeanHeight >= prominenceMeters` → `sampleHeight - ringMeanHeight > prominenceMeters` in
+  `QualifiesAsHilltop`; build; name the failing case ("a sample exactly at `prominenceMeters` above
+  the ring mean passes": 160 − 100 = 60 is no longer `> 60`); restore; build; SHA256
+  byte-identical. Notes.
 
-- [ ] **T5 — Hold state machine (pure) + the 5 s ring count, with self-check and fail-proof.** In
+- [x] **T5 — Hold state machine (pure) + the 5 s ring count, with self-check and fail-proof.** In
   `Points/CommanderStrategicPointService.cs`:
   - Pure: `internal static int QualifyingFaction(IReadOnlyList<int> counts, int minGarrison, out
     bool contested)` — `contested` = two or more entries > 0; returns the single index with
@@ -443,7 +467,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   → `if (false) return;` in `Step`; build; name the failing case ("contested freezes"); restore;
   build; SHA256 byte-identical. Notes.
 
-- [ ] **T6 — Income: bases, villages, hilltops on the mines' tick, with self-check and fail-proof.**
+- [x] **T6 — Income: bases, villages, hilltops on the mines' tick, with self-check and fail-proof.**
   In `Points/CommanderStrategicPointService.cs`:
   - Pure: `internal static float IncomePerMinute(StrategicPointKind kind, float baseRate, float
     villageRate, float hilltopRate)` (`Site` → 0: the mine on it pays through `mineLevels`), and
@@ -467,10 +491,17 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   `SumIncomePerMinute`; build; name the failing case ("income sums", 2·30+1·5+3·5 = 80 ≠ 85);
   restore; build; SHA256 identical. Notes.
 
-- [ ] **T7 — Mines only on sites; reach = base or garrisoned point (ledger rows 1-4).**
-  In `Points/CommanderStrategicPointService.cs`: `internal bool TrySnapMineSite(GlobalPosition
-  target, out GlobalPosition site)` — nearest `Site` with `Mine == null || Mine.disabled` within
-  `MineSnapMeters` (horizontal), `site = point.Position`; `internal void AttachMine(GlobalPosition
+- [x] **T7 — Mines only on sites; reach = base or garrisoned point (ledger rows 1-4), with self-check
+  and fail-proof.**
+  In `Points/CommanderStrategicPointService.cs`: pure `internal static int
+  NearestFreeSiteIndex(IReadOnlyList<float> distances, IReadOnlyList<bool> free, float
+  snapMeters)` — the index of the nearest entry with `free[i]` true and `distances[i] <=
+  snapMeters`, else −1 (boundary: a distance exactly equal to `snapMeters` counts as inside, the
+  planner-chosen number from departure 4). `internal bool TrySnapMineSite(GlobalPosition target,
+  out GlobalPosition site)` computes the horizontal distance from `target` to every `Site` point
+  and whether each is free (`Mine == null || Mine.disabled`), then delegates to
+  `NearestFreeSiteIndex` — one definition of the snap rule (Reuse rule 4); `site =
+  points[index].Position` when the index is not −1. `internal void AttachMine(GlobalPosition
   site, Unit mine)` — the site at that exact position (≤ 1 m) gets `Mine = mine`; `internal bool
   IsInsideGarrisonedPointReach(FactionHQ hq, GlobalPosition target, float radiusKm)` — true when a
   Village/Hilltop with `Pays(Hold)` and `GetOwner() == hq` is within `radiusKm * 1000` of `target`
@@ -487,8 +518,20 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   `position` itself, so the mine lands on the site the ghost showed. Build. Then confirm by reading:
   every mine spawn path (`TryPlaceBuildingFromWorld` 619-633, `TryBuildEnemyMine` 419-431) ends in
   `SpawnMine`, and `SpawnMine` ends in `SpawnBuilding` → `IsSiteAllowed`. Write that trace in the notes.
+  **Self-check (mine snap)** — added to the same shared `SelfCheck()` in
+  `Points/CommanderStrategicPointService.cs` as T3/T5/T6 use: `NearestFreeSiteIndex([1500f],
+  [true], 1000f) == −1` ("nothing within range"); `NearestFreeSiteIndex([1000f], [true], 1000f) ==
+  0` ("one free site just inside `snapMeters`" — the boundary itself counts as inside);
+  `NearestFreeSiteIndex([900f, 400f], [true, true], 1000f) == 1` ("two free sites in range: the
+  nearer one"); `NearestFreeSiteIndex([300f, 700f], [false, true], 1000f) == 1` ("the nearest site
+  occupied and a free one further but still in range: the free one");
+  `NearestFreeSiteIndex([1000.1f], [true], 1000f) == −1` ("a free site just outside: −1"). Build.
+  **Fail-proof**: SHA256 of `Points/CommanderStrategicPointService.cs`; plant `distances[i] <=
+  snapMeters` → `distances[i] < snapMeters` in `NearestFreeSiteIndex` (or drop the `free[i]` test —
+  pick one and name it); build; name the failing case ("one free site just inside `snapMeters`":
+  1000 no longer counts as inside); restore; build; SHA256 byte-identical. Notes.
 
-- [ ] **T8 — Enemy mine step picks the nearest free reachable site (ledger rows 7-9).** Apply the
+- [x] **T8 — Enemy mine step picks the nearest free reachable site (ledger rows 7-9).** Apply the
   rows. In `TryBuildEnemyMine` keep the log line; the text becomes `built a gold mine on
   {point.Label}.` — so add `internal bool TryPickFreeReachableSite(FactionHQ hq, out
   CommanderStrategicPoint point)` as the primary overload and make the `GlobalPosition` one call
@@ -496,7 +539,8 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   while a site is in reach, otherwise the commander saves for the next thing. Build. Grep
   `TryFindEnemyBuildSite(hq, mine` — expect no hits.
 
-- [ ] **T9 — Garrison partial (ledger rows 10-14).** Create `Ai/CommanderEnemyCommanderGarrison.cs`,
+- [x] **T9 — Garrison partial (ledger rows 10-14), with self-check and fail-proof.** Create
+  `Ai/CommanderEnemyCommanderGarrison.cs`,
   `internal sealed partial class CommanderEnemyCommanderService`, class-part `<summary>` (what a
   garrison is, that it uses the home guard's pinning mechanism and why — cite the Defence remarks
   12-28 in a `<see cref>`), `<remarks>` "ponytail:" the garrison stands still and shoots for itself,
@@ -505,15 +549,21 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   at `Defence.cs:53` and for the same RPC reason — but a *second* identical constant is Reuse rule 4's
   tell, so **reuse `DefenceArrivedMeters` directly** and do not declare a new one). Scratch lists
   `garrisonCandidates`, `staleGarrison` (cleared in `ResetSession`, row 12).
+  - Pure: `internal static void SelectGarrisonTargets(IReadOnlyList<float> distances, float
+    reachMeters, int maxPoints, List<int> result)` — fills `result` with the indices of the
+    nearest `maxPoints` entries with `distance <= reachMeters`, in ascending distance order (a
+    distance exactly equal to `reachMeters` counts as in reach); `result` is cleared first.
   - `internal static bool IsGarrisonUnit(Unit? unit)` — the `IsDefendingUnit` shape
     (`Defence.cs:85-102`) over `state.Garrison`.
   - `private void ReviewGarrisons(FactionHQ localHq)` — the `ReviewDefences` loop shape
     (`Defence.cs:121-141`), per HQ `ReviewGarrison(hq, state)`.
   - `ReviewGarrison(hq, state)`: (a) prune: drop entries whose unit is null/disabled/other HQ/
     `HasPlayerOrder` (comment as `Defence.cs:306-310`: leave `commandedDestination` alone); (b) target
-    points: Village/Hilltop points within `GarrisonReachMeters` of any base `hq` holds, sorted by
-    distance to `GetTerritoryCenter(hq)`, first `MaxGarrisonedPoints` — a point another faction
-    currently holds is still a target (taking it is the point); (c) for each target short of
+    points: for every Village/Hilltop point compute its distance to the nearest base `hq` holds,
+    then delegate to `SelectGarrisonTargets` with `reachMeters = GarrisonReachMeters`, `maxPoints =
+    MaxGarrisonedPoints` — one definition for the reach test and the cap (Reuse rule 4); the
+    indices `SelectGarrisonTargets` returns are the targets, nearest first — a point another
+    faction currently holds is still a target (taking it is the point); (c) for each target short of
     `MinGarrison + 1` units: recruit from `hq.factionUnits` with the `RecruitDefenders` filter
     (`Defence.cs:365-379`: `GroundVehicle`, not disabled, `VehicleDefinition` and `IsCombatVehicle`,
     `HasPlayerOrder != true`) **plus** `!state.Defenders.ContainsKey(unit)` (home guard),
@@ -529,8 +579,22 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
     unit(s).")` once per (point, first fill) — T10 reroutes it.
   Rows 10-14. Build. Grep `IsGarrisonUnit` — expect the definition plus exactly two callers
   (`Defence.cs` recruit filter, `CaptureService.cs` squad filter).
+  **Self-check (garrison targets)** — added to the same shared `SelfCheck()` in
+  `Points/CommanderStrategicPointService.cs` as T3/T5/T6/T7 use: five candidates at distances
+  `[5000f, 20000f, 8000f, 15000f, 3000f]` with `reachMeters = 12000f`, `maxPoints = 3` →
+  `result == [4, 0, 2]` ("five candidates, three inside reach, nearest first" — 3000, 5000, 8000 m
+  kept in that order; 20000 and 15000 excluded); six candidates all inside reach at `[1000f, 2000f,
+  3000f, 4000f, 5000f, 6000f]` with `maxPoints = 3` → `result == [0, 1, 2]` only ("six inside reach,
+  cap holds to the three nearest"); one candidate exactly at the boundary (`[12000f]`, `reachMeters
+  = 12000f`, `maxPoints = 1`) → `result == [0]` ("candidate exactly at `reachMeters` is included" —
+  the same inclusive boundary convention as `MineSnapMeters`, T7); no candidate in reach (`[20000f,
+  30000f]`, `reachMeters = 12000f`) → `result` empty ("no candidate in reach"). Build.
+  **Fail-proof**: SHA256 of `Ai/CommanderEnemyCommanderGarrison.cs`; plant `maxPoints` →
+  `maxPoints + 1` in `SelectGarrisonTargets` (or reverse the ascending sort — pick one and name it);
+  build; name the failing case ("six inside reach, cap holds": result now has four entries, not
+  three); restore; build; SHA256 byte-identical. Notes.
 
-- [ ] **T10 — One log funnel: `CommanderAiLog.Note` (ledger rows 15-16).** Create `UI/CommanderAiLog.cs`,
+- [x] **T10 — One log funnel: `CommanderAiLog.Note` (ledger rows 15-16).** Create `UI/CommanderAiLog.cs`,
   `internal static class CommanderAiLog`: `private const int Capacity = 200` (summary: design's
   "last 200 decisions"; ~30 s per review × 4 spenders means an hour of play); `private static readonly
   Dictionary<FactionHQ, List<Entry>> logs`; `internal readonly struct Entry(float MissionTime, string
@@ -553,7 +617,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   `Economy/CommanderEconomyService.cs:1074-1076`, `Ai/CommanderEnemyCommanderAir.cs:311` if it has no
   label). List them in the notes.
 
-- [ ] **T11 — COMMANDER LOG window (ledger rows 20-21).** Create `UI/CommanderAiLogUi.cs`,
+- [x] **T11 — COMMANDER LOG window (ledger rows 20-21).** Create `UI/CommanderAiLogUi.cs`,
   `internal sealed class CommanderAiLogUi`, copying `UI/CommanderUnitListUi.cs` member for member
   where it applies: `WindowId = 0x434F4D41` (distinct), `RefreshIntervalSeconds = 0.5f`, `RowHeight
   = 26f`; `Visible`, `Toggle`, `Hide`, `ResetPosition`, `ContainsScreenPoint`, `Tick` (same size
@@ -577,7 +641,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   timestamp column via `FormatMissionTime`, text label; `NO DECISIONS YET` when empty. Rows 20-21.
   Build.
 
-- [ ] **T12 — Points on the world and the tactical map (ledger row 23).** Create
+- [x] **T12 — Points on the world and the tactical map (ledger row 23).** Create
   `Points/CommanderStrategicPointMarkers.cs` (partial of the service). `internal void DrawMarkers(Camera
   camera)`: skip when `Event.current.type != EventType.Repaint` is already handled by the caller
   (`Units/CommanderWorldMarkerRenderer.cs:49-52`); for every point: colour by owner — `GetOwner() ==
@@ -602,7 +666,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   and half-size in the point (`ScreenPosition`, `ScreenHalfSize`, `ScreenFrame = Time.frameCount`)
   for T13's hit test. Row 23. Build.
 
-- [ ] **T13 — Click a point to read it (ledger rows 24-26, departure 3).** In the markers partial:
+- [x] **T13 — Click a point to read it (ledger rows 24-26, departure 3).** In the markers partial:
   `internal CommanderStrategicPoint? FocusedPoint { get; private set; }`, `internal bool
   TryFocusPointAt(Vector2 screenPosition)` — convert with `CommanderUiScale.ScreenToGui`, pick the
   nearest point whose `ScreenFrame ≥ Time.frameCount − 1` and whose square of `ScreenHalfSize`
@@ -614,7 +678,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   `FREE  —  build a gold mine here`, and a `CENTER` button (`CommanderTacticalMapService.Instance
   ?.JumpCameraToPosition(point.Position)`, `Map/CommanderTacticalMapService.cs:343`). Build.
 
-- [ ] **T14 — POINTS settings tab (ledger row 22, departure 2).** `UI/CommanderOverlayUiSettings.cs`:
+- [x] **T14 — POINTS settings tab (ledger row 22, departure 2).** `UI/CommanderOverlayUiSettings.cs`:
   row 22, then `private void DrawPointsSettings(float y)`: one `Panel` box, header `STRATEGIC POINTS`,
   then six slider rows on a 38 px pitch using the existing helpers — `MinGarrison` via
   `DrawCameraSlider(y, "Minimum garrison", value, 1f, 6f, "0", " vehicles")` rounded to an int;
@@ -624,7 +688,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   A muted footnote: `Discovery spacing lives in the config file, Points section.` Arithmetic in a
   comment: `y ≤ 162`, box 10 + 32 + 6×38 + 30 = 300 → 462 < 790. Build.
 
-- [ ] **T15 — Verification environment: BepInEx console on (ledger row 28; not repo code).** Edit
+- [x] **T15 — Verification environment: BepInEx console on (ledger row 28; not repo code).** Edit
   `I:\SteamLibrary\steamapps\common\Nuclear Option\BepInEx\config\BepInEx.cfg` line 48 under
   `[Logging.Console]`: `Enabled = false` → `Enabled = true`. Nothing else in the file changes.
   Verification: `Select-String -Path <cfg> -Pattern '^Enabled = true'` shows exactly one hit in the
@@ -632,7 +696,7 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   the notes). Tell the user in the notes that the console window will now open with the game and
   how to turn it back off.
 
-- [ ] **T16 — CHANGELOG and README (ledger row 27).** `CHANGELOG.md`: new bullet at the top of the
+- [x] **T16 — CHANGELOG and README (ledger row 27).** `CHANGELOG.md`: new bullet at the top of the
   `### Added` list at line 228, in the file's voice (what the player sees first): resource-site
   diamonds, village squares and hilltop triangles on the map and in the world; mines snap to sites
   and refuse elsewhere; two vehicles standing in a village ring for a minute take it and it pays
@@ -644,8 +708,11 @@ mine moves to sites. `Ai/CommanderEnemyCommanderDefence.cs` home-guard sizes and
   *What is on the map* (kinds, how they are found, the config keys under `Points/`), *Holding and
   earning* (the rule, the numbers, the contested/neutral states, mines-on-sites and reach), *Watching
   the AI* (COMMANDER LOG, tabs, header). Mention the BepInEx console tip from design §4.
+  Verification: grep `CHANGELOG.md` for the new bullet under `### Added` and grep `README.md` for
+  `## Strategic points` to confirm both insertions landed in the right place (top of the `Added`
+  list; before `## Unit systems`); no `dotnet build` needed — neither file is compiled.
 
-- [ ] **T17 — Final build, greps, notes.** `dotnet build GroundControlRts.csproj -c Release`; paste the
+- [x] **T17 — Final build, greps, notes.** `dotnet build GroundControlRts.csproj -c Release`; paste the
   last 5 lines. Greps to paste: `CommanderLabel(` (expect: definition, `CommanderAiLog.Note`, one doc
   comment), `TryFindEnemyBuildSite(hq, mine` (none), `IsGarrisonUnit` (definition + 2 callers),
   `NeutralBaseColor` (none — moved), `"Enemy commander (`/`"Player commander (` (none),
@@ -712,20 +779,390 @@ sliders moved to a POINTS tab (departure 2).
 
 ### Final build (T17)
 
-_(paste the last 5 lines of the build and the greps here)_
+`dotnet build GroundControlRts.csproj -c Release` (with `NUCLEAR_OPTION_DIR` exported as
+`I:\SteamLibrary\steamapps\common\Nuclear Option`), last 5 lines:
+
+```
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  GroundControlRts -> I:\Dropbox (Personal)\Projects\RTS-Commander\bin\Release\net472\GroundControlRts.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+```
+
+Greps (all run from the repo root):
+
+- `grep -rn "CommanderLabel(" --include=*.cs .` — 2 hits: the definition
+  (`Ai/CommanderPlayerCommanderService.cs:144`) and `CommanderAiLog.Note`'s call
+  (`UI/CommanderAiLog.cs:54`). The plan expected 3 (definition, `Note`, one doc comment); there is no
+  third hit because no doc comment in the current codebase mentions `CommanderLabel` by name —
+  recorded as a deviation below.
+- `grep -rn "TryFindEnemyBuildSite(hq, mine" --include=*.cs .` — no hits.
+- `grep -rn "IsGarrisonUnit" --include=*.cs .` — 3 hits: the definition
+  (`Ai/CommanderEnemyCommanderGarrison.cs:47`) and exactly two callers
+  (`Ai/CommanderEnemyCommanderDefence.cs:374`, `Ai/CommanderCaptureService.cs:690`).
+- `grep -rn "NeutralBaseColor" --include=*.cs .` — no hits (moved to
+  `CommanderUiTheme.NeutralMarker`; the pointer comment at the new site was reworded during T17 to
+  describe the move without repeating the old identifier, so the grep itself would confirm the move
+  cleanly).
+- `grep -rn '"Enemy commander (\|"Player commander (' --include=*.cs .` — no hits.
+- `grep -rn "FloorToInt(MissionTime" --include=*.cs .` — no hits (moved to
+  `CommanderAiLog.FormatMissionTime`).
+
+Every task's own build ran individually and passed at `0 Warning(s)`, `0 Error(s)` (see each task's
+description above); the six fail-proofs each needed one deliberate build with the defect in place,
+which is not this rule — see each fail-proof record. Nothing was installed, staged or committed.
 
 ### T3 fail-proof record (Testing rule 5)
 
-_(SHA256 before, the planted defect, the named failing cases, SHA256 after — byte-identical)_
+1. SHA256 of `Points/CommanderStrategicPointDiscovery.cs` before planting:
+   `96F8F8E97D5B19D4DE401E4DB92624232EC7A98152BC885AA64C631EC62EE40E`.
+2. Planted defect in `ApplySpacing`: `HorizontalDistance(candidate.Position, kept[k].Position) < minSpacing`
+   became `< minSpacing * 0.5f`. Build: succeeded, `0 Warning(s)`, `0 Error(s)` (invisible to the
+   compiler, as expected).
+3. Reasoned from the code with the defect in place, against `CheckDiscoverySpacing`'s synthetic
+   list (line0=0, line1=1000, baseAdjacent=100500 near an airbase at 100000, line2=2500, line3=4000,
+   line4=5500, line5=7000; `minSpacing=1500`, `exclusionRadius=2000`, `cap=3`): line1 is now only
+   blocked at <750 m, and its distance to the kept line0 is 1000 m, so it is wrongly kept — the case
+   **"newer of a close pair is dropped"** now fails (`candidates.Contains(line1)` is `true`, expected
+   `false`). With line1 kept, the final kept set is `[line0, line1, line2]` (cap still reached at 3,
+   so **"cap holds"** still passes) and the pairwise distance line0-line1 = 1000 m < 1500 m, so
+   **"kept points respect spacing"** also fails. The airbase exclusion test is a separate code path
+   untouched by this defect, so **"nothing inside the airbase exclusion"** still passes — the defect
+   is not load-bearing for that case, which is expected: it targets the spacing rule only.
+4. Restored `< minSpacing`. SHA256 after restore: `96F8F8E97D5B19D4DE401E4DB92624232EC7A98152BC885AA64C631EC62EE40E`
+   — byte-identical to step 1. Rebuilt: `0 Warning(s)`, `0 Error(s)`.
+
+### T4 fail-proof record (village and hilltop thresholds)
+
+1. SHA256 of `Points/CommanderStrategicPointDiscovery.cs` before planting:
+   `8CCE383847794EB0DB7DB7BFC10A3C2B4EAD2D0FDC0A71C7D23DAF8B8645DC51`.
+2. Planted defect in `QualifiesAsHilltop`: `sampleHeight - ringMeanHeight >= prominenceMeters` became
+   `sampleHeight - ringMeanHeight > prominenceMeters`. Build: succeeded, `0 Warning(s)`, `0 Error(s)`.
+3. Reasoned from the code: `QualifiesAsHilltop(160f, 100f, 60f, true)` computes `160 - 100 = 60`,
+   which is no longer `> 60`, so the call now returns `false` where the self-check expects `true` —
+   the case **"a sample exactly at `prominenceMeters` above the ring mean passes"** fails. The other
+   four hilltop/village cases are unaffected: `159f` vs `159 > 60` is still false (case still
+   passes), and `1000f` with `isHighestInRing = false` is still gated out by the `&&` regardless of
+   the comparison operator.
+4. Restored `>=`. SHA256 after restore: `8CCE383847794EB0DB7DB7BFC10A3C2B4EAD2D0FDC0A71C7D23DAF8B8645DC51`
+   — byte-identical to step 1. Rebuilt: `0 Warning(s)`, `0 Error(s)`.
 
 ### T5 fail-proof record
 
+1. SHA256 of `Points/CommanderStrategicPointService.cs` before planting:
+   `7ABFC6C0DE8FAD61D370C3FAF173EBB1967562406D503267F1E83463806AF7C8`.
+2. Planted defect in `Step`: `if (contested) return;` became `if (false) return;`. Build: succeeded
+   with `1 Warning(s)` (CS0162 "Unreachable code detected" on the now-dead `return;`), `0 Error(s)`
+   — the compiler flags the planted `if (false)` itself, which is expected and different from the
+   defect being invisible; the *semantic* effect (processing continues instead of freezing) is what
+   the self-check exists to catch, not the literal `if (false)`.
+3. Reasoned from the code: `state.Contested = contested;` still runs (unaffected), so `Pays` still
+   correctly reads `false` and `OwnerIndex` is untouched by this one call, but the early return no
+   longer happens, so the qualifying/candidate/progress logic below keeps running while contested.
+   In the **"contested freezes"** scenario (owner = 0, candidate = 1, `Progress = 30`, then one step
+   with `qualifying = 1, contested = true`): candidate is already 1 so it is not reset, and
+   `Progress += 5` runs anyway, giving `Progress = 35`. The case
+   **"contested freezes: progress unchanged"** fails (expected 30, got 35). The sibling assertions
+   in the same group do not: `"contested freezes: owner unchanged"` still passes (owner was never
+   written by this defect) and `"contested freezes: pays false even with an owner in place"` still
+   passes (`Contested` is still set true unconditionally, so `Pays` is still false) — the defect is
+   only load-bearing for the progress-freeze half of the rule, which is exactly what
+   `if (contested) return;` exists to guarantee.
+4. Restored `if (contested) return;`. SHA256 after restore:
+   `7ABFC6C0DE8FAD61D370C3FAF173EBB1967562406D503267F1E83463806AF7C8` — byte-identical to step 1.
+   Rebuilt: `0 Warning(s)`, `0 Error(s)`.
+
 ### T6 fail-proof record
+
+1. SHA256 of `Points/CommanderStrategicPointService.cs` before planting:
+   `8CF5E0343154CC66C33A6274CB6599341D4724677376449599AB65E4BB5D49A3`.
+2. Planted defect in `SumIncomePerMinute`: `villages * villageRate` became `villages * hilltopRate`.
+   Build: succeeded, `0 Warning(s)`, `0 Error(s)`.
+3. Reasoned from the code: `SumIncomePerMinute(2, 1, 3, 30f, 10f, 5f)` now computes
+   `2*30 + 1*5 + 3*5 = 60 + 5 + 15 = 80`, not `85` — the case **"income sums"** fails (expected 85,
+   got 80). `"a site pays only through its mine"` is unaffected (`IncomePerMinute` is a separate
+   function untouched by this edit) and `"income ladder is base > village > hilltop"` reads the live
+   `CommanderSettings` rates directly, not `SumIncomePerMinute`, so it also still passes.
+4. Restored `villages * villageRate`. SHA256 after restore:
+   `8CF5E0343154CC66C33A6274CB6599341D4724677376449599AB65E4BB5D49A3` — byte-identical to step 1.
+   Rebuilt: `0 Warning(s)`, `0 Error(s)`.
+
+### T7 fail-proof record (mine snap)
+
+1. SHA256 of `Points/CommanderStrategicPointService.cs` before planting:
+   `DE3B211AD95FB7E46B2D520DEAC2E2AAA9547E4D459918BCF20C3C327EBAE3F6`.
+2. Planted defect in `NearestFreeSiteIndex`: the skip condition `distances[i] > snapMeters` became
+   `distances[i] >= snapMeters` (the plan's `<=` -> `<` on the accept side, expressed on the skip
+   side actually used in this implementation). Build: succeeded, `0 Warning(s)`, `0 Error(s)`.
+3. Reasoned from the code: `NearestFreeSiteIndex([1000f], [true], 1000f)` now skips its only
+   candidate (`1000 >= 1000` is true) and returns -1 instead of 0 — the case
+   **"one free site just inside `snapMeters`"** fails (expected 0, got -1). The other four cases are
+   untouched: none of them sits exactly on the boundary, so `>` and `>=` agree on all of them.
+4. Restored `distances[i] > snapMeters`. SHA256 after restore:
+   `DE3B211AD95FB7E46B2D520DEAC2E2AAA9547E4D459918BCF20C3C327EBAE3F6` — byte-identical to step 1.
+   Rebuilt: `0 Warning(s)`, `0 Error(s)`.
 
 ### T7 mine spawn-path trace
 
+`grep -n "SpawnMine(" Economy/CommanderEconomyService.cs Economy/CommanderEconomyServiceEnemy.cs`:
+- `Economy/CommanderEconomyService.cs:643` — the player click path, `TryPlaceBuildingFromWorld`,
+  calls `SpawnMine(hq, position)`.
+- `Economy/CommanderEconomyServiceEnemy.cs:425` — `TryBuildEnemyMine` calls
+  `SpawnMine(hq, site, randomRotation: true)` (as of T7; T8 changes how `site` is found, not this
+  call).
+- `Economy/CommanderEconomyService.cs:830` — `SpawnMine` itself: snaps the target through
+  `CommanderStrategicPointService.TrySnapMineSite`, then calls `SpawnBuilding(hq, site, ...)`, which
+  calls `preview.IsSiteAllowed(definition, position, hq, out _)` before ever spawning anything.
+  Every mine, from both commanders, therefore passes through `TrySnapMineSite` and `IsSiteAllowed`
+  exactly once, with no other path to a spawned mine.
+
+### T9 fail-proof record (garrison targets)
+
+1. SHA256 of `Ai/CommanderEnemyCommanderGarrison.cs` before planting:
+   `09E5265BCD803369B19EB63AEF59CD50A4E5BB34DA1897E5F3377E79D2896661`.
+2. Planted defect in `SelectGarrisonTargets`: the loop condition `result.Count < maxPoints` became
+   `result.Count < maxPoints + 1`. Build: succeeded, `0 Warning(s)`, `0 Error(s)`.
+3. Reasoned from the code: with six candidates all inside reach and `maxPoints = 3`, the cap now
+   effectively admits 4 entries — the case **"six inside reach, cap holds to the three nearest"**
+   fails (result is `[0,1,2,3]`, not `[0,1,2]`). The other three cases are unaffected because none
+   of them has more in-reach candidates than the (now off-by-one) cap: the five-candidate case has
+   only 3 in reach, the boundary case has only 1 candidate total, and the no-candidates case stays
+   empty regardless of the cap.
+4. Restored `result.Count < maxPoints`. SHA256 after restore:
+   `09E5265BCD803369B19EB63AEF59CD50A4E5BB34DA1897E5F3377E79D2896661` — byte-identical to step 1.
+   Rebuilt: `0 Warning(s)`, `0 Error(s)`.
+
 ### T10 surviving `LogInfo` lines without an HQ
+
+`grep -n "LogInfo(" Ai/*.cs Economy/CommanderEconomyServiceEnemy.cs Units/CommanderRepairService.cs`
+plus a direct check of `Economy/CommanderEconomyService.cs` (dock prefab resolution) — every survivor
+is a roster/prefab/category resolution line with no per-decision `FactionHQ` to hang a tab on, or a
+UI toggle notice, never an AI decision:
+
+- `Ai/CommanderCaptureService.cs:410` — `"Vehicles that can capture ({hq.faction.name}): {names}."`,
+  a one-time roster dump, not a decision.
+- `Ai/CommanderEnemyCommanderAir.cs:310` — `"Air roster ({hq.faction.name}): ..."`, same shape.
+- `Ai/CommanderPlayerCommanderService.cs:218` — `"Player commander switched ON/OFF for {faction}."`,
+  the manual toggle notice from `Toggle()`, not an AI-authored line.
+- `Economy/CommanderEconomyServiceEnemy.cs:312` — `"No {category} structure..."` /
+  `"Commanders will build {structure} for {category} ({cost})."`, resolved once per mission, before
+  any commander has decided anything.
+- `Economy/CommanderEconomyService.cs:1123` — the naval dock prefab pick, same one-off resolution
+  shape, no `hq` in scope.
+
+Separately: `grep -rn "CommanderLabel" --include=*.cs .` returns **2** hits, not the 3 the plan
+expected (definition + `CommanderAiLog.Note`) — there is no third, doc-comment hit anywhere in the
+current codebase; `Ai/CommanderPlayerCommanderService.cs`'s `IsCommanded` doc comment does not
+mention `CommanderLabel` by name. Recorded as a deviation (grep count) below; nothing was added or
+removed to manufacture a third hit.
 
 ### Deviations from plan or design
 
-_(every one, with the reason; "none" is an acceptable answer only after the greps above)_
+1. **`Evaluate`'s new mine-siting rule is gated on `hq != null` (ledger row 1).** The row's literal
+   wording has `Evaluate` call `TrySnapMineSite` for every mine definition regardless of `hq`. But
+   T3's own discovery code calls `economy.IsSiteAllowed(mineDefinition, candidate, null, …)` to test
+   whether a *candidate* position is legal ground for a *new* site — before that site is registered.
+   If the new site-snap rule ran unconditionally, that very call would require a resource site to
+   already exist near the candidate, which is circular: the first site on a map could never be
+   found, because none is registered yet to snap to. The existing code already treats `hq == null`
+   as "this call is a geometry/site-finding probe, not a real build" — it is exactly what turns off
+   the radius check at `CommanderBuildPreview.cs`'s `if (hq != null && …)` line, which the plan's own
+   T3 text cites as the reason the radius check is off during discovery. Extending that same
+   convention to the new mine-siting rule (`if (mine && hq != null) { … }`) resolves the circularity
+   without forking the rule: real build/click/AI paths always pass a real `hq` and get the new
+   gating; discovery's `hq: null` probes get the old geometry-only behaviour, which is what
+   discovery needs. Evidence: `Economy/CommanderBuildPreview.cs` `Evaluate`; the guard comment there
+   cites this reasoning directly.
+2. **T1's "18 Points entries" is 19.** The task text says "add the 18 `Points` entries" but then
+   lists 19 names (it includes `MineSnapMeters` in the same sentence as the other 18). All 19 named
+   settings were added — `FillGridMeters` through `MineSnapMeters` — matching the full constants
+   table earlier in the plan. This is a miscount in the plan's prose, not an instruction to omit
+   `MineSnapMeters`; nothing was left out.
+3. **Ledger row 4 (the `IsSiteAllowed`/`MineDefinition` forwarding members on
+   `CommanderEconomyService`) was added in T3, not T7.** T3's own task text calls
+   `economy.IsSiteAllowed(mineDefinition, candidate, null, …)` and
+   `CommanderEconomyService.Instance?.MineDefinition` before T7 (which is where "apply rows 1-4
+   exactly" is written) ever runs. Row 4 is small, self-contained and has no dependency on rows 1-3
+   (which need `TrySnapMineSite`/`IsInsideGarrisonedPointReach`, added in T7), so it was implemented
+   early to satisfy T3's own forward reference. No behaviour differs from the ledger row's
+   description; only which task's build first contains it.
+4. **The T7 fail-proof plants `>=` where the plan's prose describes the boundary as `distances[i] <=
+   snapMeters` -> `<`.** The actual implementation's skip condition is the logical complement,
+   `distances[i] > snapMeters` (skip when strictly greater, i.e. keep when `<=`). Flipping the
+   accept side from `<=` to `<` is written on the skip side as `>` becoming `>=`; the observable
+   defect (the boundary case no longer counts as inside) and the named failing case are exactly what
+   the plan asks for. See the T7 fail-proof record.
+5. **T12's diamond/triangle/square markers are drawn as rotated line segments (`GUIUtility.RotateAroundPivot`
+   per edge) rather than literal "stepping" axis-aligned bars.** The plan's wording ("a diamond is
+   four short bars stepping diagonally, a triangle three, a square the four edges") describes the
+   general shape-from-bars approach without giving exact coordinates; a true diagonal edge cannot be
+   drawn with an axis-aligned `Bar` alone. The implementation still uses exactly 4 (diamond/square)
+   or 3 (triangle) `CommanderUiTheme.Bar` calls per shape, in an outline (never filled, matching the
+   existing `DrawWorldMarker` bracket style), with the GUI matrix saved and restored around each
+   edge so it never leaks into the label draw that follows. Purely cosmetic, not covered by any
+   self-check; flagged here per the plan's instruction to record every deviation, however small.
+6. **`grep -rn "CommanderLabel(" --include=*.cs .` returns 2 hits, not the 3 the plan's T17 checklist
+   expects.** Checked directly: no doc comment anywhere in the current codebase (including
+   `Ai/CommanderPlayerCommanderService.cs`'s `IsCommanded` remarks) mentions `CommanderLabel` by
+   name. The plan's expectation of a third hit does not match the code as it stands; nothing was
+   added to manufacture one. See the T10 notes section for the same finding.
+7. **`Ai/CommanderEnemyCommanderGarrison.cs`'s `garrisonPointUnits`, `garrisonTargetPoints`,
+   `garrisonTargetDistances`, `garrisonTargetIndices`, `garrisonTargets` and `garrisonPosts` are
+   additional scratch fields beyond the two the plan names (`garrisonCandidates`, `staleGarrison`).**
+   Both named fields are used exactly as specified (recruitment candidates and prune/release
+   scratch, mirroring `defenceCandidates`/`staleDefenders`). The extra fields are needed to hold the
+   per-review target-selection working set (candidate points, their distances, the indices
+   `SelectGarrisonTargets` returns, the resolved target list) and the per-point ring-post cache; none
+   of them changes behaviour, they only avoid reallocating small lists every 10 s review.
+   `garrisonPosts` (the one dictionary among them) is explicitly cleared in `ResetSession` even
+   though the plan's row 12 only names the two list scratch fields, because it is keyed on
+   `CommanderStrategicPoint` object identity and those objects do not survive a mission reload
+   (discovery rebuilds the whole list from scratch) — leaving it uncleared would only grow with
+   entries nothing can ever look up again.
+8. **The village/hilltop hold-change log line (T5) and the garrison-fill log line (T9) route through
+   `CommanderAiLog.Note` with the exact text the plan gives them** (`"{Label} is neutral."` /
+   `"{Label} held by {faction}."` / `"garrisons {Label} with {n} unit(s)."`), which means the final
+   console line carries the commander-label prefix `Note` always adds (e.g.
+   `"Enemy commander (RANDIA) VILLAGE 3 held by RANDIA."`), naming the faction twice. The plan's T10
+   text says these two lines "become `Note` too" without asking for new wording, so the literal text
+   was kept; the redundancy is cosmetic (BepInEx console output only) and not covered by any
+   self-check.
+
+Everything else in the ledger, the constants table and the four originally recorded departures
+(resource site placement beside its anchor building, the POINTS settings tab, the focused-point
+selection-bar card, and `Points/MineSnapMeters`) was implemented exactly as written.
+
+### Fix cycle 2 (execution evaluation)
+
+An opus evaluator's execution-evaluation FAIL returned three fix items; all three applied.
+
+1. **Missing/incomplete `<summary>`s on class-level constants.** `UI/CommanderAiLogUi.cs:16-18`
+   (`WindowId`, `RefreshIntervalSeconds`, `RowHeight`) had no `<summary>` at all; added one to each,
+   checked truthfully against `UI/CommanderUnitListUi.cs`: `WindowId = 0x434F4D41` (ASCII `COMA`)
+   differs from that window's `0x434F4D4C` (`COML`) only in its last byte, which is all `GUI.Window`
+   needs to tell them apart; `RefreshIntervalSeconds = 0.5f` matches
+   `CommanderUnitListUi.RefreshIntervalSeconds` exactly (same constant, same value, same reason);
+   `RowHeight = 26f` matches the literal `26f` row pitch `CommanderUnitListUi.DrawBattleLog` uses
+   for its own battle-log rows (lines 152/161 there), not that window's own `RowHeight` constant
+   (`30f`, which sizes its unit rows instead). Also extended
+   `Points/CommanderStrategicPointMarkers.cs:13` (`WorldMarkerSize = 30f`, summary previously said
+   only what it was) with why: checked `Units/CommanderWorldMarkerRenderer.cs`'s own world-marker
+   sizes (`26f` standard, `34f` capture-progress ring, plus `44f`/`48f`/`14f`/`22f` for other
+   specific markers) and recorded that `30f` sits between the `26f` and `34f` pair specifically, the
+   two closest in kind to a strategic point marker. Also added the missing `<summary>` on
+   `UI/CommanderAiLog.cs:20` (`logs`).
+2. **`CHANGELOG.md:233-234` omitted departure 4's snap distance and config key.** The "Gold mines
+   can only be built on a resource site" bullet said the ghost "snaps to the nearest free site
+   within reach" with no number or setting name; amended to
+   "(`Points/MineSnapMeters`, 1 km by default)", matching `README.md:640-641`'s existing wording.
+3. **Cross-group point spacing never checked resource sites against villages/hilltops
+   (`Points/CommanderStrategicPointDiscovery.cs`).** `ApplySpacing` (now ~line 684) always started
+   its `kept` list empty, so the villages/hilltops pass (`StepBases`, ~line 539) never saw the sites
+   the sites pass (`StepSites`, ~line 127) had already accepted — a village or hilltop could sit
+   arbitrarily close to a resource site, which design.md section 1's Caps ("no two [non-base points]
+   within 1.5 km") forbids. Gave `ApplySpacing` an optional `preKept` parameter (default `null`, one
+   definition, Reuse rule 4): candidates are still blocked by the exclusion centres and by `kept` (the
+   candidates this same call has accepted so far) exactly as before, and now also by `preKept` when
+   given — checked, but never added to `kept` and never counted against `cap`, so the existing
+   "earlier wins, newer dropped" ordering and the `MaxNonBasePoints`/site-cap semantics are
+   unchanged. `StepBases`'s villages/hilltops call now passes `points` as `preKept` — at that point
+   in discovery `points` holds only the already-accepted resource sites (bases are appended after
+   this call, villages/hilltops are not added until after it either). The sites-vs-sites call in
+   `StepSites` is unchanged (nothing exists yet to seed it with).
+
+   Extended `CheckDiscoverySpacing` in `Points/CommanderStrategicPointService.cs` with two new named
+   cases exercising `preKept` directly: **"a candidate within minSpacing of a pre-kept point is
+   rejected"** (a pre-kept site 500 m from a candidate village, `minSpacing = 1500f`, `cap = 3`:
+   candidate is dropped) and **"the same candidate is kept when there is no pre-kept list"** (the
+   identical candidate, same call with `preKept` omitted: candidate is kept). Note: because of a
+   concurrent, unrelated fix landing in this same file mid-cycle (see below), the villages/hilltops
+   cap argument at the `StepBases` call site is `CommanderSettings.PointsMaxNonBasePoints` (a
+   dedicated cap) rather than the `Mathf.Max(0, PointsMaxNonBasePoints - points.Count)` this task
+   started from — orthogonal to this fix, so left as found.
+
+   **Fail-proof record (Testing rule 5):**
+   1. SHA256 of `Points/CommanderStrategicPointDiscovery.cs` with the fix in place, immediately
+      before planting: `D025707145D384EAFE4BFD2D1F94554C2EA07D76E398F54AD80F26A899ECF9A3`.
+   2. Planted defect in `ApplySpacing`: `if (preKept != null)` became `if (preKept != null && false)`
+      — the pre-kept check compiles but never runs, i.e. the seeding is ignored and the pass
+      behaves as if `kept` started empty, exactly as it did before this fix. Build: succeeded,
+      `0 Warning(s)`, `0 Error(s)` (invisible to the compiler, as expected).
+   3. Reasoned from the code with the defect in place, against the two new cases' synthetic input
+      (a pre-kept site at `(20000,0,0)`, a candidate village at `(20500,0,0)`, `minSpacing = 1500f`):
+      with the pre-kept branch disabled, `blocked` is never set by it, and `kept` starts empty for
+      this call, so the candidate is not blocked by anything and is added — the case **"a candidate
+      within minSpacing of a pre-kept point is rejected"** fails (`withPreKept.Contains(...)` is
+      `true`, expected `false`). The sibling case **"the same candidate is kept when there is no
+      pre-kept list"** is unaffected — it never passes a `preKept` argument, so this defect (which
+      only short-circuits the `preKept != null` branch) changes nothing on that path, and it
+      continues to pass. The original `CheckDiscoverySpacing` cases ("cap holds", "newer of a close
+      pair is dropped", "nothing inside the airbase exclusion", "kept points respect spacing") are
+      likewise untouched: none of their candidates pass a `preKept` argument either. This is a
+      reasoned derivation from the code, not an observation from the running game.
+   4. Restored `if (preKept != null)`. SHA256 after restore:
+      `D025707145D384EAFE4BFD2D1F94554C2EA07D76E398F54AD80F26A899ECF9A3` — byte-identical to step 1.
+      Rebuilt: `0 Warning(s)`, `0 Error(s)`.
+
+   Note on the hash pair above: an earlier attempt at this same fail-proof, started right after this
+   fix was first landed, recorded a "before" hash that a concurrent, unrelated edit from another
+   agent working the same track (the cap-semantics change noted just above, in this same file) had
+   already invalidated by the time of the "after restore" hash — the mismatch was a real
+   label-rename (`SITE {i + 1}` -> `RESOURCE SITE {i + 1}`) landing mid-cycle, not an error in the
+   restore. The record above is a second, tight attempt (hash immediately before planting, defect,
+   build, revert, hash immediately after) that completed byte-identical.
+
+The In-game acceptance line for point spacing (`no two are on top of each other`) needed no
+caveat added or removed: no "a square or triangle may legitimately appear close to a diamond" text
+was present in this file to remove, and this fix makes that scenario impossible going forward (see
+fix 3), so the line stands as written, now true across both spacing passes rather than only within
+each.
+
+### Departure 5 — spacing picks farthest-first, not "newer dropped" (main session, 2026-09-13)
+
+Recorded after the loop closed, at the team lead's instruction to fold the main session's in-game
+fixes into this track as-is.
+
+design.md section 1 states the spacing rule as "Minimum spacing ~2 km between sites; newer one
+dropped on conflict" — a first-come rule where the earlier candidate wins every conflict and the cap
+truncates whatever is left. In game on Ground Control Duel that produced a badly skewed map: 29 of
+30 resource sites and 30 of 30 hilltops landed in the southern half, because the fill and hilltop
+scans walk cells south to north and the cap ran out before the scan reached the north. The cap was
+behaving as "how far north", not "how many".
+
+`ApplySpacing` (`Points/CommanderStrategicPointDiscovery.cs`) now selects farthest-first: the first
+eligible candidate seeds the kept set, and every later pick is the eligible candidate whose nearest
+kept neighbour is farthest away, subject to the same minimum spacing. The exclusion pass and the
+`preKept` cross-group seed (fix cycle 2) run first and are unchanged, so both keep their original
+first-come, order-preserving behaviour.
+
+Why this is a departure and not a refinement: the design's rule is order-dependent and this one is
+not. Under the new rule the candidate that survives a close pair is whichever one the spread favours,
+which is usually but not always the earlier one. The observable guarantee the design actually cared
+about — no two points closer than the minimum spacing, and no more than the cap — is preserved
+exactly. What changes is which points fill the cap.
+
+Self-check: `CheckDiscoverySpacing` gained "spread: cap of three still holds" and "spread: the far
+end of the map is reached" — eleven candidates in a line 1.6 km apart with a cap of three, where a
+first-come rule keeps the three nearest the start and farthest-first must reach the far end. That is
+the case that would have caught the southern-half clustering. The four original cases and the two
+cross-group cases still pass unchanged under the new ordering (verified by hand: the line scenario
+keeps x = 0, 16000 and 8000; the pre-kept village at 500 m from a kept site is still rejected in
+pass 1, which farthest-first never sees).
+
+Also folded in from the main session: resource sites and control points now have separate caps
+(`Points/MaxResourceSites` and `Points/MaxNonBasePoints`) because one shared cap let a full set of
+sites starve the villages and hilltops to zero; point labels read `RESOURCE SITE n` and `HILLTOP n`;
+discovery retries up to three times at half-minute intervals when it finds no resource sites at all
+(a hot reload can race the height map and return an empty result in 0.0 s); and while no sites
+exist, the pre-points "build anywhere inside your base radius" rule stays in force for the player
+ghost and both AI commanders, so a failed discovery pass can never lock a faction out of building a
+mine. CHANGELOG.md and README.md were updated to describe the retry and the fallback, which had
+shipped undocumented, and two stale README sentences (the village building count, and the single
+non-base cap) were corrected.
+
+USER TO DECIDE, not fixed here: the village and hilltop thresholds were lowered in design.md and in
+the shipped defaults (cluster 300 -> 400 m, minimum buildings 4 -> 3, prominence 60 -> 30 m) after
+the duel map produced zero of each at the approved numbers. Those new numbers have not been played.

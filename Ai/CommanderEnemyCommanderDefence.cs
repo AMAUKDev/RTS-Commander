@@ -151,10 +151,9 @@ internal sealed partial class CommanderEnemyCommanderService
         if (defending != state.Defending)
         {
             state.Defending = defending;
-            CommanderPlugin.Log.LogInfo(defending
-                ? $"{CommanderPlayerCommanderService.CommanderLabel(hq)} goes to DEFENCE posture: hostiles inside "
-                    + $"{ThreatRadiusMeters / 1000f:0.#} km of its bases."
-                : $"{CommanderPlayerCommanderService.CommanderLabel(hq)} stands down from DEFENCE posture.");
+            CommanderAiLog.Note(hq, defending
+                ? $"goes to DEFENCE posture: hostiles inside {ThreatRadiusMeters / 1000f:0.#} km of its bases."
+                : "stands down from DEFENCE posture.");
         }
 
         EnsureDefencePosts(hq, state);
@@ -370,6 +369,9 @@ internal sealed partial class CommanderEnemyCommanderService
                 && unit.definition is VehicleDefinition definition
                 && IsCombatVehicle(definition)
                 && !state.Defenders.ContainsKey(unit)
+                // A vehicle already standing on a control point garrison is spoken for the same
+                // way a defender is - see CommanderEnemyCommanderGarrison.
+                && !IsGarrisonUnit(unit)
                 // Co-command: a vehicle the player has given an order to is theirs until it gets
                 // there. Pinning it to the ring would fight their own click.
                 && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true)

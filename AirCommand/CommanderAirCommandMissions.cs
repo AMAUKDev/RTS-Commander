@@ -163,6 +163,7 @@ internal sealed partial class CommanderAirCommandService
         if (relocationAircraft != null && missions.TryGetValue(relocationAircraft, out AirMission relocationMission))
         {
             relocationMission.AreaCenter = target;
+            relocationMission.RememberArea();
             DestroyMissionMapVisual(relocationMission);
             EnsureMissionMapVisual(relocationMission);
             SetStatus($"{GetModeLabel(relocationMission.Mode)} mission area relocated.");
@@ -233,7 +234,7 @@ internal sealed partial class CommanderAirCommandService
     /// it just no longer has to be taxied off. Callers own their own supply bookkeeping, because
     /// no hangar runs here to do it for them.
     /// </remarks>
-    internal static Aircraft? LaunchAiAircraft(
+    internal static bool TryLaunchAiAircraft(
         FactionHQ hq,
         Airbase airbase,
         AircraftDefinition definition,
@@ -242,10 +243,27 @@ internal sealed partial class CommanderAirCommandService
         float fuel,
         GlobalPosition facing)
     {
+        if (CommanderSettings.AiAircraftLaunchFromHangar)
+        {
+            // The game's own path, behind the Gameplay toggle so the ejection problem above can be
+            // re-tested map by map instead of assumed. A hangar takes one airframe out of stock on
+            // the way out of the door, and this method promises its callers that it leaves stock
+            // alone (they do their own bookkeeping), so the one it consumes is put in first and
+            // taken back if the hangar refuses.
+            hq.ModifyUnitSupply(definition, 1);
+            if (airbase.TrySpawnAircraft(null, definition, livery, loadout, fuel).Allowed)
+            {
+                return true;
+            }
+
+            hq.ModifyUnitSupply(definition, -1);
+            return false;
+        }
+
         Spawner? spawner = NetworkSceneSingleton<Spawner>.i;
         if (spawner == null || airbase.center == null || definition.unitPrefab == null)
         {
-            return null;
+            return false;
         }
 
         Vector3 origin = airbase.center.position + Vector3.up * LaunchAltitudeMeters;
@@ -280,34 +298,58 @@ internal sealed partial class CommanderAirCommandService
             aircraft.Networkloadout = aircraft.weaponManager.SelectAIAircraftWeapons(airbase);
         }
 
-        return aircraft;
+        return aircraft != null;
     }
 
     private void SpawnMission(AirMissionOption option, Airbase airbase, GlobalPosition target)
     {
+        // The UI path: the recipe is whatever the AIR window has selected right now, and the loadout
+        // is built from the live hardpoint picker. A relaunch comes through TrySpawnFromRecipe with
+        // the recipe recorded at first launch instead, so later picker changes do not leak into it.
+        Loadout loadout = option.BuildLoadout();
+        NormalizeLoadoutLength(loadout, option.Definition);
+        AirMissionRecipe recipe = new(
+            option,
+            airbase,
+            loadout,
+            target,
+            GetMissionRadius(option.Mode),
+            SupportsTargetAltitude(option.Mode) ? selectedTargetAltitude : 0f,
+            option.Mode == AirCommandMode.AirGuard && TargetOrdnance,
+            option.Mode == AirCommandMode.Arad && SaturationAttack);
+        TrySpawnFromRecipe(recipe, airbase, autoRecreate: false);
+    }
+
+    /// <summary>
+    /// Launches one mission from a recipe. Returns false, with the reason in the status line, when
+    /// nothing left the ground and nothing was charged.
+    /// </summary>
+    private bool TrySpawnFromRecipe(AirMissionRecipe recipe, Airbase airbase, bool autoRecreate)
+    {
+        AirMissionOption option = recipe.Option;
         if (NetworkManagerNuclearOption.i == null || !NetworkManagerNuclearOption.i.Server.Active)
         {
             SetStatus("Air Command is host-only.");
-            return;
+            return false;
         }
 
         FactionHQ? hq = CommanderGameAccess.GetLocalHq();
         if (hq == null || !IsCompatibleAirbase(airbase, hq, option.Definition))
         {
             SetStatus("The selected airbase is no longer compatible.");
-            return;
+            return false;
         }
 
         if (!airbase.CanSpawnAircraft(option.Definition))
         {
             SetStatus("The selected airbase is busy. Retry when a compatible hangar is free.");
-            return;
+            return false;
         }
 
         if (pendingAircraftSpawn != null)
         {
             SetStatus("Wait for the previous Air Command aircraft to finish spawning.");
-            return;
+            return false;
         }
 
         bool purchased = false;
@@ -316,7 +358,7 @@ internal sealed partial class CommanderAirCommandService
             if (hq.factionFunds < option.Definition.value)
             {
                 SetStatus("The faction cannot afford this aircraft.");
-                return;
+                return false;
             }
 
             hq.AddFunds(-option.Definition.value);
@@ -326,20 +368,15 @@ internal sealed partial class CommanderAirCommandService
 
         pendingAircraftSpawn = new PendingAircraftSpawn(
             hq,
-            option,
-            target,
-            GetMissionRadius(option.Mode),
-            SupportsTargetAltitude(option.Mode) ? selectedTargetAltitude : 0f,
-            option.Mode == AirCommandMode.AirGuard && TargetOrdnance,
-            option.Mode == AirCommandMode.Arad && SaturationAttack,
+            recipe,
+            autoRecreate,
             purchased,
             purchased ? option.Definition.value : 0f,
             Time.unscaledTime + PendingSpawnTimeoutSeconds);
 
         int liveryIndex = option.Definition.aircraftParameters.GetRandomLiveryForFaction(hq.faction);
-        Loadout loadout = option.BuildLoadout();
-        NormalizeLoadoutLength(loadout, option.Definition);
-        if (!ValidateSelectedLoadout(option, loadout, airbase, hq, out string loadoutError))
+        Loadout loadout = recipe.Loadout;
+        if (!ValidateSelectedLoadout(option, loadout, airbase, hq, out string loadoutError, fromPicker: !autoRecreate))
         {
             pendingAircraftSpawn = null;
             if (purchased)
@@ -348,32 +385,16 @@ internal sealed partial class CommanderAirCommandService
                 hq.AddFunds(option.Definition.value);
             }
             SetStatus(loadoutError);
-            return;
+            return false;
         }
-        LiveryKey livery = new(liveryIndex);
-        float fuel = option.Definition.aircraftParameters.DefaultFuelLevel;
-        bool launched;
-        if (LaunchFromHangar)
-        {
-            // The game's own path: the hangar takes the airframe out of stock on the way out of
-            // the door and the AI pilot taxis and takes off. Kept behind a toggle so the ejection
-            // problem LaunchAiAircraft was written for can be re-tested map by map instead of
-            // assumed.
-            launched = airbase.TrySpawnAircraft(null, option.Definition, livery, loadout, fuel).Allowed;
-        }
-        else
-        {
-            launched = LaunchAiAircraft(hq, airbase, option.Definition, livery, loadout, fuel, target) != null;
-            if (launched)
-            {
-                // Hangar.TrySpawnAircraft takes the airframe out of stock on the way out of the
-                // door. LaunchAiAircraft does not go through a hangar, so the stock comes off here:
-                // it cancels the purchase's +1 above, or consumes one the faction already had.
-                hq.ModifyUnitSupply(option.Definition, -1);
-            }
-        }
-
-        if (!launched)
+        if (!TryLaunchAiAircraft(
+                hq,
+                airbase,
+                option.Definition,
+                new LiveryKey(liveryIndex),
+                loadout,
+                option.Definition.aircraftParameters.DefaultFuelLevel,
+                recipe.AreaCenter))
         {
             pendingAircraftSpawn = null;
             if (purchased)
@@ -382,11 +403,18 @@ internal sealed partial class CommanderAirCommandService
                 hq.AddFunds(option.Definition.value);
             }
             SetStatus("The selected airbase rejected the aircraft spawn.");
-            return;
+            return false;
         }
 
-        SetStatus($"{GetModeLabel(option.Mode)} mission launched: {GetAircraftLabel(option.Definition)} / {option.LoadoutName}"
-            + (LaunchFromHangar ? " (hangar)." : "."));
+        // TryLaunchAiAircraft leaves stock as it found it whichever way the airframe left, so the
+        // one consumed comes off here: it cancels the purchase's +1 above, or uses one the faction
+        // already had.
+        hq.ModifyUnitSupply(option.Definition, -1);
+
+        SetStatus($"{GetModeLabel(recipe.Mode)} mission {(autoRecreate ? "relaunched" : "launched")}: "
+            + $"{GetAircraftLabel(option.Definition)} / {option.LoadoutName}"
+            + (CommanderSettings.AiAircraftLaunchFromHangar ? " (hangar)." : "."));
+        return true;
     }
 
     private void TryAssignPendingAircraft(FactionHQ hq, Unit unit)
@@ -401,21 +429,24 @@ internal sealed partial class CommanderAirCommandService
             return;
         }
 
+        AirMissionRecipe recipe = pending.Recipe;
         AirMission mission = new(
             pending.Hq,
-            pending.Option.Mode,
-            pending.AreaCenter,
-            pending.Radius,
-            pending.TargetAltitude,
-            pending.TargetOrdnance,
-            pending.SaturationAttack,
+            recipe.Mode,
+            recipe.AreaCenter,
+            recipe.Radius,
+            recipe.TargetAltitude,
+            recipe.TargetOrdnance,
+            recipe.SaturationAttack,
             pending.PurchasedWithFunds,
-            pending.PurchaseCost);
+            pending.PurchaseCost,
+            recipe,
+            pending.AutoRecreate);
         missions[aircraft] = mission;
         CommanderSelectionService.PinMissionUnit(
             aircraft,
             "AIR COMMAND",
-            GetModeLabel(pending.Option.Mode));
+            GetModeLabel(recipe.Mode));
         pendingAircraftSpawn = null;
     }
 

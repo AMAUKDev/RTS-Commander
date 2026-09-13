@@ -128,29 +128,53 @@ internal sealed partial class CommanderAirCommandService
         internal Airbase Airbase { get; }
     }
 
-    private sealed class PendingAircraftSpawn
+    /// <summary>
+    /// Everything needed to launch one mission again exactly as it was first launched: the airframe
+    /// and mode, the loadout as built at launch (not the live hardpoint picker, which the player may
+    /// have changed since), the departure base and the mission area settings.
+    /// </summary>
+    internal sealed class AirMissionRecipe
     {
-        internal PendingAircraftSpawn(FactionHQ hq, AirMissionOption option, GlobalPosition areaCenter, float radius, float targetAltitude, bool targetOrdnance, bool saturationAttack, bool purchasedWithFunds, float purchaseCost, float expiresAt)
+        internal AirMissionRecipe(AirMissionOption option, Airbase origin, Loadout loadout, GlobalPosition areaCenter, float radius, float targetAltitude, bool targetOrdnance, bool saturationAttack)
         {
-            Hq = hq;
             Option = option;
+            Origin = origin;
+            Loadout = loadout;
+            Mode = option.Mode;
             AreaCenter = areaCenter;
             Radius = radius;
             TargetAltitude = targetAltitude;
             TargetOrdnance = targetOrdnance;
             SaturationAttack = saturationAttack;
+        }
+
+        internal AirMissionOption Option { get; }
+        internal Airbase Origin { get; }
+        internal Loadout Loadout { get; }
+        internal AirCommandMode Mode { get; set; }
+        internal GlobalPosition AreaCenter { get; set; }
+        internal float Radius { get; set; }
+        internal float TargetAltitude { get; }
+        internal bool TargetOrdnance { get; }
+        internal bool SaturationAttack { get; }
+    }
+
+    private sealed class PendingAircraftSpawn
+    {
+        internal PendingAircraftSpawn(FactionHQ hq, AirMissionRecipe recipe, bool autoRecreate, bool purchasedWithFunds, float purchaseCost, float expiresAt)
+        {
+            Hq = hq;
+            Recipe = recipe;
+            AutoRecreate = autoRecreate;
             PurchasedWithFunds = purchasedWithFunds;
             PurchaseCost = purchaseCost;
             ExpiresAt = expiresAt;
         }
 
         internal FactionHQ Hq { get; }
-        internal AirMissionOption Option { get; }
-        internal GlobalPosition AreaCenter { get; }
-        internal float Radius { get; }
-        internal float TargetAltitude { get; }
-        internal bool TargetOrdnance { get; }
-        internal bool SaturationAttack { get; }
+        internal AirMissionRecipe Recipe { get; }
+        internal AirMissionOption Option => Recipe.Option;
+        internal bool AutoRecreate { get; }
         internal bool PurchasedWithFunds { get; }
         internal float PurchaseCost { get; }
         internal float ExpiresAt { get; }
@@ -158,7 +182,7 @@ internal sealed partial class CommanderAirCommandService
 
     private sealed class AirMission
     {
-        internal AirMission(FactionHQ hq, AirCommandMode mode, GlobalPosition areaCenter, float radius, float targetAltitude, bool targetOrdnance, bool saturationAttack, bool purchasedWithFunds, float purchaseCost)
+        internal AirMission(FactionHQ hq, AirCommandMode mode, GlobalPosition areaCenter, float radius, float targetAltitude, bool targetOrdnance, bool saturationAttack, bool purchasedWithFunds, float purchaseCost, AirMissionRecipe? recipe = null, bool autoRecreate = false)
         {
             Hq = hq;
             Mode = mode;
@@ -169,6 +193,8 @@ internal sealed partial class CommanderAirCommandService
             SaturationAttack = saturationAttack;
             PurchasedWithFunds = purchasedWithFunds;
             PurchaseCost = purchaseCost;
+            Recipe = recipe;
+            AutoRecreate = autoRecreate && recipe != null;
         }
 
         internal FactionHQ Hq { get; }
@@ -180,6 +206,36 @@ internal sealed partial class CommanderAirCommandService
         internal bool SaturationAttack { get; }
         internal bool PurchasedWithFunds { get; }
         internal float PurchaseCost { get; }
+
+        /// <summary>
+        /// How to launch this mission again; null for an adopted airframe, which the Commander never
+        /// launched and so cannot relaunch. Deliberately not written through from
+        /// <see cref="AreaCenter"/>: landing and travel orders park the area on a field or a
+        /// waypoint, and a relaunch after an RTB must go back to the mission area, not to the
+        /// runway. Only a real area edit calls <see cref="RememberArea"/>.
+        /// </summary>
+        internal AirMissionRecipe? Recipe { get; }
+
+        internal bool CanAutoRecreate => Recipe != null;
+
+        /// <summary>Relaunch the same mission when this airframe is lost or recovered.</summary>
+        internal bool AutoRecreate { get; set; }
+
+        internal void RememberArea()
+        {
+            if (Recipe == null)
+            {
+                return;
+            }
+
+            Recipe.Mode = Mode;
+            Recipe.AreaCenter = AreaCenter;
+            Recipe.Radius = Radius;
+        }
+
+        /// <summary>Game time the aircraft was first seen sitting on the deck during an RTB, or a
+        /// negative number while it is not. See <c>RecoverLandedAircraft</c>.</summary>
+        internal float OnDeckSince { get; set; } = -1f;
         internal GameObject? MapVisual { get; set; }
         internal bool Returning { get; set; }
         internal bool RtbIssued { get; set; }

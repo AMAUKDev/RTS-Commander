@@ -107,6 +107,15 @@ internal sealed class CommanderBuildPreview
         }
 
         site = CommanderGameAccess.SnapToTerrain(ground);
+        // A mine's ghost shows where the mine will actually land: on the nearest free resource
+        // site, not wherever the cursor happens to be hovering. Evaluate re-snaps idempotently (a
+        // site position snaps to itself), so this is purely so the ghost is not lying about it.
+        if (CommanderEconomyService.IsMineDefinition(definition)
+            && CommanderStrategicPointService.Instance?.TrySnapMineSite(site, out GlobalPosition snapped) == true)
+        {
+            site = snapped;
+        }
+
         hasSite = true;
         SiteValid = Evaluate(definition, site, hq, out string reason);
         BlockedReason = reason;
@@ -130,7 +139,9 @@ internal sealed class CommanderBuildPreview
     /// A site is blocked by another unit's footprint, by a road, or by being outside the build
     /// radius of every airbase the faction holds, and by nothing else. Trees, rocks and terrain
     /// clutter carry no <see cref="Unit"/>, so they are ignored on purpose — clearing scenery to
-    /// build is normal, bulldozing the highway is not.
+    /// build is normal, bulldozing the highway is not. A gold mine carries one more rule on top:
+    /// it must stand on a resource site (<see cref="CommanderStrategicPointService.TrySnapMineSite"/>),
+    /// reachable from a held base or a currently garrisoned control point.
     /// </summary>
     private bool Evaluate(
         BuildingDefinition candidate, GlobalPosition target, FactionHQ? hq, out string reason)
@@ -139,12 +150,41 @@ internal sealed class CommanderBuildPreview
         // gets its own radius and its own shoreline rule rather than loosening either for every
         // building. Everything else is the ordinary build radius.
         bool dock = CommanderEconomyService.IsNavalDockDefinition(candidate);
+        bool mine = CommanderEconomyService.IsMineDefinition(candidate);
         float radiusKm = dock ? CommanderSettings.NavalDockRadiusKm : CommanderSettings.BuildRadiusKm;
+
+        // Discovery and the enemy build-site search both call IsSiteAllowed with hq null purely to
+        // ask "is this patch of ground clear", never to place a mine for real (see
+        // CommanderStrategicPointDiscovery.TryFindSiteRing) — exactly the existing hq == null
+        // convention below that already turns off the radius check for the same reason. Gating the
+        // site/reach rule the same way keeps that convention single instead of forking it: without
+        // this, discovery's own "is this candidate a legal site" probe would recurse into "is this
+        // near an already-registered site", which is never true for the very first site on a map.
+        // The site rule only binds once the map actually has sites. Before discovery finishes, or
+        // on a map that produced none, a mine goes anywhere in reach as it always did — see
+        // CommanderStrategicPointService.HasResourceSites.
+        CommanderStrategicPointService? pointService = CommanderStrategicPointService.Instance;
+        if (mine && hq != null && pointService != null && pointService.HasResourceSites)
+        {
+            if (pointService.TrySnapMineSite(target, out GlobalPosition site))
+            {
+                target = site;
+            }
+            else
+            {
+                reason = "Blocked: a gold mine has to stand on a resource site.";
+                return false;
+            }
+        }
 
         // Building is tied to ground the faction actually holds, so a commander cannot drop a
         // refinery in the enemy's rear. Same rule for the enemy commander, which reaches this
-        // through IsSiteAllowed.
-        if (hq != null && !IsInsideBuildRadius(hq, target, radiusKm))
+        // through IsSiteAllowed. A mine gets one more way in: a currently garrisoned control point
+        // counts as reach too, exactly as design SS2 asks.
+        if (hq != null
+            && !IsInsideBuildRadius(hq, target, radiusKm)
+            && !(mine
+                && CommanderStrategicPointService.Instance?.IsInsideGarrisonedPointReach(hq, target, radiusKm) == true))
         {
             reason = $"Blocked: more than {radiusKm:0.#} km from a captured base.";
             return false;

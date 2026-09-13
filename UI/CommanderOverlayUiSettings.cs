@@ -43,12 +43,13 @@ internal sealed partial class CommanderOverlayUi
         }
 
         float y = settingsHelpVisible ? 118f : 38f;
-        float tabWidth = (settingsWindowRect.width - 30f) / 5f;
+        float tabWidth = (settingsWindowRect.width - 30f) / 6f;
         DrawSettingsTab(new Rect(12f, y, tabWidth, 32f), "GAMEPLAY", 0);
         DrawSettingsTab(new Rect(12f + tabWidth, y, tabWidth, 32f), "UI / HIDE", 1);
         DrawSettingsTab(new Rect(12f + tabWidth * 2f, y, tabWidth, 32f), "CONTROLS", 2);
         DrawSettingsTab(new Rect(12f + tabWidth * 3f, y, tabWidth, 32f), "SHORTCUTS", 3);
         DrawSettingsTab(new Rect(12f + tabWidth * 4f, y, tabWidth, 32f), "CAMERA", 4);
+        DrawSettingsTab(new Rect(12f + tabWidth * 5f, y, tabWidth, 32f), "POINTS", 5);
         y += 44f;
 
         if (settingsTab == 0)
@@ -66,6 +67,10 @@ internal sealed partial class CommanderOverlayUi
         else if (settingsTab == 4)
         {
             DrawCameraSettings(y);
+        }
+        else if (settingsTab == 5)
+        {
+            DrawPointsSettings(y);
         }
         else
         {
@@ -137,11 +142,19 @@ internal sealed partial class CommanderOverlayUi
     private void DrawGameplaySettings(float y)
     {
         GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 84f), string.Empty, CommanderUiTheme.Panel);
-        GUI.Label(new Rect(24f, y + 10f, settingsWindowRect.width - 48f, 22f), "SPAWN RESTRICTIONS", CommanderUiTheme.Header);
+        GUI.Label(new Rect(24f, y + 10f, settingsWindowRect.width - 48f, 22f), "SPAWNING", CommanderUiTheme.Header);
+        // Two half-width toggles on one row, the same layout the UI tab uses, because the tab
+        // below is already at the window's height limit.
+        float spawnHalf = (settingsWindowRect.width - 60f) * 0.5f;
         CommanderSettings.LimitToFactoryVehicles = GUI.Toggle(
-            new Rect(24f, y + 42f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, y + 42f, spawnHalf, 30f),
             CommanderSettings.LimitToFactoryVehicles,
             "Limit to vehicles from factories",
+            CommanderUiTheme.Toggle);
+        CommanderSettings.AiAircraftLaunchFromHangar = GUI.Toggle(
+            new Rect(36f + spawnHalf, y + 42f, spawnHalf, 30f),
+            CommanderSettings.AiAircraftLaunchFromHangar,
+            "AI aircraft take off from hangars",
             CommanderUiTheme.Toggle);
 
         // The COMMAND box carries two commander buttons now. Its rows are on a 32 px pitch rather
@@ -364,6 +377,66 @@ internal sealed partial class CommanderOverlayUi
             min,
             max);
         return Mathf.Clamp(slid, min, max);
+    }
+
+    /// <summary>
+    /// Departure 2: the design asks for these on the Gameplay tab, but that tab's COMMAND box
+    /// already reaches 784 px of a 790 px window with the help overlay open (see the comment on
+    /// <see cref="DrawGameplaySettings"/>), and six more 38 px rows do not fit. One tab further
+    /// right, same sliders, same behaviour.
+    /// </summary>
+    /// <remarks>
+    /// Arithmetic (help closed): box top at <c>y</c>, header 10 + 32, nine 38 px slider rows (three
+    /// more since the outpost/crossroads/roadside incomes joined base/village/hilltop/gold mine), a
+    /// 30 px footnote — 10 + 32 + 9*38 + 30 = 414 px tall, and <c>y</c> itself never exceeds 162, so
+    /// the box bottom never passes 576 of a 790 px window.
+    /// </remarks>
+    private void DrawPointsSettings(float y)
+    {
+        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 414f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(24f, y + 10f, settingsWindowRect.width - 48f, 22f), "STRATEGIC POINTS", CommanderUiTheme.Header);
+
+        float rowY = y + 42f;
+        CommanderSettings.PointsMinGarrison = Mathf.RoundToInt(DrawCameraSlider(
+            rowY, "Minimum garrison", CommanderSettings.PointsMinGarrison, 1f, 6f, "0", " vehicles"));
+        rowY += 38f;
+
+        CommanderSettings.PointsHoldSeconds = Mathf.Round(DrawCameraSlider(
+            rowY, "Hold seconds", CommanderSettings.PointsHoldSeconds, 15f, 300f, "0", " s") / 5f) * 5f;
+        rowY += 38f;
+
+        CommanderSettings.PointsBaseIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Base income", CommanderSettings.PointsBaseIncomePerMinute, 0f, 100f, "0", " /min"));
+        rowY += 38f;
+
+        CommanderSettings.PointsVillageIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Village income", CommanderSettings.PointsVillageIncomePerMinute, 0f, 50f, "0", " /min"));
+        rowY += 38f;
+
+        CommanderSettings.PointsHilltopIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Hilltop income", CommanderSettings.PointsHilltopIncomePerMinute, 0f, 50f, "0", " /min"));
+        rowY += 38f;
+
+        CommanderSettings.PointsOutpostIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Outpost income", CommanderSettings.PointsOutpostIncomePerMinute, 0f, 50f, "0", " /min"));
+        rowY += 38f;
+
+        CommanderSettings.PointsCrossroadsIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Crossroads income", CommanderSettings.PointsCrossroadsIncomePerMinute, 0f, 50f, "0", " /min"));
+        rowY += 38f;
+
+        CommanderSettings.PointsRoadsideIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Roadside income", CommanderSettings.PointsRoadsideIncomePerMinute, 0f, 50f, "0", " /min"));
+        rowY += 38f;
+
+        CommanderSettings.GoldMineIncomePerMinute = Mathf.Round(DrawCameraSlider(
+            rowY, "Gold mine income", CommanderSettings.GoldMineIncomePerMinute, 0f, 100f, "0", " /min"));
+        rowY += 38f;
+
+        GUI.Label(
+            new Rect(24f, rowY + 4f, settingsWindowRect.width - 48f, 22f),
+            "Discovery spacing lives in the config file, Points section.",
+            CommanderUiTheme.MutedLabel);
     }
 
     private void DrawUiSettings(float y)

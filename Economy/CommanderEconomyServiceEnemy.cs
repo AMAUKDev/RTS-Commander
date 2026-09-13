@@ -11,8 +11,10 @@ namespace GroundControlRts;
 /// </summary>
 internal sealed partial class CommanderEconomyService
 {
-    /// <summary>Sites tried per enemy build before it gives up and waits for the next review.</summary>
-    private const int EnemySiteAttempts = 12;
+    /// <summary>Sites tried per enemy build before it gives up and waits for the next review. Also
+    /// the ring-probe budget discovery uses to seed a resource site beside an industrial building
+    /// (departure 1) — one definition, both callers.</summary>
+    internal const int EnemySiteAttempts = 12;
 
     /// <summary>Step taken walking inland from a sea lane looking for the water's edge, and how
     /// far to keep walking. Each step is a terrain probe, so this is the cost knob.</summary>
@@ -107,8 +109,7 @@ internal sealed partial class CommanderEconomyService
 
             hq.AddFunds(-cost);
             mineLevels[entry.Key] = entry.Value + 1;
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} upgraded a gold mine to level {entry.Value + 1}.");
+            CommanderAiLog.Note(hq, $"upgraded a gold mine to level {entry.Value + 1}.");
             return;
         }
 
@@ -140,9 +141,8 @@ internal sealed partial class CommanderEconomyService
 
             hq.AddFunds(-cost);
             factoryLevels[attached] = level + 1;
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} upgraded {CommanderGameAccess.GetUnitLabel(attached)} "
-                    + $"to level {level + 1}.");
+            CommanderAiLog.Note(
+                hq, $"upgraded {CommanderGameAccess.GetUnitLabel(attached)} to level {level + 1}.");
             return;
         }
     }
@@ -155,7 +155,9 @@ internal sealed partial class CommanderEconomyService
     /// start and then bought convoys with everything for the rest of the match. The unit spender
     /// now subtracts this from the pot it may touch, which is the same "save for it" fix
     /// <c>AccrueFund</c> is for airframes and hulls, and the build gates below ask for the plain
-    /// price instead of a multiple of it, because a reserved price is already protected.
+    /// price instead of a multiple of it, because a reserved price is already protected. A mine is
+    /// only wanted while a resource site is in reach; short of one, the commander saves for the
+    /// next thing instead of piling funds toward a mine it cannot site.
     /// </summary>
     internal static float GetEnemyBuildReserve(FactionHQ hq)
     {
@@ -175,7 +177,8 @@ internal sealed partial class CommanderEconomyService
         }
 
         bool duel = CommanderEnemyCommanderService.IsDuelMission;
-        if (service.CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget))
+        if (service.CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget)
+            && CommanderStrategicPointService.Instance?.TryPickFreeReachableSite(hq, out GlobalPosition _) == true)
         {
             return MineBuildCost;
         }
@@ -208,7 +211,8 @@ internal sealed partial class CommanderEconomyService
         }
 
         bool duel = CommanderEnemyCommanderService.IsDuelMission;
-        if (CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget))
+        if (CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget)
+            && CommanderStrategicPointService.Instance?.TryPickFreeReachableSite(hq, out GlobalPosition _) == true)
         {
             return TryBuildEnemyMine(hq);
         }
@@ -243,8 +247,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         hq.AddFunds(-GetStructureCost(radar));
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a {GetStructureLabel(radar)} at a base with no radar cover.");
+        CommanderAiLog.Note(hq, $"built a {GetStructureLabel(radar)} at a base with no radar cover.");
         return true;
     }
 
@@ -265,8 +268,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         hq.AddFunds(-GetStructureCost(defence));
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a {GetStructureLabel(defence)} to defend its base.");
+        CommanderAiLog.Note(hq, $"built a {GetStructureLabel(defence)} to defend its base.");
         return true;
     }
 
@@ -415,18 +417,34 @@ internal sealed partial class CommanderEconomyService
         return false;
     }
 
-    /// <summary>Drops an enemy mine beside something that faction already owns, so it lands in its own rear.</summary>
+    /// <summary>Builds on the nearest free resource site this commander can reach.</summary>
     private bool TryBuildEnemyMine(FactionHQ hq)
     {
-        GlobalPosition site = default;
-        BuildingDefinition? mine = ResolveDefinition(CommanderBuildKind.Mine);
-        if (!TryFindEnemyBuildSite(hq, mine, ref site) || SpawnMine(hq, site, randomRotation: true) == null)
+        CommanderStrategicPointService? pointService = CommanderStrategicPointService.Instance;
+        if (pointService == null || !pointService.HasResourceSites)
+        {
+            // No sites on this map (yet): the pre-points rule, a spot beside something the faction
+            // owns. Same fallback the player's ghost takes in CommanderBuildPreview.Evaluate.
+            GlobalPosition fallback = default;
+            BuildingDefinition? mine = ResolveDefinition(CommanderBuildKind.Mine);
+            if (!TryFindEnemyBuildSite(hq, mine, ref fallback) || SpawnMine(hq, fallback, randomRotation: true) == null)
+            {
+                return false;
+            }
+
+            hq.AddFunds(-MineBuildCost);
+            CommanderAiLog.Note(hq, "built a gold mine (no resource sites on this map).");
+            return true;
+        }
+
+        if (!pointService.TryPickFreeReachableSite(hq, out CommanderStrategicPoint point)
+            || SpawnMine(hq, point.Position, randomRotation: true) == null)
         {
             return false;
         }
 
         hq.AddFunds(-MineBuildCost);
-        CommanderPlugin.Log.LogInfo($"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a gold mine.");
+        CommanderAiLog.Note(hq, $"built a gold mine on {point.Label}.");
         return true;
     }
 
@@ -448,8 +466,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         hq.AddFunds(-FactoryBuildCost);
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a {production.unitName} factory.");
+        CommanderAiLog.Note(hq, $"built a {production.unitName} factory.");
         return true;
     }
 
@@ -469,10 +486,10 @@ internal sealed partial class CommanderEconomyService
             // like an enemy that forgot to build one, and only the console can tell them apart.
             if (dock != null && shoreSearchReported.Add(hq))
             {
-                CommanderPlugin.Log.LogInfo(
-                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} found no shoreline within "
-                        + $"{CommanderSettings.NavalDockRadiusKm:0.#} km of a base it holds, so it has no navy. "
-                        + "Raise Economy/NavalDockRadiusKm if this map keeps its coast further out.");
+                CommanderAiLog.Note(
+                    hq,
+                    $"found no shoreline within {CommanderSettings.NavalDockRadiusKm:0.#} km of a base it holds, "
+                        + "so it has no navy. Raise Economy/NavalDockRadiusKm if this map keeps its coast further out.");
             }
 
             return false;
@@ -484,7 +501,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         hq.AddFunds(-NavalDockBuildCost);
-        CommanderPlugin.Log.LogInfo($"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a naval dock.");
+        CommanderAiLog.Note(hq, "built a naval dock.");
         return true;
     }
 
@@ -508,8 +525,9 @@ internal sealed partial class CommanderEconomyService
 
             hq.AddFunds(-cost);
             dockLevels[entry.Key] = entry.Value + 1;
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} upgraded its naval dock to level {entry.Value + 1}: "
+            CommanderAiLog.Note(
+                hq,
+                $"upgraded its naval dock to level {entry.Value + 1}: "
                     + $"{CommanderNavalPurchaseService.GetLevelUnlockLabel(entry.Value + 1)}.");
             return true;
         }

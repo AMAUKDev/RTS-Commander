@@ -18,7 +18,8 @@ internal sealed class CommanderWorldMarkerRenderer
     private readonly List<CommanderSamSiteAnalyzerService.SiteCandidate> samSiteProposals = new();
     private readonly List<CommanderCaptureService.CaptureTarget> captureTargets = new();
 
-    private static readonly Color NeutralBaseColor = new(1f, 0.86f, 0.25f, 0.95f);
+    // Moved to CommanderUiTheme.NeutralMarker — a strategic point (Points/) needed the identical
+    // colour, so there is now one definition instead of two (Reuse rule 4).
     private static readonly Color HostileBaseColor = new(1f, 0.48f, 0.28f, 0.95f);
     private static readonly Color CapturingBaseColor = new(0.35f, 1f, 0.5f, 0.98f);
     private static readonly Color LosingBaseColor = new(1f, 0.3f, 0.3f, 0.98f);
@@ -59,6 +60,7 @@ internal sealed class CommanderWorldMarkerRenderer
 
         CommanderOrderPing.Draw(camera);
         DrawCaptureTargets(camera);
+        CommanderStrategicPointService.Instance?.DrawMarkers(camera);
 
         for (int i = 0; i < selectionService.SelectedUnits.Count; i++)
         {
@@ -332,7 +334,7 @@ internal sealed class CommanderWorldMarkerRenderer
         for (int i = 0; i < captureTargets.Count; i++)
         {
             CommanderCaptureService.CaptureTarget target = captureTargets[i];
-            Color color = target.HeldByOther ? HostileBaseColor : NeutralBaseColor;
+            Color color = target.HeldByOther ? HostileBaseColor : CommanderUiTheme.NeutralMarker;
             // ASCII only: the IMGUI font has no guarantee about symbols.
             string label = $"CAPTURABLE  {target.Label.ToUpperInvariant()}";
             float progress = target.CaptureProgress;

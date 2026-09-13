@@ -106,6 +106,111 @@ internal static class CommanderSettings
     internal static float AircraftCaptureStrength { get => Get("Gameplay", "AircraftCaptureStrength", 2f); set => Set("Gameplay", "AircraftCaptureStrength", value); }
     internal static int SamScanQueriesPerFrame { get => Get("SAM Analyzer", "RaycastsPerFrame", 64); set => Set("SAM Analyzer", "RaycastsPerFrame", value); }
 
+    // Discovery spacing (config-file-only: retuning these is a map-authoring decision, not a
+    // player taste knob, so there is no slider for them).
+    // One generated resource site per cell this large that has no existing industrial building in
+    // it, so a map with no industry at all still gets an even spread instead of nothing at all.
+    internal static float PointsFillGridMeters { get => Get("Points", "FillGridMeters", 8000f); set => Set("Points", "FillGridMeters", value); }
+    // Two resource sites (existing or generated) never sit closer than this; the later one in
+    // discovery order is dropped so the earlier (existing-building) site always wins a conflict.
+    internal static float PointsSiteMinSpacingMeters { get => Get("Points", "SiteMinSpacingMeters", 2000f); set => Set("Points", "SiteMinSpacingMeters", value); }
+    // Civilian buildings within this of another cluster member chain into the same village.
+    internal static float PointsVillageClusterMeters { get => Get("Points", "VillageClusterMeters", 400f); set => Set("Points", "VillageClusterMeters", value); }
+    // A cluster smaller than this is a farmstead, not a village worth fighting over.
+    internal static int PointsVillageMinBuildings { get => Get("Points", "VillageMinBuildings", 3); set => Set("Points", "VillageMinBuildings", value); }
+    // Control ring radius around a village's building centroid.
+    internal static float PointsVillageRadiusMeters { get => Get("Points", "VillageRadiusMeters", 400f); set => Set("Points", "VillageRadiusMeters", value); }
+    // Height-map sample spacing for the hilltop scan; finer than this buys little (the strategic
+    // height map itself is 20 m/px) and costs more per-frame samples.
+    internal static float PointsHilltopGridMeters { get => Get("Points", "HilltopGridMeters", 1000f); set => Set("Points", "HilltopGridMeters", value); }
+    // A hilltop sample must be the highest point within this ring to count as a local high point.
+    internal static float PointsHilltopRingMeters { get => Get("Points", "HilltopRingMeters", 1500f); set => Set("Points", "HilltopRingMeters", value); }
+    // …and at least this far above the ring's mean height, or every gentle rise on a map would
+    // qualify as a hilltop. Lowered from 15 to 8 (2026-09-13, alongside outposts/crossroads/roadside
+    // points): hilltops were already the rarest kind of point, and adding three more kinds to the
+    // same spacing budget only made a high threshold worse.
+    internal static float PointsHilltopProminenceMeters { get => Get("Points", "HilltopMinProminenceMeters", 8f); set => Set("Points", "HilltopMinProminenceMeters", value); }
+    // Control ring radius around a hilltop.
+    internal static float PointsHilltopRadiusMeters { get => Get("Points", "HilltopRadiusMeters", 300f); set => Set("Points", "HilltopRadiusMeters", value); }
+    // No hilltop within this of a village: the village is already the point of interest there.
+    internal static float PointsHilltopVillageExclusionMeters { get => Get("Points", "HilltopVillageExclusionMeters", 1000f); set => Set("Points", "HilltopVillageExclusionMeters", value); }
+    // Control ring radius around an outpost — a civilian cluster too small to be a village.
+    internal static float PointsOutpostRadiusMeters { get => Get("Points", "OutpostRadiusMeters", 300f); set => Set("Points", "OutpostRadiusMeters", value); }
+    // Control ring radius around a road-network junction.
+    internal static float PointsCrossroadsRadiusMeters { get => Get("Points", "CrossroadsRadiusMeters", 300f); set => Set("Points", "CrossroadsRadiusMeters", value); }
+    // Control ring radius around a roadside point — smaller than the others: it is a waypoint on an
+    // otherwise empty stretch of road, not a place with much to stand around in.
+    internal static float PointsRoadsideRadiusMeters { get => Get("Points", "RoadsideRadiusMeters", 250f); set => Set("Points", "RoadsideRadiusMeters", value); }
+    // Distance along a road between generated roadside points. Long enough that a road already
+    // carrying a village, hilltop or crossroads every few kilometres does not also collect a
+    // roadside point on top of them.
+    internal static float PointsRoadsideSpacingMeters { get => Get("Points", "RoadsideSpacingMeters", 6000f); set => Set("Points", "RoadsideSpacingMeters", value); }
+    // A road-network junction node needs at least this many roads meeting (or passing through) it
+    // to be worth calling a crossroads rather than an ordinary bend or a dead end.
+    internal static int PointsCrossroadsMinRoads { get => Get("Points", "CrossroadsMinRoads", 3); set => Set("Points", "CrossroadsMinRoads", value); }
+    // Per-kind ceilings inside MaxControlPoints. Without them the first stage ate the whole
+    // allowance: the duel map has 263 road junctions, so crossroads took 44 slots, hilltops got 15
+    // and road points none. Hilltops take whatever these leave; a kind with few candidates on a map
+    // simply hands its share on.
+    internal static int PointsMaxCrossroads { get => Get("Points", "MaxCrossroads", 24); set => Set("Points", "MaxCrossroads", value); }
+    internal static int PointsMaxOutposts { get => Get("Points", "MaxOutposts", 24); set => Set("Points", "MaxOutposts", value); }
+    internal static int PointsMaxRoadPoints { get => Get("Points", "MaxRoadPoints", 30); set => Set("Points", "MaxRoadPoints", value); }
+    // Junctions are dense wherever roads are, so crossroads keep a wider spacing than other control
+    // points or every hamlet's T-junction becomes one; 2.5 km reads as "the next crossroads along".
+    internal static float PointsCrossroadsSpacingMeters { get => Get("Points", "CrossroadsSpacingMeters", 2500f); set => Set("Points", "CrossroadsSpacingMeters", value); }
+    // Road endpoints (or a road segment passing near another road's endpoint) within this of each
+    // other merge into the same junction node — wide enough that a junction authored as two
+    // close-together forks in the road data still merges into one crossroads candidate.
+    internal static float PointsRoadJunctionMergeMeters { get => Get("Points", "RoadJunctionMergeMeters", 60f); set => Set("Points", "RoadJunctionMergeMeters", value); }
+    // Cap on control points (villages, hilltops, outposts, crossroads, roadside points) per map, so
+    // a huge map does not drown the tactical map (or the AI's garrison review) in markers. Resource
+    // sites have their own cap below: one shared cap let 30 sites use up the whole allowance and
+    // every control point was dropped. Raised from 60 to 120 (2026-09-13): three more kinds now
+    // share the same allowance, and 60 left the lowest-priority stage (roadside points) with
+    // nothing to spend.
+    // Key renamed from MaxNonBasePoints (and ControlPointSpacingMeters, HilltopMinProminenceMeters
+    // likewise) on 2026-09-13 so the new defaults reach existing installs: BepInEx keeps whatever
+    // value is already in the file, and a hot reload was re-saving the old numbers over hand edits.
+    internal static int PointsMaxNonBasePoints { get => Get("Points", "MaxControlPoints", 120); set => Set("Points", "MaxControlPoints", value); }
+    internal static int PointsMaxResourceSites { get => Get("Points", "MaxResourceSites", 30); set => Set("Points", "MaxResourceSites", value); }
+    // No two non-base points closer than this; the earlier one in discovery order wins. Lowered
+    // from 1500 to 800 (2026-09-13, alongside outposts/crossroads/roadside points): the old spacing
+    // was tuned for a map with only villages and hilltops on it, and left flat farmland almost as
+    // empty as before once three more kinds were competing for the same allowance.
+    internal static float PointsPointMinSpacingMeters { get => Get("Points", "ControlPointSpacingMeters", 800f); set => Set("Points", "ControlPointSpacingMeters", value); }
+    // No non-base point within this of an airbase centre — a base is already worth holding on its
+    // own and a point crowding it would be redundant and hard to read on the map.
+    internal static float PointsAirbaseExclusionMeters { get => Get("Points", "AirbaseExclusionMeters", 2000f); set => Set("Points", "AirbaseExclusionMeters", value); }
+
+    // Garrison, hold and income (POINTS settings tab).
+    // Ground vehicles a single faction needs inside a ring, alone, to count as present at all.
+    internal static int PointsMinGarrison { get => Get("Points", "MinGarrison", 2); set => Set("Points", "MinGarrison", value); }
+    // Cumulative seconds a faction must hold a point alone with at least MinGarrison before it
+    // flips; short enough to reward a fast platoon, long enough that a driving-through raid does
+    // not flip it by accident.
+    internal static float PointsHoldSeconds { get => Get("Points", "HoldSeconds", 60f); set => Set("Points", "HoldSeconds", value); }
+    // Per airbase held, paid on the shared 15 s income tick.
+    internal static float PointsBaseIncomePerMinute { get => Get("Points", "BaseIncomePerMinute", 30f); set => Set("Points", "BaseIncomePerMinute", value); }
+    // Per village held. Below a base's rate: a village is worth less than the airbase that lets you
+    // build there, but still worth a platoon's time.
+    internal static float PointsVillageIncomePerMinute { get => Get("Points", "VillageIncomePerMinute", 10f); set => Set("Points", "VillageIncomePerMinute", value); }
+    // Per hilltop held; lowest of the three because a hilltop has no buildings to defend, only the
+    // ground itself.
+    internal static float PointsHilltopIncomePerMinute { get => Get("Points", "HilltopIncomePerMinute", 5f); set => Set("Points", "HilltopIncomePerMinute", value); }
+    // Per outpost held; same rate as a hilltop — a cluster too small to be a village has no more to
+    // defend than open ground does.
+    internal static float PointsOutpostIncomePerMinute { get => Get("Points", "OutpostIncomePerMinute", 5f); set => Set("Points", "OutpostIncomePerMinute", value); }
+    // Per crossroads held; same rate as a village — a junction is worth fighting over on its own,
+    // not merely as a shortcut through it.
+    internal static float PointsCrossroadsIncomePerMinute { get => Get("Points", "CrossroadsIncomePerMinute", 10f); set => Set("Points", "CrossroadsIncomePerMinute", value); }
+    // Per roadside point held; the lowest rate of the six — a generated waypoint with nothing else
+    // to recommend it, there only so an empty stretch of road is not empty of anything to fight over.
+    internal static float PointsRoadsideIncomePerMinute { get => Get("Points", "RoadsideIncomePerMinute", 3f); set => Set("Points", "RoadsideIncomePerMinute", value); }
+    // How far the mine-placement ghost snaps to the nearest free resource site. Design (§2) does
+    // not give a number for this; without one the ghost could jump to a site many kilometres away.
+    // 1 km keeps the snap feeling local while still forgiving imprecise clicking near a site.
+    internal static float PointsMineSnapMeters { get => Get("Points", "MineSnapMeters", 1000f); set => Set("Points", "MineSnapMeters", value); }
+
     internal static KeyboardShortcut PrimaryAction { get => GetShortcut("PrimaryAction", KeyCode.Mouse0, "Select units and place world targets."); set => Set("Keybinds", "PrimaryAction", value); }
     internal static KeyboardShortcut SecondaryAction { get => GetShortcut("SecondaryAction", KeyCode.Mouse1, "Issue move orders."); set => Set("Keybinds", "SecondaryAction", value); }
     internal static KeyboardShortcut AddToSelection { get => GetShortcut("AddToSelection", KeyCode.LeftShift, "Hold while selecting to add units."); set => Set("Keybinds", "AddToSelection", value); }
@@ -134,12 +239,15 @@ internal static class CommanderSettings
     internal static float AirTargetAltitude { get => Get("Air Command", "TargetAltitude", 0f); set => Set("Air Command", "TargetAltitude", value); }
     internal static bool AirGuardTargetOrdnance { get => Get("Air Command", "AirGuardTargetOrdnance", false); set => Set("Air Command", "AirGuardTargetOrdnance", value); }
     internal static bool AradSaturationAttack { get => Get("Air Command", "AradSaturationAttack", false); set => Set("Air Command", "AradSaturationAttack", value); }
-    // Off = the airframe enters the map already airborne over its base (the default since the AI
-    // pilot was seen ejecting on highway-strip taxi and takeoff). On = it spawns in a hangar and
-    // taxis out like a mission-authored aircraft. Player's AIR window only; the enemy commander
-    // keeps the airborne path because it never books airframe stock for a hangar to consume.
-    internal static bool AirLaunchFromHangar { get => Get("Air Command", "AirLaunchFromHangar", false); set => Set("Air Command", "AirLaunchFromHangar", value); }
-    internal static bool AirIncludeInternalCannons { get => Get("Air Command", "IncludeInternalCannons", true); set => Set("Air Command", "IncludeInternalCannons", value); }
+    // Off = a commander-launched AI airframe enters the map already airborne over its base (the
+    // default since the AI pilot was seen ejecting on highway-strip taxi and takeoff). On = it
+    // spawns in a hangar and taxis out like a mission-authored aircraft. Applies to every
+    // commander: the player's AIR window, the player-side AI and the enemy AI alike.
+    internal static bool AiAircraftLaunchFromHangar { get => Get("Gameplay", "AiAircraftLaunchFromHangar", false); set => Set("Gameplay", "AiAircraftLaunchFromHangar", value); }
+    // Off by default, and applied to the AI commanders' loadouts too: a pilot with cannon rounds left
+    // counts them as ordnance and keeps making gun runs instead of returning when the real weapons
+    // are spent, which is what made RTB look ignored on gun-armed airframes.
+    internal static bool AirIncludeInternalCannons { get => Get("Air Command", "IncludeInternalCannons", false); set => Set("Air Command", "IncludeInternalCannons", value); }
     internal static float AwacsRadiusKm { get => Get("Air Command", "AwacsRadiusKm", 60f); set => Set("Air Command", "AwacsRadiusKm", value); }
     internal static float CasRadiusKm { get => Get("Air Command", "CasRadiusKm", 20f); set => Set("Air Command", "CasRadiusKm", value); }
     internal static float AirGuardRadiusKm { get => Get("Air Command", "AirGuardRadiusKm", 30f); set => Set("Air Command", "AirGuardRadiusKm", value); }
@@ -190,7 +298,7 @@ internal static class CommanderSettings
         _ = EnemyCommanderMode;
         _ = PlayerCommanderEnabled;
         _ = PlayerCommanderHandsOffMinutes;
-        _ = AirLaunchFromHangar;
+        _ = AiAircraftLaunchFromHangar;
         _ = TacticalMapSize;
         _ = MapDragSpeed;
         _ = UiScaleOverride;
@@ -219,6 +327,39 @@ internal static class CommanderSettings
         _ = NavalDockUpgradeCost;
         _ = AircraftCaptureStrength;
         _ = SamScanQueriesPerFrame;
+        _ = PointsFillGridMeters;
+        _ = PointsSiteMinSpacingMeters;
+        _ = PointsVillageClusterMeters;
+        _ = PointsVillageMinBuildings;
+        _ = PointsVillageRadiusMeters;
+        _ = PointsHilltopGridMeters;
+        _ = PointsHilltopRingMeters;
+        _ = PointsHilltopProminenceMeters;
+        _ = PointsHilltopRadiusMeters;
+        _ = PointsHilltopVillageExclusionMeters;
+        _ = PointsOutpostRadiusMeters;
+        _ = PointsCrossroadsRadiusMeters;
+        _ = PointsRoadsideRadiusMeters;
+        _ = PointsRoadsideSpacingMeters;
+        _ = PointsCrossroadsMinRoads;
+        _ = PointsRoadJunctionMergeMeters;
+        _ = PointsMaxNonBasePoints;
+        _ = PointsMaxResourceSites;
+        _ = PointsMaxCrossroads;
+        _ = PointsMaxOutposts;
+        _ = PointsMaxRoadPoints;
+        _ = PointsCrossroadsSpacingMeters;
+        _ = PointsPointMinSpacingMeters;
+        _ = PointsAirbaseExclusionMeters;
+        _ = PointsMinGarrison;
+        _ = PointsHoldSeconds;
+        _ = PointsBaseIncomePerMinute;
+        _ = PointsVillageIncomePerMinute;
+        _ = PointsHilltopIncomePerMinute;
+        _ = PointsOutpostIncomePerMinute;
+        _ = PointsCrossroadsIncomePerMinute;
+        _ = PointsRoadsideIncomePerMinute;
+        _ = PointsMineSnapMeters;
         _ = AirCommandMode;
         _ = AwacsRadiusKm;
         _ = CasRadiusKm;

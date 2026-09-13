@@ -227,6 +227,37 @@ driving a camera over a battlefield instead of flying an unwilling aeroplane.
 
 ### Added
 
+- **The map now has things worth holding beyond your own base.** Discovery finds resource sites,
+  villages and hilltops once per mission and marks each with a coloured dot and a label on the
+  tactical map and in the world, coloured by owner and striped when contested. **Gold mines can
+  only be built on a resource site**: arm BUILD GOLD MINE and the ghost snaps to the nearest free
+  site within reach (`Points/MineSnapMeters`, 1 km by default) and refuses everywhere else. If a map
+  yields no resource sites at all, discovery retries twice more at half-minute intervals (a
+  hot-reload can race the height map and produce an empty result), and until sites exist the old
+  "build anywhere inside your base radius" rule stays in force for everyone, so a bad discovery pass
+  can never leave a faction unable to build a mine.
+  **Villages and hilltops pay whoever keeps at
+  least 2 ground vehicles alone in the ring for 60 seconds** — 10/min for a village, 5/min for a
+  hilltop — and drop to neutral the moment the garrison falls below that or leaves; **bases pay
+  30/min to whoever holds them**. Both the enemy commander and your own AI (when the PLAYER
+  COMMANDER switch is on) now build their mines on sites instead of stacking them at the base, and
+  post a small garrison (a spare vehicle over the minimum) on nearby control points, capped at three
+  per commander so the home guard is never starved. A new **COMMANDER LOG** button under ORDER OF
+  BATTLE opens a tabbed window — one tab per faction — showing funds, income by source, the current
+  buy plan and every decision that faction's commander has made, live, with timestamps; the same
+  lines still go to `BepInEx\LogOutput.log` exactly as before. A new **POINTS** settings tab holds
+  the minimum garrison, hold seconds and the income rates. Owners are not saved across a
+  mission reload, the same as mine upgrade levels.
+- **Flat farmland now has points of interest too (2026-09-13).** Three more control-point kinds
+  join villages and hilltops: **outposts** (a civilian cluster too small to be a village — a
+  farmstead worth a platoon's time, 5/min), **crossroads** (three or more roads meeting or crossing
+  at one point, found on the road network itself, 10/min) and **roadside points** (spaced every 6 km
+  along an otherwise empty road, 3/min, skipped near a crossroads or an airbase). Retuned alongside
+  them: the minimum spacing between any two control points dropped from 1500 m to 800 m, the hilltop
+  prominence threshold from 15 m to 8 m, and the shared control-point cap from 60 to 120 — all three
+  were sized for a map with only villages and hilltops on it and left the new kinds nowhere to go.
+  The COMMANDER LOG's income line folds the three new kinds into one **CONTROL PTS** figure so the
+  header still fits its window.
 - **The commander AI can run your faction too.** One button — **PLAYER COMMANDER** in
   **Settings > Gameplay**, under ENEMY COMMANDER, with a remappable hotkey in **Controls** — and the
   same commander that runs the enemy takes over your side as well: it earns, builds mines and radar,

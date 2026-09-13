@@ -178,6 +178,19 @@ internal sealed partial class CommanderEconomyService
         return unit != null && mineLevels.ContainsKey(unit);
     }
 
+    /// <summary>
+    /// The one siting rule, forwarded so discovery and the strategic point service can ask it with
+    /// <paramref name="hq"/> null (site-finding, radius check off) exactly like the enemy build
+    /// site search does, without either of them reaching into <see cref="CommanderBuildPreview"/>
+    /// directly (Reuse rule 4 — one definition, every caller goes through it).
+    /// </summary>
+    internal bool IsSiteAllowed(BuildingDefinition d, GlobalPosition p, FactionHQ? hq, out string reason)
+        => preview.IsSiteAllowed(d, p, hq, out reason);
+
+    /// <summary>The building definition a gold mine is built from, resolved once per mission. Null
+    /// until the encyclopedia has answered, which is also why discovery waits on it.</summary>
+    internal BuildingDefinition? MineDefinition => ResolveDefinition(CommanderBuildKind.Mine);
+
     internal bool IsBuiltNavalDock(Unit? unit)
     {
         return unit != null && dockLevels.ContainsKey(unit);
@@ -249,6 +262,15 @@ internal sealed partial class CommanderEconomyService
         return definition != null
             && Instance != null
             && ReferenceEquals(definition, Instance.ResolveDefinition(CommanderBuildKind.NavalDock));
+    }
+
+    /// <summary>True for the prefab the mine button places, which is what gives it the
+    /// site-only rule in <see cref="CommanderBuildPreview.Evaluate"/>.</summary>
+    internal static bool IsMineDefinition(BuildingDefinition? definition)
+    {
+        return definition != null
+            && Instance != null
+            && ReferenceEquals(definition, Instance.ResolveDefinition(CommanderBuildKind.Mine));
     }
 
     internal static float NavalDockBuildCost => Mathf.Max(0f, CommanderSettings.NavalDockCost);
@@ -743,6 +765,9 @@ internal sealed partial class CommanderEconomyService
     private void PayIncome()
     {
         HoldFundsInTreasury();
+        // Points pay first: a faction with no mines yet still holds bases, and the mine loop below
+        // returns early when there are none.
+        CommanderStrategicPointService.Instance?.PayPointIncome(IncomeIntervalSeconds / 60f);
         if (mineLevels.Count == 0)
         {
             return;
@@ -804,14 +829,31 @@ internal sealed partial class CommanderEconomyService
 
     private Unit? SpawnMine(FactionHQ hq, GlobalPosition position, bool randomRotation = false)
     {
+        // Every mine spawn path — the player's click and the enemy's build step alike — ends here,
+        // so the site snap is enforced once, in the one place both of them call. A map with no
+        // resource sites (none found, or discovery still running) keeps the old anywhere-in-reach
+        // rule; see CommanderStrategicPointService.HasResourceSites.
+        CommanderStrategicPointService? pointService = CommanderStrategicPointService.Instance;
+        bool onSite = pointService != null && pointService.HasResourceSites;
+        GlobalPosition site = position;
+        if (onSite && !pointService!.TrySnapMineSite(position, out site))
+        {
+            return null;
+        }
+
         Unit? mine = SpawnBuilding(
-            hq, position, ResolveDefinition(CommanderBuildKind.Mine), MineDisplayName, randomRotation);
+            hq, site, ResolveDefinition(CommanderBuildKind.Mine), MineDisplayName, randomRotation);
         if (mine == null)
         {
             return null;
         }
 
         mineLevels[mine] = 1;
+        if (onSite)
+        {
+            pointService!.AttachMine(site, mine);
+        }
+
         return mine;
     }
 
@@ -994,6 +1036,22 @@ internal sealed partial class CommanderEconomyService
             }
         }
         return count;
+    }
+
+    /// <summary>This faction's mine income per minute, for the COMMANDER LOG header — the same loop
+    /// as <see cref="CountMines"/>, summing instead of counting.</summary>
+    internal float GetMineIncomePerMinute(FactionHQ hq)
+    {
+        float total = 0f;
+        foreach (KeyValuePair<Unit, int> entry in mineLevels)
+        {
+            if (entry.Key != null && !entry.Key.disabled && entry.Key.NetworkHQ == hq)
+            {
+                total += GetMineIncomePerMinute(entry.Value);
+            }
+        }
+
+        return total;
     }
 
     private void RefreshFriendlyLists()

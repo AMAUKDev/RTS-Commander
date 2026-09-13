@@ -546,8 +546,7 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
                 // The toast is raised by CommanderAlertPatches off Airbase.CaptureFaction, which
                 // catches every base that changes hands rather than only the one this drive was
                 // aimed at. Console line only here.
-                CommanderPlugin.Log.LogInfo(
-                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} captured {GetAirbaseLabel(drive.Target)}.");
+                CommanderAiLog.Note(hq, $"captured {GetAirbaseLabel(drive.Target)}.");
             }
 
             drive.Target = ChooseEnemyTarget(hq);
@@ -586,9 +585,8 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
         if (!drive.Announced)
         {
             drive.Announced = true;
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} is moving on {GetAirbaseLabel(drive.Target)} "
-                    + $"with {squad.Count} unit(s).");
+            CommanderAiLog.Note(
+                hq, $"is moving on {GetAirbaseLabel(drive.Target)} with {squad.Count} unit(s).");
         }
     }
 
@@ -689,6 +687,7 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
             if (id.TryGetUnit(out Unit unit)
                 && CanCapture(unit)
                 && !CommanderEnemyCommanderService.IsDefendingUnit(unit)
+                && !CommanderEnemyCommanderService.IsGarrisonUnit(unit)
                 && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true)
             {
                 squad.Add(unit);

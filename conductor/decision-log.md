@@ -37,3 +37,11 @@ Technical and business decisions made during development.
 - **Rationale**: User observation: enemy AI mine-spams at its base and convoy-rushes one road. KISS: one new concept ("point") that every later system reads. Take-and-hold at platoon scale is the desired feel.
 - **Alternatives**: Spacing rule only (no objectives to fight over); points as destroyable buildings (bombing targets, not held ground); personalities.
 - **Impact**: New `Points` settings section, new strategic-points service, two AI decisions changed, COMMANDER LOG window, point markers on map and world.
+
+### DECISION-004: Later AI tracks recorded as backlog stubs
+- **Date**: 2026-09-13
+- **Track**: (backlog)
+- **Decision**: The three follow-on tracks from DECISION-003 are written up as `conductor/backlog/*.md` with the user's verbatim intent, reuse pointers and open questions, so the design sessions start from the record rather than memory.
+- **Rationale**: Only the first track had a design; the other three lived in one conversation.
+- **Alternatives**: Create full tracks now (premature: each needs its own brainstorm).
+- **Impact**: `/orchestrator-supaconductor:brainstorm` for each, in order, once the points track is verified in game.

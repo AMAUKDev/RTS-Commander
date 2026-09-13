@@ -23,6 +23,12 @@ internal static class CommanderUiTheme
     private static readonly Color TextColor = new(0.95f, 0.96f, 0.97f, 1f);
     private static readonly Color MutedColor = new(0.76f, 0.80f, 0.82f, 1f);
 
+    /// <summary>Nobody holds it: an untaken capture target, a free resource site, a village or
+    /// hilltop with no owner. Moved out of <see cref="CommanderWorldMarkerRenderer"/>'s own
+    /// neutral-base colour field (Reuse rule 4) so a strategic point and a capture target read as
+    /// the same "neutral" instead of two near-identical yellows.</summary>
+    internal static readonly Color NeutralMarker = new(1f, 0.86f, 0.25f, 0.95f);
+
     private static bool initialized;
     private static Texture2D? windowTexture;
     private static Texture2D? panelTexture;
@@ -371,7 +377,10 @@ internal static class CommanderUiTheme
         DrawWorldLabel(new Vector2(point.x, top - 2f), label, color);
     }
 
-    private static void Bar(float x, float y, float width, float height)
+    /// <summary>One filled rectangle in the current <c>GUI.color</c>. Internal so a caller building
+    /// its own shape out of bars — a strategic point's diamond/square/triangle markers — does not
+    /// have to reimplement this one line.</summary>
+    internal static void Bar(float x, float y, float width, float height)
     {
         GUI.DrawTexture(new Rect(x, y, width, height), Texture2D.whiteTexture);
     }

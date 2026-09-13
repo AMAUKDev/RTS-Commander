@@ -66,7 +66,6 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     internal float SelectedTargetAltitude => selectedTargetAltitude;
     internal bool TargetOrdnance { get => CommanderSettings.AirGuardTargetOrdnance; set => CommanderSettings.AirGuardTargetOrdnance = value; }
     internal bool SaturationAttack { get => CommanderSettings.AradSaturationAttack; set => CommanderSettings.AradSaturationAttack = value; }
-    internal bool LaunchFromHangar { get => CommanderSettings.AirLaunchFromHangar; set => CommanderSettings.AirLaunchFromHangar = value; }
     internal bool IncludeInternalCannons
     {
         get => CommanderSettings.AirIncludeInternalCannons;
@@ -143,6 +142,8 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         pendingMissionRelocation = null;
         pendingAdoption = null;
         pendingAircraftSpawn = null;
+        relaunchQueue.Clear();
+        nextRelaunchAt = 0f;
         options.Clear();
         weaponOptions.Clear();
         airbases.Clear();
@@ -199,8 +200,10 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
             RefreshMissionMapVisuals();
             TickLandingOrders();
             ProcessReturningMissions();
+            RecoverLandedAircraft();
         }
 
+        ProcessAutoRecreate();
     }
 
     internal void SetUiVisible(bool visible)
@@ -370,6 +373,7 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     {
         return missions.TryGetValue(aircraft, out AirMission mission)
             ? $"{CommanderGameAccess.GetUnitLabel(aircraft)}\n{GetModeLabel(mission.Mode)}  |  {(mission.Returning ? "RTB" : "ACTIVE")}"
+                + (mission.AutoRecreate ? "  |  AUTO" : string.Empty)
             : CommanderGameAccess.GetUnitLabel(aircraft);
     }
 
@@ -382,6 +386,17 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     {
         if (!missions.TryGetValue(aircraft, out AirMission mission)) return;
         if (ResupplyAircraft(aircraft)) return;
+
+        // ResupplyAircraft only routes planes (the route steering is a fixed-wing patch), so every
+        // helicopter lands this way. The Basegame rotary landing state picks the nearest friendly
+        // pad itself, but ejects the crew if there is none, so check first.
+        if (aircraft.pilots != null && aircraft.pilots.Length > 0 && aircraft.pilots[0] != null
+            && IsRotaryPilot(aircraft.pilots[0]) && !HasVerticalPad(aircraft))
+        {
+            SetStatus($"{CommanderGameAccess.GetUnitLabel(aircraft)} has no friendly landing pad to return to.");
+            return;
+        }
+
         mission.Returning = true;
         IssueReturnToBase(aircraft, mission);
         SetStatus($"{CommanderGameAccess.GetUnitLabel(aircraft)} ordered to RTB.");
@@ -402,6 +417,7 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         }
 
         mission.Radius = Mathf.Clamp(mission.Radius / 1000f + deltaKm, 5f, 150f) * 1000f;
+        mission.RememberArea();
         DestroyMissionMapVisual(mission);
         if (ReferenceEquals(selectedMissionAircraft, aircraft))
         {
@@ -414,10 +430,53 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     {
         foreach (KeyValuePair<Aircraft, AirMission> entry in missions)
         {
-            if (entry.Value.Returning && !entry.Value.RtbIssued) IssueReturnToBase(entry.Key, entry.Value);
+            if (!entry.Value.Returning)
+            {
+                continue;
+            }
+
+            if (!entry.Value.RtbIssued || RotaryBouncedBackToCombat(entry.Key))
+            {
+                IssueReturnToBase(entry.Key, entry.Value);
+            }
         }
     }
 
+    /// <summary>
+    /// True for a helicopter that was told to land and is back in its combat brain. The rotary
+    /// landing state hands itself back to combat whenever the pad it wanted is taken or not yet
+    /// free, and the combat brain's own no-target logic will orbit a mission objective rather than
+    /// land if it has never seen an enemy. So a helicopter on RTB is pushed back into the landing
+    /// state every review until it is down.
+    /// </summary>
+    private static bool RotaryBouncedBackToCombat(Aircraft aircraft)
+    {
+        if (aircraft == null || aircraft.disabled || aircraft.pilots == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < aircraft.pilots.Length; i++)
+        {
+            Pilot pilot = aircraft.pilots[i];
+            if (pilot != null)
+            {
+                return IsRotaryPilot(pilot) && pilot.currentState is AIHeloCombatState;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Hands the aircraft to the Basegame landing routine that matches its pilot. Planes use
+    /// <c>AIPilotLandingState</c>. Helicopters and tiltwings fly on a different state machine
+    /// entirely (<c>Pilot.SetStartingAiState</c> gives them <c>AIHeloCombatState</c> and
+    /// <c>AIHeloLandingState</c>), and the rotary landing state finds the nearest friendly pad and
+    /// flies there on its own, from any range. This used to put every pilot into the fixed-wing
+    /// landing state, which for a Chicane meant an aeroplane approach flown by a helicopter: the
+    /// RTB order read as ignored.
+    /// </summary>
     private static void IssueReturnToBase(Aircraft aircraft, AirMission mission)
     {
         if (aircraft == null || aircraft.disabled || aircraft.pilots == null) return;
@@ -425,11 +484,40 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         {
             Pilot pilot = aircraft.pilots[i];
             if (pilot == null) continue;
-            if (pilot.AILandingState == null) pilot.AILandingState = new AIPilotLandingState();
-            pilot.SwitchState(pilot.AILandingState);
+            if (IsRotaryPilot(pilot))
+            {
+                if (pilot.AIHeloLandingState == null) pilot.AIHeloLandingState = new AIHeloLandingState();
+                pilot.SwitchState(pilot.AIHeloLandingState);
+            }
+            else
+            {
+                if (pilot.AILandingState == null) pilot.AILandingState = new AIPilotLandingState();
+                pilot.SwitchState(pilot.AILandingState);
+            }
             mission.RtbIssued = true;
             return;
         }
+    }
+
+    private static bool IsRotaryPilot(Pilot pilot)
+    {
+        return pilot.pilotType == Pilot.PilotType.Helo || pilot.pilotType == Pilot.PilotType.Tiltwing;
+    }
+
+    /// <summary>
+    /// True when the faction holds a base with a free vertical landing point this airframe fits.
+    /// <c>AIHeloLandingState</c> ejects the pilot outright when it finds no airbase at all, so a
+    /// helicopter is only sent home when there is a home to go to.
+    /// </summary>
+    private static bool HasVerticalPad(Aircraft aircraft)
+    {
+        if (aircraft.NetworkHQ == null) return false;
+        RunwayQuery query = new()
+        {
+            RunwayType = RunwayQueryType.Vertical,
+            MinSize = aircraft.maxRadius,
+        };
+        return aircraft.NetworkHQ.TryGetNearestAirbase(aircraft.transform.position, out Airbase _, query);
     }
 
     private static bool KeepsStationInMissionArea(AirCommandMode mode)

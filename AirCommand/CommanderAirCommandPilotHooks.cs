@@ -40,7 +40,11 @@ internal sealed partial class CommanderAirCommandService
             return false;
         }
 
-        if (mission.Returning)
+        // Going home means no targets, from the moment the order is given. A landing order used to
+        // leave Returning false until the 9 km hand-over, so an aircraft with gun ammunition left
+        // — a Brawler's cannon, a Chicane's — kept picking fights all the way back instead of
+        // flying the route, which read as RTB being ignored. Guns count as ordnance to the pilot AI.
+        if (mission.Returning || mission.LandingBase != null)
         {
             result = new CombatAI.TargetSearchResults(null!, null!, 0f, true);
             return true;

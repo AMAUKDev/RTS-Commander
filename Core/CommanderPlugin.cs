@@ -34,6 +34,7 @@ public sealed class CommanderPlugin : BaseUnityPlugin
         CommanderPlayerCommanderService.SelfCheck();
         CommanderEconomyService.SelfCheck();
         CommanderCaptureService.SelfCheck();
+        CommanderStrategicPointService.SelfCheck();
         CommanderBuildPreview.SelfCheck();
         CommanderCameraTuning.SelfCheck();
         CommanderUiScale.SelfCheck();

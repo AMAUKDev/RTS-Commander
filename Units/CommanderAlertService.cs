@@ -235,6 +235,17 @@ internal sealed class CommanderAlertService : ICommanderTickPersistent, ICommand
         }
 
         damageStates.Remove(unit);
+
+        // An airframe that landed at a friendly base and went back into stock leaves the faction
+        // the same way a shot-down one does, so it read as LOST. The game marks it Returned first
+        // (Aircraft.ReturnToInventory), which is the tell. Logged quietly in the arrivals colour:
+        // a recovery is good news and does not need a toast.
+        if (unit is Aircraft && unit.NetworkunitState == Unit.UnitState.Returned)
+        {
+            AddLog(LogKind.Arrival, $"RECOVERED {CommanderGameAccess.GetUnitLabel(unit).ToUpperInvariant()}", unit);
+            return;
+        }
+
         int group = CommanderGroupService.Instance?.GetGroupOf(unit) ?? 0;
         string label = group > 0
             ? $"LOST {CommanderGameAccess.GetUnitLabel(unit).ToUpperInvariant()} (GROUP {group})"
@@ -318,7 +329,9 @@ internal sealed class CommanderAlertService : ICommanderTickPersistent, ICommand
         internal Unit? Unit { get; }
         internal float MissionTime { get; }
 
-        internal string Timestamp => $"{Mathf.FloorToInt(MissionTime / 60f):00}:{Mathf.FloorToInt(MissionTime % 60f):00}";
+        // Moved to CommanderAiLog.FormatMissionTime (the COMMANDER LOG window needed the exact
+        // same mm:ss formatter) — one definition, Reuse rule 3.
+        internal string Timestamp => CommanderAiLog.FormatMissionTime(MissionTime);
     }
 
     private sealed class DamageState

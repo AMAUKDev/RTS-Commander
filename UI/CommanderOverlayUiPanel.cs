@@ -60,6 +60,13 @@ internal sealed partial class CommanderOverlayUi
         }
         y += 42f;
 
+        if (GUI.Button(new Rect(12f, y, panelRect.width - 24f, 34f), "COMMANDER LOG",
+            aiLogUi.Visible ? CommanderUiTheme.SelectedButton : CommanderUiTheme.PrimaryButton))
+        {
+            aiLogUi.Toggle();
+        }
+        y += 42f;
+
         // No CAPTURE button. Expansion is an ordinary order: drop a travel point on the yellow
         // capture marker and the selection goes and takes the base. A button that did the same
         // thing to the nearest target only ever competed with the order the player was already

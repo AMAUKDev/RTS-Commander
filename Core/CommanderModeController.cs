@@ -73,6 +73,9 @@ internal sealed class CommanderModeController : MonoBehaviour
         CommanderSamSiteService samSiteService = services.Register(
             new CommanderSamSiteService(samSiteAnalyzerService, supplyHeliService),
             CommanderTier.Advanced);
+        // After the SAM analyzer, whose strategic height map discovery waits on; before the
+        // economy, so the hold state is fresh by the time PayIncome reads it.
+        services.Register(new CommanderStrategicPointService(), CommanderTier.Advanced);
         CommanderFactionVehicleService factionVehicleService = services.Register(new CommanderFactionVehicleService());
         CommanderSpawnService spawnService = services.Register(
             new CommanderSpawnService(selectionService, factionVehicleService, tacticalMapService),

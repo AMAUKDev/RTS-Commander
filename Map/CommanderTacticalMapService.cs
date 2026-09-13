@@ -41,7 +41,27 @@ internal sealed class CommanderTacticalMapService : ICommanderTickActive, IComma
     internal static bool AllowCommanderMapJump { get; private set; }
     internal bool IsOpen => tacticalOpen && DynamicMap.mapMaximized;
     internal bool IsFullscreenOpen => !tacticalOpen && DynamicMap.mapMaximized;
-    internal bool SuppressMapFollow { get; set; }
+    private bool suppressMapFollow;
+
+    /// <summary>
+    /// True while a placement (air mission area, rally point) owns the map. Turning it off also
+    /// swallows map clicks for the next couple of frames: the placement completes on the same
+    /// mouse-up every other map handler is about to see, and with the flag already cleared that
+    /// click went on to select the unit under the cursor and jump the camera to it.
+    /// </summary>
+    internal bool SuppressMapFollow
+    {
+        get => suppressMapFollow;
+        set
+        {
+            if (suppressMapFollow && !value)
+            {
+                CommanderTacticalMapControlsPatch.SwallowMapClicks();
+            }
+
+            suppressMapFollow = value;
+        }
+    }
     internal bool SuppressExtraUiThisFrame => suppressExtraUiFrame == Time.frameCount;
 
     internal bool ContainsScreenPoint(Vector2 screenPoint)
@@ -243,7 +263,9 @@ internal sealed class CommanderTacticalMapService : ICommanderTickActive, IComma
         HideFullMapPanels();
         SyncCoverageLayer();
 
-        if (!SuppressMapFollow && cameraJumpTracker.Tick(activeMap, out GlobalPosition position))
+        if (!SuppressMapFollow
+            && !CommanderTacticalMapControlsPatch.AnyPlacementArmed()
+            && cameraJumpTracker.Tick(activeMap, out GlobalPosition position))
         {
             JumpCameraTo(position);
         }

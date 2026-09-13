@@ -152,6 +152,13 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         };
     }
 
+    /// <summary>The COMMANDER LOG header's PLAN readout for a given HQ, "NONE" before its first
+    /// review has ever run.</summary>
+    internal string GetPlanLabel(FactionHQ hq)
+    {
+        return states.TryGetValue(hq, out CommanderState state) ? GetPlanLabel(state.Plan) : "NONE";
+    }
+
     /// <summary>
     /// One runnable check for the counter triangle, run once at plugin load next to
     /// <see cref="CommanderServiceRegistryCheck"/>, because a Unity plugin has nowhere else to
@@ -202,6 +209,9 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         if (CommanderScheduler.IsDue(ref nextDefenceAt, DefenceReviewIntervalSeconds))
         {
             ReviewDefences(localHq);
+            // After the home guard, on the same clock, so the guard gets first pick of the
+            // faction's idle vehicles.
+            ReviewGarrisons(localHq);
         }
 
         if (!CommanderScheduler.IsDue(ref nextReviewAt, ReviewIntervalSeconds))
@@ -262,6 +272,12 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         shipCatalog.Clear();
         defenceCandidates.Clear();
         staleDefenders.Clear();
+        garrisonCandidates.Clear();
+        staleGarrison.Clear();
+        // The point objects a stale post cache keys on do not survive a mission reload (discovery
+        // reruns from scratch), so the cache would otherwise just grow with entries nothing can
+        // ever look up again.
+        garrisonPosts.Clear();
         TotalPurchases = 0;
         PlayerPurchases = 0;
         StatusLine = string.Empty;
@@ -298,9 +314,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             }
             else
             {
-                CommanderPlugin.Log.LogInfo(
-                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} keeps the player's own "
-                        + "economy: no head start, no fund reset.");
+                CommanderAiLog.Note(hq, "keeps the player's own economy: no head start, no fund reset.");
             }
 
             state.Prepared = true;
@@ -376,9 +390,8 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             hq.ModifyUnitSupply(choice, 1);
             spendable -= cost;
             RecordPurchase(hq);
-            CommanderPlugin.Log.LogInfo(
-                $"{CommanderPlayerCommanderService.CommanderLabel(hq, GetPlanLabel(buyPlan))} bought "
-                    + $"{CommanderGameAccess.GetVehicleLabel(choice)} for {cost:0}.");
+            CommanderAiLog.Note(
+                hq, $"bought {CommanderGameAccess.GetVehicleLabel(choice)} for {cost:0}.", GetPlanLabel(buyPlan));
         }
     }
 
@@ -418,8 +431,9 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         hq.SetFunds(hq.factionFunds * DuelHeadStart);
         hq.AIAircraftLimit = 0;
         hq.reserveAirframes = 0;
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} takes the duel head start: {hq.factionFunds:0} funds. "
+        CommanderAiLog.Note(
+            hq,
+            $"takes the duel head start: {hq.factionFunds:0} funds. "
                 + "Automatic AI aircraft are off; every airframe is bought and launched.");
     }
 
@@ -468,8 +482,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         hq.excessFundsThreshold = localHq.excessFundsThreshold;
         hq.killReward = localHq.killReward;
         hq.playerTaxRate = localHq.playerTaxRate;
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} matched to the player economy at {baseline:0}.");
+        CommanderAiLog.Note(hq, $"matched to the player economy at {baseline:0}.");
     }
 
     private void UpdatePlan(FactionHQ hq, CommanderState state, in ForceRead opponentForce)
@@ -499,8 +512,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
         state.Plan = wanted;
         state.PendingReviews = 0;
-        CommanderPlugin.Log.LogInfo(
-            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} switches plan to {GetPlanLabel(wanted)}.");
+        CommanderAiLog.Note(hq, $"switches plan to {GetPlanLabel(wanted)}.");
     }
 
     /// <summary>
@@ -765,6 +777,11 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
         /// <summary>The home guard: each pinned vehicle and the ring post it holds.</summary>
         internal readonly Dictionary<Unit, int> Defenders = new();
+
+        /// <summary>Village/hilltop garrisons: each pinned vehicle and the strategic point it holds
+        /// (<see cref="CommanderEnemyCommanderGarrison"/>). A separate table from
+        /// <see cref="Defenders"/> because a unit answers to at most one of the two pins.</summary>
+        internal readonly Dictionary<Unit, CommanderStrategicPoint> Garrison = new();
 
         /// <summary>Ring stations around every base this commander holds, and how many bases that
         /// was when they were picked.</summary>
