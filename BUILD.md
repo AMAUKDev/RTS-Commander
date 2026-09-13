@@ -1,0 +1,149 @@
+# Building and installing Ground Control (RTS)
+
+Ground Control (RTS) is a BepInEx 5 plugin for Nuclear Option. It compiles against the game's own
+assemblies, so the build needs to know where the game is installed.
+
+## Prerequisites
+
+- Nuclear Option installed via Steam, with **BepInEx 5** already installed into the game folder
+  (`<game>\BepInEx\core\BepInEx.dll` must exist).
+- The **.NET SDK** (8.0 or newer). The project targets `net472`; the SDK pulls in the .NET Framework
+  reference assemblies from NuGet, so no separate .NET Framework developer pack is needed.
+  - Install: `winget install --id Microsoft.DotNet.SDK.8 --exact`
+  - If `dotnet build` fails with `NU1100: Unable to resolve 'Microsoft.NETFramework.ReferenceAssemblies'`,
+    NuGet has no package source configured. Add the default one once:
+    `dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org`
+
+## 1. Point the build at the game
+
+The project file reads the `NUCLEAR_OPTION_DIR` environment variable (or an MSBuild `GameDir`
+property) to find `Assembly-CSharp.dll`, `BepInEx.dll`, `0Harmony.dll`, Mirage and the Unity
+modules. Set it once for your user account. Quote the path: the folder name contains a space.
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "NUCLEAR_OPTION_DIR",
+    "I:\SteamLibrary\steamapps\common\Nuclear Option",
+    "User")
+```
+
+Open a new terminal afterwards so the variable is picked up. Alternatively pass it per build:
+
+```powershell
+dotnet build GroundControlRts.csproj -c Release -p:GameDir="I:\SteamLibrary\steamapps\common\Nuclear Option"
+```
+
+## 2. Build
+
+```powershell
+dotnet build GroundControlRts.csproj -c Release
+```
+
+Output lands in `bin\Release\net472\`:
+
+| File | Purpose |
+| --- | --- |
+| `GroundControlRts.dll` | The plugin. |
+| `GroundControlRts.pdb` | Debug symbols; BepInEx stack traces get line numbers with it present. |
+| `Ground Control Duel.json` | The mission that ships with the mod. Copied from `Mission\` to the output root on purpose. |
+
+Game assemblies are referenced with `Private=false`, so they are not copied to the output.
+
+## 3. Install
+
+Copy the **entire** output folder, not just the DLL, into the game's plugins folder:
+
+```powershell
+$dst = "I:\SteamLibrary\steamapps\common\Nuclear Option\BepInEx\plugins\GroundControlRts"
+New-Item -ItemType Directory -Force $dst | Out-Null
+Copy-Item "bin\Release\net472\*" $dst -Recurse -Force
+```
+
+The mission JSON files must sit beside the DLL: `CommanderMissionInstaller` reads them from the
+plugin folder when the game loads and installs them into the game's user mission list. A DLL-only
+copy logs a warning and the Ground Control Duel mission never appears.
+
+If a `NuclearOptionCommander` folder exists in `BepInEx\plugins`, delete it. That is this mod under
+its old name; with both present every Harmony patch runs twice.
+
+## 4. Rebuild and reinstall in one go
+
+`build-and-install.ps1` in the repo root does steps 2 and 3 together (`build-release.bat` double-clicks it; `build-dev.bat` runs the hot-reload variant below), validates the game folder,
+and removes the legacy `NuclearOptionCommander` folder if it finds one.
+
+```powershell
+.\build-and-install.ps1                 # uses $env:NUCLEAR_OPTION_DIR
+.\build-and-install.ps1 -Clean          # wipe bin\Release\net472 first
+.\build-and-install.ps1 -GameDir "I:\SteamLibrary\steamapps\common\Nuclear Option"
+```
+
+If PowerShell refuses to run the script, allow local scripts for your user once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Close the game before reinstalling; Windows will not overwrite a DLL the game has loaded.
+
+## Hot reload during development (no game restart)
+
+The game folder has the **ScriptEngine** plugin from
+[BepInEx.Debug](https://github.com/BepInEx/BepInEx.Debug) installed
+(`BepInEx\plugins\ScriptEngine.dll`). It loads any DLL placed in `BepInEx\scripts\` from bytes,
+so the file is never locked, and swaps the running copy for the new one on demand. Its config
+(`BepInEx\config\com.bepis.bepinex.scriptengine.cfg`) is set to load `scripts\` at startup and
+to **auto-reload about 3 seconds after any DLL in `scripts\` changes**. F6 forces a reload.
+
+Two double-click wrappers in the repo root:
+
+| File | Does |
+| --- | --- |
+| `build-release.bat` | Normal layout: `plugins\GroundControlRts\`, mission JSON included, offers to launch the game. Quit the game first. |
+| `build-dev.bat` | Hot-reload layout: DLL+PDB into `scripts\`, release copy removed. Run with the game open. |
+
+Switch to hot-reload mode once (game closed, because the release copy is locked while loaded):
+
+```powershell
+.\build-dev.bat                   # or: .\build-and-install.ps1 -Dev
+```
+
+This removes `plugins\GroundControlRts\` and puts the DLL and PDB in `scripts\`. Launch the
+game. From then on, with the game running:
+
+```powershell
+.\build-dev.bat                   # build, copy, ScriptEngine reloads by itself
+```
+
+Watch the BepInEx console for `Unloading old plugin instances` then the mod's own
+`Ground Control (RTS) ... loaded` line. The mission you are in stays loaded.
+
+What a reload resets: everything the mod holds in memory — mine/factory/dock upgrade levels,
+control groups, camera bookmarks, the enemy commander's plan state. Faction funds, units and
+buildings are game state and survive. Settings are in the config file and survive.
+
+What does not need a reload at all: anything in CMD → Settings. Those are live.
+
+Back to the normal layout (the shipped mission JSON is only installed from `plugins\`):
+
+```powershell
+.\build-release.bat               # removes scripts\ copy, restores plugins\GroundControlRts\
+```
+
+Never have the mod in both `plugins\` and `scripts\`. ScriptEngine refuses to load a GUID that
+is already loaded, and if it did load, every Harmony patch would run twice.
+
+## Checking it loaded
+
+Launch Nuclear Option and look in `<game>\BepInEx\LogOutput.log` for lines from
+`Ground Control (RTS)`. A clean load prints the plugin version, `Installed mission 'Ground Control Duel'`
+on first run, and no `self-check FAILED` lines. The self-checks run at plugin load and are the mod's
+only automated tests; a failed one means a tuning constant or price ladder is wrong.
+
+## Keeping up with upstream
+
+This fork tracks the original repository as the `upstream` remote:
+
+```powershell
+git fetch upstream
+git merge upstream/main
+```

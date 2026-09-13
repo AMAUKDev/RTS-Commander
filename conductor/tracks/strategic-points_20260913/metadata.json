@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "track_id": "strategic-points_20260913",
+  "name": "Strategic points: resource sites, control points, base income, AI log window",
+  "type": "feature",
+  "status": "planned",
+  "superpower_enhanced": true,
+  "created_at": "2026-09-13",
+  "depends_on": [
+    "player-ai-commander_20260913"
+  ],
+  "loop_state": {
+    "current_step": "EVALUATE_PLAN",
+    "step_status": "FAILED",
+    "fix_cycle_count": 1
+  }
+}

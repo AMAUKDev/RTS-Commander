@@ -1,0 +1,14 @@
+{
+  "mode": "human-in-the-loop",
+  "max_fix_cycles": 2,
+  "models": {
+    "planning": "opus",
+    "execution": "sonnet",
+    "overrides": {
+      "loop-plan-evaluator": "sonnet",
+      "loop-execution-evaluator": "opus",
+      "loop-fixer": "sonnet"
+    },
+    "force_session_model": false
+  }
+}
