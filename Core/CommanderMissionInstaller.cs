@@ -23,7 +23,19 @@ internal static class CommanderMissionInstaller
 
     internal static void InstallShippedMissions()
     {
-        string? pluginFolder = Path.GetDirectoryName(typeof(CommanderMissionInstaller).Assembly.Location);
+        // An assembly loaded from bytes (BepInEx ScriptEngine hot reload) has an empty Location,
+        // and Path.GetDirectoryName("") throws on Mono rather than returning null. Without this
+        // check the whole plugin aborted in Awake under hot reload and the CMD button never
+        // appeared. The missions were installed by the normal plugins\ load, so skipping is safe.
+        string location = typeof(CommanderMissionInstaller).Assembly.Location;
+        if (string.IsNullOrEmpty(location))
+        {
+            CommanderPlugin.Log.LogInfo(
+                "Plugin was loaded from memory (hot reload), so shipped missions were not re-installed.");
+            return;
+        }
+
+        string? pluginFolder = Path.GetDirectoryName(location);
         if (string.IsNullOrEmpty(pluginFolder))
         {
             return;
