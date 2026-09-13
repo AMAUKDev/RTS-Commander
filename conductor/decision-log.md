@@ -45,3 +45,11 @@ Technical and business decisions made during development.
 - **Rationale**: Only the first track had a design; the other three lived in one conversation.
 - **Alternatives**: Create full tracks now (premature: each needs its own brainstorm).
 - **Impact**: `/orchestrator-supaconductor:brainstorm` for each, in order, once the points track is verified in game.
+
+### DECISION-005: Platoon operations doctrine
+- **Date**: 2026-09-13
+- **Track**: platoon-operations_20260913
+- **Decision**: Missions-and-requisitions architecture (approach A). The mod claims every AI-bought vehicle at the depot; platoons of 6 (3 armour, 1 carrier, 2 AD) fill FOB, picket and attack missions; offensives run on 2–3 equidistant axes, sized to the commander's own tracked picture, with release points and a pressure clock (attack at least every 12 min). Buyer fills an order book of requisitions. AI-only this track.
+- **Rationale**: Today's behaviour is a trickle to points plus one convoy at the nearest enemy. Explicit missions are legible in the COMMANDER LOG and give offensives a shape. Contact-weighted point value, axis-only manning gates and the pressure clock stop the sides expanding outward without meeting.
+- **Alternatives**: Extend the garrison step and redirect game convoys (no scaling, still one stream); per-vehicle utility scoring (never forms up).
+- **Impact**: New Operations/ service replacing the garrison partial and the home guard's recruit logic; buyer gains requisition mode; new markers and log block; new OPERATIONS settings.
