@@ -50,7 +50,10 @@ internal sealed partial class CommanderEconomyService
         FactionHQ? localHq = CommanderGameAccess.GetLocalHq();
         foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
         {
-            if (hq == null || ReferenceEquals(hq, localHq) || !hq.IsServer || hq.faction == null)
+            if (hq == null
+                || !CommanderPlayerCommanderService.IsCommanded(hq, localHq)
+                || !hq.IsServer
+                || hq.faction == null)
             {
                 continue;
             }
@@ -105,7 +108,7 @@ internal sealed partial class CommanderEconomyService
             hq.AddFunds(-cost);
             mineLevels[entry.Key] = entry.Value + 1;
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) upgraded a gold mine to level {entry.Value + 1}.");
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} upgraded a gold mine to level {entry.Value + 1}.");
             return;
         }
 
@@ -138,7 +141,7 @@ internal sealed partial class CommanderEconomyService
             hq.AddFunds(-cost);
             factoryLevels[attached] = level + 1;
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) upgraded {CommanderGameAccess.GetUnitLabel(attached)} "
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} upgraded {CommanderGameAccess.GetUnitLabel(attached)} "
                     + $"to level {level + 1}.");
             return;
         }
@@ -241,7 +244,7 @@ internal sealed partial class CommanderEconomyService
 
         hq.AddFunds(-GetStructureCost(radar));
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction.name}) built a {GetStructureLabel(radar)} at a base with no radar cover.");
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a {GetStructureLabel(radar)} at a base with no radar cover.");
         return true;
     }
 
@@ -263,7 +266,7 @@ internal sealed partial class CommanderEconomyService
 
         hq.AddFunds(-GetStructureCost(defence));
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction.name}) built a {GetStructureLabel(defence)} to defend its base.");
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a {GetStructureLabel(defence)} to defend its base.");
         return true;
     }
 
@@ -423,7 +426,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         hq.AddFunds(-MineBuildCost);
-        CommanderPlugin.Log.LogInfo($"Enemy commander ({hq.faction.name}) built a gold mine.");
+        CommanderPlugin.Log.LogInfo($"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a gold mine.");
         return true;
     }
 
@@ -446,7 +449,7 @@ internal sealed partial class CommanderEconomyService
 
         hq.AddFunds(-FactoryBuildCost);
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction.name}) built a {production.unitName} factory.");
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a {production.unitName} factory.");
         return true;
     }
 
@@ -467,7 +470,7 @@ internal sealed partial class CommanderEconomyService
             if (dock != null && shoreSearchReported.Add(hq))
             {
                 CommanderPlugin.Log.LogInfo(
-                    $"Enemy commander ({hq.faction.name}) found no shoreline within "
+                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} found no shoreline within "
                         + $"{CommanderSettings.NavalDockRadiusKm:0.#} km of a base it holds, so it has no navy. "
                         + "Raise Economy/NavalDockRadiusKm if this map keeps its coast further out.");
             }
@@ -481,7 +484,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         hq.AddFunds(-NavalDockBuildCost);
-        CommanderPlugin.Log.LogInfo($"Enemy commander ({hq.faction.name}) built a naval dock.");
+        CommanderPlugin.Log.LogInfo($"{CommanderPlayerCommanderService.CommanderLabel(hq)} built a naval dock.");
         return true;
     }
 
@@ -506,7 +509,7 @@ internal sealed partial class CommanderEconomyService
             hq.AddFunds(-cost);
             dockLevels[entry.Key] = entry.Value + 1;
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) upgraded its naval dock to level {entry.Value + 1}: "
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} upgraded its naval dock to level {entry.Value + 1}: "
                     + $"{CommanderNavalPurchaseService.GetLevelUnlockLabel(entry.Value + 1)}.");
             return true;
         }

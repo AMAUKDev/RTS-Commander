@@ -9,7 +9,10 @@ internal static class CommanderSettings
     private static ConfigFile? config;
     private static readonly Dictionary<string, ConfigEntryBase> entries = new();
 
-    internal static float UiScale { get; set; } = 1.5f;
+    // The one plain static here: derived from the screen size by CommanderUiScale, not from the
+    // config file, so it is recomputed every launch and on every window resize.
+    internal static float AutomaticUiScale { get; set; } = 1.5f;
+    internal static float UiScale => CommanderUiScale.Resolve(UiScaleOverride, AutomaticUiScale);
     internal static bool ModEnabled { get => Get("General", "Enabled", true); set => Set("General", "Enabled", value); }
     internal static bool LimitToFactoryVehicles { get => Get("Gameplay", "LimitToFactoryVehicles", false); set => Set("Gameplay", "LimitToFactoryVehicles", value); }
     internal static bool ShowCommandButton { get => Get("UI", "ShowCommandButton", true); set => Set("UI", "ShowCommandButton", value); }
@@ -31,6 +34,10 @@ internal static class CommanderSettings
     // cursor pixels against the map's on-screen scale, so 1.0 means the map sticks to the cursor.
     // A rename is the only way to reissue a default, since BepInEx keeps whatever is in the file.
     internal static float MapDragSpeed { get => Get("UI", "MapDragSpeed", 1f); set => Set("UI", "MapDragSpeed", value); }
+    // 0 means automatic: the resolution preset in CommanderUiScale decides. Any positive value is
+    // a manual multiplier the player set on the UI scale slider, and it wins over the preset so a
+    // window resize can never undo a choice the player made by hand.
+    internal static float UiScaleOverride { get => Get("UI", "UiScaleOverride", 0f); set => Set("UI", "UiScaleOverride", value); }
     internal static bool AutoFollowSelection { get => Get("Camera", "AutoFollowSelection", true); set => Set("Camera", "AutoFollowSelection", value); }
     // Selecting a unit attaches the follow but must not yank a camera the player just aimed, so
     // the camera only travels when the unit is off screen, near an edge, or too far to read.
@@ -62,6 +69,14 @@ internal static class CommanderSettings
     internal static float FormationCohesionMeters { get => Get("Gameplay", "FormationCohesionMeters", 300f); set => Set("Gameplay", "FormationCohesionMeters", value); }
     internal static bool CombatAlerts { get => Get("Gameplay", "CombatAlerts", true); set => Set("Gameplay", "CombatAlerts", value); }
     internal static int EnemyCommanderMode { get => Get("Gameplay", "EnemyCommanderMode", 0); set => Set("Gameplay", "EnemyCommanderMode", value); }
+    // Off by default: the same commander AI that runs the enemy also runs your own faction, which
+    // is a different game from the one the player opened the mission expecting. You keep command
+    // while it is on - see CommanderPlayerCommanderService.
+    internal static bool PlayerCommanderEnabled { get => Get("Gameplay", "PlayerCommanderEnabled", false); set => Set("Gameplay", "PlayerCommanderEnabled", value); }
+    // How long the player commander keeps its hands off a unit after the player gives it an order,
+    // in game minutes. "Until it arrives" was not enough: a platoon parked on a hill by hand was
+    // being re-recruited into the home guard the moment it stopped moving.
+    internal static float PlayerCommanderHandsOffMinutes { get => Get("Gameplay", "PlayerCommanderHandsOffMinutes", 10f); set => Set("Gameplay", "PlayerCommanderHandsOffMinutes", value); }
     // Economy prices are mission-relative: faction balances are authored per mission (about 1000
     // at the start of Escalation), so these are knobs, not constants.
     internal static float GoldMineCost { get => Get("Economy", "GoldMineCost", 250f); set => Set("Economy", "GoldMineCost", value); }
@@ -112,12 +127,18 @@ internal static class CommanderSettings
     internal static KeyboardShortcut CameraFreeLook { get => GetShortcut("CameraFreeLook", KeyCode.Mouse2, "Hold while moving the mouse to look around in RTS mode."); set => Set("Keybinds", "CameraFreeLook", value); }
     internal static KeyboardShortcut CameraBoost { get => GetShortcut("CameraBoost", KeyCode.LeftShift, "Hold for faster RTS camera movement."); set => Set("Keybinds", "CameraBoost", value); }
     internal static KeyboardShortcut MapBoxSelect { get => GetShortcut("MapBoxSelect", KeyCode.LeftControl, "Hold while dragging on the map to draw a selection box; a plain drag pans the map."); set => Set("Keybinds", "MapBoxSelect", value); }
+    internal static KeyboardShortcut TogglePlayerCommander { get => GetShortcut("TogglePlayerCommander", KeyCode.None, "Toggle the AI commander for your own faction."); set => Set("Keybinds", "TogglePlayerCommander", value); }
 
     internal static string AirCommandMode { get => Get("Air Command", "MissionMode", "AirGuard"); set => Set("Air Command", "MissionMode", value); }
     internal static string AirLoadoutBalance { get => Get("Air Command", "LoadoutBalance", "Primary"); set => Set("Air Command", "LoadoutBalance", value); }
     internal static float AirTargetAltitude { get => Get("Air Command", "TargetAltitude", 0f); set => Set("Air Command", "TargetAltitude", value); }
     internal static bool AirGuardTargetOrdnance { get => Get("Air Command", "AirGuardTargetOrdnance", false); set => Set("Air Command", "AirGuardTargetOrdnance", value); }
     internal static bool AradSaturationAttack { get => Get("Air Command", "AradSaturationAttack", false); set => Set("Air Command", "AradSaturationAttack", value); }
+    // Off = the airframe enters the map already airborne over its base (the default since the AI
+    // pilot was seen ejecting on highway-strip taxi and takeoff). On = it spawns in a hangar and
+    // taxis out like a mission-authored aircraft. Player's AIR window only; the enemy commander
+    // keeps the airborne path because it never books airframe stock for a hangar to consume.
+    internal static bool AirLaunchFromHangar { get => Get("Air Command", "AirLaunchFromHangar", false); set => Set("Air Command", "AirLaunchFromHangar", value); }
     internal static bool AirIncludeInternalCannons { get => Get("Air Command", "IncludeInternalCannons", true); set => Set("Air Command", "IncludeInternalCannons", value); }
     internal static float AwacsRadiusKm { get => Get("Air Command", "AwacsRadiusKm", 60f); set => Set("Air Command", "AwacsRadiusKm", value); }
     internal static float CasRadiusKm { get => Get("Air Command", "CasRadiusKm", 20f); set => Set("Air Command", "CasRadiusKm", value); }
@@ -167,8 +188,12 @@ internal static class CommanderSettings
         _ = FormationCohesionMeters;
         _ = CombatAlerts;
         _ = EnemyCommanderMode;
+        _ = PlayerCommanderEnabled;
+        _ = PlayerCommanderHandsOffMinutes;
+        _ = AirLaunchFromHangar;
         _ = TacticalMapSize;
         _ = MapDragSpeed;
+        _ = UiScaleOverride;
         _ = AutoFrameSelection;
         _ = CameraPanSpeed;
         _ = CameraZoomSpeed;

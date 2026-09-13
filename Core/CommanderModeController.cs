@@ -80,6 +80,9 @@ internal sealed class CommanderModeController : MonoBehaviour
         CommanderEconomyService economyService =
             services.Register(new CommanderEconomyService(), CommanderTier.Advanced);
         services.Register(new CommanderEnemyCommanderService(), CommanderTier.Advanced);
+        // After the enemy commander on purpose: the hotkey flips the switch here, so the review
+        // that reads it is next frame's, never a half-toggled one inside this frame's loop.
+        services.Register(new CommanderPlayerCommanderService(), CommanderTier.Advanced);
         // Core tier: the round has to be able to end whether or not RTS mode is open.
         services.Register(new CommanderVictoryService());
 

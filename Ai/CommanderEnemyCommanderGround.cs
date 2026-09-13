@@ -48,9 +48,9 @@ internal sealed partial class CommanderEnemyCommanderService
 
     /// <summary>
     /// Drives the faction's radar vehicles out to standing overwatch posts on the approach from the
-    /// player's territory, and reports whether it is short of one so the buy loop can order it.
+    /// opponent's territory, and reports whether it is short of one so the buy loop can order it.
     /// </summary>
-    private void ReviewRecon(FactionHQ hq, FactionHQ localHq, CommanderState state)
+    private void ReviewRecon(FactionHQ hq, FactionHQ opponent, CommanderState state)
     {
         reconUnits.Clear();
         if (hq.factionUnits != null)
@@ -74,7 +74,7 @@ internal sealed partial class CommanderEnemyCommanderService
             return;
         }
 
-        EnsureReconPosts(state, hq, localHq);
+        EnsureReconPosts(state, hq, opponent);
         if (state.ReconPosts.Count == 0)
         {
             return;
@@ -91,27 +91,34 @@ internal sealed partial class CommanderEnemyCommanderService
                 continue;
             }
 
+            // Co-command: the player has borrowed this radar. The post stays assigned, and the
+            // truck goes back to it once their order ends.
+            if (CommanderMoveService.Instance?.HasPlayerOrder(truck) == true)
+            {
+                continue;
+            }
+
             CommanderGameAccess.GetUnitCommand(truck)?.SetDestination(post, false);
         }
     }
 
     /// <summary>
-    /// Picks the posts once per commander: a fan of points at standoff from the player's territory,
+    /// Picks the posts once per commander: a fan of points at standoff from the opponent's territory,
     /// spread either side of the axis between the two sides, each pulled to the highest ground in
     /// its neighbourhood. Height is the whole point — a radar in a valley is a radar that sees the
     /// valley. Posts are fixed for the mission, because a post that moves is a truck that never
     /// arrives.
     /// </summary>
-    private static void EnsureReconPosts(CommanderState state, FactionHQ hq, FactionHQ localHq)
+    private static void EnsureReconPosts(CommanderState state, FactionHQ hq, FactionHQ opponent)
     {
         if (state.ReconPosts.Count > 0)
         {
             return;
         }
 
-        GlobalPosition playerCenter = CommanderCaptureService.GetTerritoryCenter(localHq);
+        GlobalPosition opponentCenter = CommanderCaptureService.GetTerritoryCenter(opponent);
         GlobalPosition ownCenter = CommanderCaptureService.GetTerritoryCenter(hq);
-        Vector3 axis = ownCenter.AsVector3() - playerCenter.AsVector3();
+        Vector3 axis = ownCenter.AsVector3() - opponentCenter.AsVector3();
         axis.y = 0f;
         if (axis.sqrMagnitude < 1f)
         {
@@ -125,7 +132,7 @@ internal sealed partial class CommanderEnemyCommanderService
             float t = ReconPostTarget == 1 ? 0.5f : i / (float)(ReconPostTarget - 1);
             float degrees = Mathf.Lerp(-ReconFanDegrees, ReconFanDegrees, t);
             Vector3 direction = Quaternion.Euler(0f, degrees, 0f) * axis;
-            Vector3 nominal = playerCenter.AsVector3() + direction * ReconStandoffMeters;
+            Vector3 nominal = opponentCenter.AsVector3() + direction * ReconStandoffMeters;
             state.ReconPosts.Add(FindHighGround(new GlobalPosition(nominal.x, nominal.y, nominal.z)));
         }
     }
@@ -180,7 +187,7 @@ internal sealed partial class CommanderEnemyCommanderService
     /// quietly withhold a fifth of every review from its convoys.
     /// </para>
     /// </summary>
-    private float ReviewNaval(FactionHQ hq, FactionHQ localHq, CommanderState state, float share)
+    private float ReviewNaval(FactionHQ hq, FactionHQ opponent, CommanderState state, float share)
     {
         CommanderNavalPurchaseService? naval = CommanderNavalPurchaseService.Instance;
         int dockLevel = CommanderEconomyService.GetNavalDockLevel(hq);
@@ -208,13 +215,13 @@ internal sealed partial class CommanderEnemyCommanderService
             return taken;
         }
 
-        float spent = naval.TryPurchaseForHq(hq, choice, CommanderCaptureService.GetTerritoryCenter(localHq));
+        float spent = naval.TryPurchaseForHq(hq, choice, CommanderCaptureService.GetTerritoryCenter(opponent));
         if (spent > 0f)
         {
             state.NavalFund -= spent;
-            TotalPurchases++;
+            RecordPurchase(hq);
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) put a {choice.unitName} to sea for {spent:0}.");
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} put a {choice.unitName} to sea for {spent:0}.");
         }
 
         return taken;

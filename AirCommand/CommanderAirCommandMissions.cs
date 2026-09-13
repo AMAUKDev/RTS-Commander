@@ -350,14 +350,30 @@ internal sealed partial class CommanderAirCommandService
             SetStatus(loadoutError);
             return;
         }
-        if (LaunchAiAircraft(
-                hq,
-                airbase,
-                option.Definition,
-                new LiveryKey(liveryIndex),
-                loadout,
-                option.Definition.aircraftParameters.DefaultFuelLevel,
-                target) == null)
+        LiveryKey livery = new(liveryIndex);
+        float fuel = option.Definition.aircraftParameters.DefaultFuelLevel;
+        bool launched;
+        if (LaunchFromHangar)
+        {
+            // The game's own path: the hangar takes the airframe out of stock on the way out of
+            // the door and the AI pilot taxis and takes off. Kept behind a toggle so the ejection
+            // problem LaunchAiAircraft was written for can be re-tested map by map instead of
+            // assumed.
+            launched = airbase.TrySpawnAircraft(null, option.Definition, livery, loadout, fuel).Allowed;
+        }
+        else
+        {
+            launched = LaunchAiAircraft(hq, airbase, option.Definition, livery, loadout, fuel, target) != null;
+            if (launched)
+            {
+                // Hangar.TrySpawnAircraft takes the airframe out of stock on the way out of the
+                // door. LaunchAiAircraft does not go through a hangar, so the stock comes off here:
+                // it cancels the purchase's +1 above, or consumes one the faction already had.
+                hq.ModifyUnitSupply(option.Definition, -1);
+            }
+        }
+
+        if (!launched)
         {
             pendingAircraftSpawn = null;
             if (purchased)
@@ -369,12 +385,8 @@ internal sealed partial class CommanderAirCommandService
             return;
         }
 
-        // Hangar.TrySpawnAircraft used to take the airframe out of stock on the way out of the
-        // door. LaunchAiAircraft does not go through a hangar, so the stock comes off here: it
-        // cancels the purchase's +1 above, or consumes one the faction already had.
-        hq.ModifyUnitSupply(option.Definition, -1);
-
-        SetStatus($"{GetModeLabel(option.Mode)} mission launched: {GetAircraftLabel(option.Definition)} / {option.LoadoutName}.");
+        SetStatus($"{GetModeLabel(option.Mode)} mission launched: {GetAircraftLabel(option.Definition)} / {option.LoadoutName}"
+            + (LaunchFromHangar ? " (hangar)." : "."));
     }
 
     private void TryAssignPendingAircraft(FactionHQ hq, Unit unit)

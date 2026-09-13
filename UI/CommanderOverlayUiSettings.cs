@@ -7,6 +7,13 @@ namespace GroundControlRts;
 
 internal sealed partial class CommanderOverlayUi
 {
+    /// <summary>
+    /// UI scale the player is dragging towards but has not let go of yet; NaN when the slider is
+    /// at rest. Applying the scale live rescaled the slider under the cursor mid-drag, so the
+    /// thumb ran away from the mouse; the value is now committed on release only.
+    /// </summary>
+    private float pendingUiScale = float.NaN;
+
     private void DrawSettingsWindowIfVisible()
     {
         if (settingsVisible)
@@ -129,7 +136,7 @@ internal sealed partial class CommanderOverlayUi
 
     private void DrawGameplaySettings(float y)
     {
-        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 92f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 84f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(new Rect(24f, y + 10f, settingsWindowRect.width - 48f, 22f), "SPAWN RESTRICTIONS", CommanderUiTheme.Header);
         CommanderSettings.LimitToFactoryVehicles = GUI.Toggle(
             new Rect(24f, y + 42f, settingsWindowRect.width - 48f, 30f),
@@ -137,8 +144,11 @@ internal sealed partial class CommanderOverlayUi
             "Limit to vehicles from factories",
             CommanderUiTheme.Toggle);
 
-        float commandY = y + 104f;
-        GUI.Box(new Rect(12f, commandY, settingsWindowRect.width - 24f, 512f), string.Empty, CommanderUiTheme.Panel);
+        // The COMMAND box carries two commander buttons now. Its rows are on a 32 px pitch rather
+        // than 34 so the whole box still fits under the settings window with the help overlay open:
+        // the tab starts at y = 162 then, and 162 + 96 + 526 = 784 against a 790-tall window.
+        float commandY = y + 96f;
+        GUI.Box(new Rect(12f, commandY, settingsWindowRect.width - 24f, 526f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(new Rect(24f, commandY + 10f, settingsWindowRect.width - 48f, 22f), "COMMAND", CommanderUiTheme.Header);
         CommanderSettings.GroupHotkeys = GUI.Toggle(
             new Rect(24f, commandY + 40f, settingsWindowRect.width - 48f, 30f),
@@ -146,42 +156,42 @@ internal sealed partial class CommanderOverlayUi
             "Control group hotkeys 1-9",
             CommanderUiTheme.Toggle);
         CommanderSettings.AttackMoveIntoRange = GUI.Toggle(
-            new Rect(24f, commandY + 74f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 72f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.AttackMoveIntoRange,
             "Attack orders stop at weapon range",
             CommanderUiTheme.Toggle);
         CommanderSettings.RetargetAfterKill = GUI.Toggle(
-            new Rect(24f, commandY + 108f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 104f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.RetargetAfterKill,
             "Keep attacking after the target dies, then hold the ground",
             CommanderUiTheme.Toggle);
         CommanderSettings.CameraBookmarks = GUI.Toggle(
-            new Rect(24f, commandY + 142f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 136f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.CameraBookmarks,
             "Camera bookmarks F1-F4 (assign key + F1-F4 stores)",
             CommanderUiTheme.Toggle);
         CommanderSettings.OrderFeedback = GUI.Toggle(
-            new Rect(24f, commandY + 176f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 168f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.OrderFeedback,
             "Flash a marker where an order was given",
             CommanderUiTheme.Toggle);
         CommanderSettings.AttackMoveRoutes = GUI.Toggle(
-            new Rect(24f, commandY + 210f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 200f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.AttackMoveRoutes,
             "Attack-move: Free Fire units engage hostiles they pass",
             CommanderUiTheme.Toggle);
         CommanderSettings.GuardOrders = GUI.Toggle(
-            new Rect(24f, commandY + 244f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 232f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.GuardOrders,
             "Right click a friendly unit to guard it",
             CommanderUiTheme.Toggle);
         CommanderSettings.AutoRetreatDamaged = GUI.Toggle(
-            new Rect(24f, commandY + 278f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 264f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.AutoRetreatDamaged,
             $"Retreat to repair below {CommanderSettings.RetreatConditionPercent:0}% condition",
             CommanderUiTheme.Toggle);
         CommanderSettings.CombatAlerts = GUI.Toggle(
-            new Rect(24f, commandY + 312f, settingsWindowRect.width - 48f, 30f),
+            new Rect(24f, commandY + 296f, settingsWindowRect.width - 48f, 30f),
             CommanderSettings.CombatAlerts,
             "Alert when units are attacked or lost",
             CommanderUiTheme.Toggle);
@@ -189,7 +199,7 @@ internal sealed partial class CommanderOverlayUi
         int enemySetting = CommanderSettings.EnemyCommanderMode;
         int enemyMode = CommanderEnemyCommanderService.EffectiveMode;
         if (GUI.Button(
-            new Rect(24f, commandY + 350f, settingsWindowRect.width - 48f, 32f),
+            new Rect(24f, commandY + 334f, settingsWindowRect.width - 48f, 32f),
             $"ENEMY COMMANDER: {CommanderEnemyCommanderService.GetModeLabel(enemyMode)}"
                 + (enemySetting == CommanderEnemyCommanderService.ModeOff && enemyMode != CommanderEnemyCommanderService.ModeOff
                     ? "  (SET BY MISSION)"
@@ -201,17 +211,38 @@ internal sealed partial class CommanderOverlayUi
                 enemySetting >= CommanderEnemyCommanderService.ModeMission ? 0 : enemySetting + 1;
         }
 
+        // Host only, exactly like the enemy commander: every loop the switch unlocks is guarded by
+        // hq.IsServer, so a client that had the setting saved as on does nothing with it. Showing
+        // the button disabled says that, where a button that did nothing would not.
+        FactionHQ? hq = CommanderGameAccess.GetLocalHq();
+        bool host = hq == null || hq.IsServer;
+        bool playerCommander = CommanderSettings.PlayerCommanderEnabled;
+        bool oldEnabled = GUI.enabled;
+        GUI.enabled = oldEnabled && host;
+        if (GUI.Button(
+            new Rect(24f, commandY + 372f, settingsWindowRect.width - 48f, 32f),
+            $"PLAYER COMMANDER: {(playerCommander ? "ON" : "OFF")}"
+                + (playerCommander
+                    ? $"   ({CommanderEnemyCommanderService.Instance?.PlayerPurchases ?? 0} bought)"
+                    : string.Empty)
+                + (host ? string.Empty : "   (HOST ONLY)"),
+            playerCommander ? CommanderUiTheme.DangerButton : CommanderUiTheme.Button))
+        {
+            CommanderPlayerCommanderService.Instance?.Toggle();
+        }
+        GUI.enabled = oldEnabled;
+
         // Both radii are here rather than only in the config file because both are map-dependent:
         // how tight a base perimeter feels, and whether a faction can reach the coast at all, are
         // answers you only get by looking at the map you are on.
         CommanderSettings.BuildRadiusKm = DrawRadiusSlider(
-            commandY + 390f,
+            commandY + 412f,
             "Build radius",
             CommanderSettings.BuildRadiusKm,
             1f,
             15f);
         CommanderSettings.NavalDockRadiusKm = DrawRadiusSlider(
-            commandY + 428f,
+            commandY + 450f,
             "Naval dock radius",
             CommanderSettings.NavalDockRadiusKm,
             1f,
@@ -222,13 +253,13 @@ internal sealed partial class CommanderOverlayUi
         // where it can be turned down, or off, without editing a config file.
         float capture = CommanderSettings.AircraftCaptureStrength;
         GUI.Label(
-            new Rect(24f, commandY + 466f, 250f, 24f),
+            new Rect(24f, commandY + 488f, 250f, 24f),
             $"Aircraft capture strength   {capture:0.#}",
             CommanderUiTheme.Label);
         CommanderSettings.AircraftCaptureStrength = Mathf.Round(
             Mathf.Clamp(
                 GUI.HorizontalSlider(
-                    new Rect(280f, commandY + 472f, settingsWindowRect.width - 304f, 20f),
+                    new Rect(280f, commandY + 494f, settingsWindowRect.width - 304f, 20f),
                     capture,
                     0f,
                     10f),
@@ -337,7 +368,7 @@ internal sealed partial class CommanderOverlayUi
 
     private void DrawUiSettings(float y)
     {
-        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 344f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 386f), string.Empty, CommanderUiTheme.Panel);
         float left = 28f;
         float right = settingsWindowRect.width * 0.5f + 10f;
         float width = settingsWindowRect.width * 0.5f - 40f;
@@ -357,15 +388,55 @@ internal sealed partial class CommanderOverlayUi
         showBuildUi = GUI.Toggle(new Rect(right, y + 220f, width, 28f), showBuildUi, "Build UI", CommanderUiTheme.Toggle);
 
         SaveUiVisibilitySettings();
+
+        float effectiveUiScale = CommanderSettings.UiScale;
+        bool dragging = !float.IsNaN(pendingUiScale);
+        // While the mouse is down the slider shows the value being dragged to, not the one in
+        // force, so the readout follows the thumb but the UI itself holds still.
+        float requestedUiScale = DrawCameraSlider(
+            y + 260f,
+            "UI scale",
+            dragging ? pendingUiScale : effectiveUiScale,
+            CommanderUiScale.MinOverride,
+            CommanderUiScale.MaxOverride,
+            "0.00",
+            "x");
+        if (!Mathf.Approximately(requestedUiScale, dragging ? pendingUiScale : effectiveUiScale))
+        {
+            pendingUiScale = requestedUiScale;
+            dragging = true;
+        }
+
+        // Commit on release. Writing only when the player actually moved the slider matters too:
+        // an untouched slider hands back the value it was given, and storing that would silently
+        // convert an automatic scale into a manual override that no window resize could ever
+        // update again. BepInEx also writes the config file whenever an entry's Value changes.
+        if (dragging && !Input.GetMouseButton(0))
+        {
+            if (!Mathf.Approximately(pendingUiScale, effectiveUiScale))
+            {
+                CommanderSettings.UiScaleOverride = pendingUiScale;
+            }
+
+            pendingUiScale = float.NaN;
+        }
+
+        bool automaticUiScaleActive = CommanderSettings.UiScaleOverride <= 0f;
+        if (GUI.Button(new Rect(28f, y + 292f, 110f, 26f), "AUTO", CommanderUiTheme.Button))
+        {
+            CommanderSettings.UiScaleOverride = 0f;
+        }
+
+        string automaticSuffix = automaticUiScaleActive ? " (active)" : string.Empty;
         GUI.Label(
-            new Rect(28f, y + 260f, settingsWindowRect.width - 56f, 20f),
-            $"Automatic UI scale for {Screen.width} x {Screen.height}: {CommanderSettings.UiScale:0.##}x",
+            new Rect(148f, y + 292f, settingsWindowRect.width - 176f, 26f),
+            $"Automatic for {Screen.width} x {Screen.height}: {CommanderSettings.AutomaticUiScale:0.##}x{automaticSuffix}",
             CommanderUiTheme.MutedLabel);
         GUI.Label(
-            new Rect(28f, y + 284f, settingsWindowRect.width - 56f, 20f),
+            new Rect(28f, y + 326f, settingsWindowRect.width - 56f, 20f),
             $"{CommanderSettings.ToggleUi} cycles visible, RTS UI hidden, and all UI hidden.",
             CommanderUiTheme.MutedLabel);
-        if (GUI.Button(new Rect(28f, y + 308f, settingsWindowRect.width - 56f, 30f), "RESET UI LAYOUT", CommanderUiTheme.Button))
+        if (GUI.Button(new Rect(28f, y + 350f, settingsWindowRect.width - 56f, 30f), "RESET UI LAYOUT", CommanderUiTheme.Button))
         {
             ResetUiLayout();
         }
@@ -391,7 +462,7 @@ internal sealed partial class CommanderOverlayUi
 
     private void DrawControlSettings(float y)
     {
-        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 480f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 540f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(
             new Rect(24f, y + 8f, settingsWindowRect.width - 48f, 32f),
             "Bindings are active only in RTS mode. Click one, then press a keyboard or mouse button. Escape cancels.",
@@ -426,6 +497,7 @@ internal sealed partial class CommanderOverlayUi
         DrawBinding(new Rect(right, rowY + 288f, columnWidth, 30f), "Same type", "same_type");
         DrawBinding(new Rect(right, rowY + 320f, columnWidth, 30f), "Cycle idle", "cycle_idle");
         DrawBinding(new Rect(right, rowY + 352f, columnWidth, 30f), "Map box select", "map_box_select");
+        DrawBinding(new Rect(right, rowY + 384f, columnWidth, 30f), "Player commander", "toggle_player_commander");
 
         if (centerFollowRect.Contains(Event.current.mousePosition))
         {
@@ -434,12 +506,12 @@ internal sealed partial class CommanderOverlayUi
                 "Press briefly to center on the selected unit. Hold to center and follow it.");
         }
 
-        if (GUI.Button(new Rect(left, y + 432f, columnWidth, 32f), "RESET CAMERA", CommanderUiTheme.Button))
+        if (GUI.Button(new Rect(left, y + 492f, columnWidth, 32f), "RESET CAMERA", CommanderUiTheme.Button))
         {
             ResetCameraBindings();
             bindingCapture = null;
         }
-        if (GUI.Button(new Rect(right, y + 432f, columnWidth, 32f), "RESET ACTIONS", CommanderUiTheme.Button))
+        if (GUI.Button(new Rect(right, y + 492f, columnWidth, 32f), "RESET ACTIONS", CommanderUiTheme.Button))
         {
             ResetActionBindings();
             bindingCapture = null;
@@ -531,6 +603,7 @@ internal sealed partial class CommanderOverlayUi
             "same_type" => CommanderSettings.SelectSameType,
             "cycle_idle" => CommanderSettings.CycleIdleUnit,
             "map_box_select" => CommanderSettings.MapBoxSelect,
+            "toggle_player_commander" => CommanderSettings.TogglePlayerCommander,
             _ => new KeyboardShortcut(KeyCode.None)
         };
     }
@@ -560,6 +633,7 @@ internal sealed partial class CommanderOverlayUi
             case "same_type": CommanderSettings.SelectSameType = shortcut; break;
             case "cycle_idle": CommanderSettings.CycleIdleUnit = shortcut; break;
             case "map_box_select": CommanderSettings.MapBoxSelect = shortcut; break;
+            case "toggle_player_commander": CommanderSettings.TogglePlayerCommander = shortcut; break;
         }
     }
 
@@ -590,6 +664,9 @@ internal sealed partial class CommanderOverlayUi
         CommanderSettings.SelectSameType = new KeyboardShortcut(KeyCode.LeftControl);
         CommanderSettings.CycleIdleUnit = new KeyboardShortcut(KeyCode.Period);
         CommanderSettings.MapBoxSelect = new KeyboardShortcut(KeyCode.LeftControl);
+        // Unbound by default: handing your own faction to the AI is not something a stray key
+        // press should do.
+        CommanderSettings.TogglePlayerCommander = new KeyboardShortcut(KeyCode.None);
     }
 
     private void ResetUiLayout()

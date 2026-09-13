@@ -102,11 +102,12 @@ internal sealed partial class CommanderEnemyCommanderService
     }
 
     /// <summary>
-    /// A hit on anything a hostile commander owns puts it on the defensive, whether or not its
+    /// A hit on anything a commanded faction owns puts it on the defensive, whether or not its
     /// sensors ever saw what did it: the radar half of the trigger cannot see a low pass that has
     /// already dropped. Called from the shared <c>Unit.RecordDamage</c> postfix, so it stays a
-    /// dictionary lookup and a float write — <c>states</c> never holds the local HQ, which is what
-    /// keeps the player's own losses out of it.
+    /// dictionary lookup and a float write — <c>states</c> holds the local HQ only while the player
+    /// commander is on, and then the player's own losses put <i>their</i> commander on the
+    /// defensive, which is the point of the switch.
     /// </summary>
     internal void NotifyUnitDamaged(Unit? unit)
     {
@@ -121,7 +122,10 @@ internal sealed partial class CommanderEnemyCommanderService
     {
         foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
         {
-            if (hq == null || ReferenceEquals(hq, localHq) || !hq.IsServer || hq.faction == null)
+            if (hq == null
+                || !CommanderPlayerCommanderService.IsCommanded(hq, localHq)
+                || !hq.IsServer
+                || hq.faction == null)
             {
                 continue;
             }
@@ -148,9 +152,9 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             state.Defending = defending;
             CommanderPlugin.Log.LogInfo(defending
-                ? $"Enemy commander ({hq.faction.name}) goes to DEFENCE posture: hostiles inside "
+                ? $"{CommanderPlayerCommanderService.CommanderLabel(hq)} goes to DEFENCE posture: hostiles inside "
                     + $"{ThreatRadiusMeters / 1000f:0.#} km of its bases."
-                : $"Enemy commander ({hq.faction.name}) stands down from DEFENCE posture.");
+                : $"{CommanderPlayerCommanderService.CommanderLabel(hq)} stands down from DEFENCE posture.");
         }
 
         EnsureDefencePosts(hq, state);
@@ -296,7 +300,15 @@ internal sealed partial class CommanderEnemyCommanderService
         staleDefenders.Clear();
         foreach (KeyValuePair<Unit, int> entry in state.Defenders)
         {
-            if (entry.Key == null || entry.Key.disabled || entry.Key.NetworkHQ != hq)
+            if (entry.Key == null
+                || entry.Key.disabled
+                || entry.Key.NetworkHQ != hq
+                // Co-command: the player has taken this defender off the ring. Dropped from the
+                // guard, but its commandedDestination is deliberately left alone — the player's own
+                // route set it and owns it now, and clearing it would let the Basegame auto-walk
+                // take the vehicle off mid-order. Once the route completes it leaves orders and the
+                // next review may recruit it again, which is "not re-pinned until it arrives".
+                || CommanderMoveService.Instance?.HasPlayerOrder(entry.Key) == true)
             {
                 staleDefenders.Add(entry.Key!);
             }
@@ -357,7 +369,10 @@ internal sealed partial class CommanderEnemyCommanderService
                 && !unit.disabled
                 && unit.definition is VehicleDefinition definition
                 && IsCombatVehicle(definition)
-                && !state.Defenders.ContainsKey(unit))
+                && !state.Defenders.ContainsKey(unit)
+                // Co-command: a vehicle the player has given an order to is theirs until it gets
+                // there. Pinning it to the ring would fight their own click.
+                && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true)
             {
                 defenceCandidates.Add(unit);
             }

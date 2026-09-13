@@ -93,6 +93,8 @@ internal static class CommanderShortcutReference
             "Everything, RTS UI hidden, all UI hidden."));
         buffer.Add(new Entry("Enter / leave Commander", "CMD button",
             "On the left edge, while outside an aircraft."));
+        buffer.Add(new Entry("Toggle player commander", Key(CommanderSettings.TogglePlayerCommander),
+            "AI runs your faction; you keep command too."));
     }
 
     private static string Key(KeyboardShortcut shortcut)

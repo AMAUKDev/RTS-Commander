@@ -183,7 +183,7 @@ internal sealed class CommanderRepairService : ICommanderTickActive, ICommanderR
         }
 
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction?.name}) sent a repair crew to {CommanderGameAccess.GetUnitLabel(worst)}.");
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} sent a repair crew to {CommanderGameAccess.GetUnitLabel(worst)}.");
         return true;
     }
 

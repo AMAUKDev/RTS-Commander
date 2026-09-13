@@ -71,8 +71,6 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     private readonly Dictionary<Aircraft, float> airborneSince = new();
     private readonly List<Aircraft> lostAircraft = new();
 
-    /// <summary>The player's opening airbase. See GetStrikeTarget.</summary>
-    private Airbase? playerHomeBase;
     private readonly List<FactionHQ> staleHqs = new();
     private readonly List<VehicleDefinition> catalog = new();
     private readonly List<VehicleDefinition> candidates = new();
@@ -104,11 +102,34 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         nextReviewAt = 0f;
     }
 
-    /// <summary>Units this session's enemy commanders have bought, for the settings readout.</summary>
+    /// <summary>Units this session's enemy commanders have bought, for the settings readout. Enemy
+    /// commanders only: what the player's own commander bought is counted separately, so the ENEMY
+    /// COMMANDER button keeps reading what it always read.</summary>
     internal int TotalPurchases { get; private set; }
+
+    /// <summary>Units the player's own commander has bought this session, for the PLAYER COMMANDER
+    /// button.</summary>
+    internal int PlayerPurchases { get; private set; }
 
     /// <summary>Plan and balance of the best-funded enemy commander, for the HUD readout.</summary>
     internal string StatusLine { get; private set; } = string.Empty;
+
+    /// <summary>Plan and balance of the player's own commander, for the second HUD row. Empty
+    /// whenever the player commander switch is off, which is what hides that row.</summary>
+    internal string PlayerStatusLine { get; private set; } = string.Empty;
+
+    /// <summary>Books a purchase against whichever commander made it. One definition so the two
+    /// readouts can never drift apart.</summary>
+    private void RecordPurchase(FactionHQ hq)
+    {
+        if (ReferenceEquals(hq, CommanderGameAccess.GetLocalHq()))
+        {
+            PlayerPurchases++;
+            return;
+        }
+
+        TotalPurchases++;
+    }
 
     internal static string GetModeLabel(int mode)
     {
@@ -166,8 +187,13 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         // consuming a review while no mission is loaded is what put the first purchase up to a
         // review behind the start of the match — the enemy has to be spending from minute zero.
         FactionHQ? localHq = CommanderGameAccess.GetLocalHq();
-        if (mode == ModeOff || localHq == null)
+        if (!CommanderPlayerCommanderService.AnyCommanderOn || localHq == null)
         {
+            // Cleared here as well as by PruneStates: with the enemy commander OFF the review loop
+            // below never runs again once the player switch goes off, so without this the YOU row
+            // would keep showing the last plan for the rest of the mission. StatusLine is left
+            // alone on purpose — the ENEMY row's behaviour is unchanged.
+            PlayerStatusLine = string.Empty;
             return;
         }
 
@@ -183,17 +209,27 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             return;
         }
 
-        ForceRead playerForce = ReadForce(localHq);
         FactionHQ? primary = null;
         foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
         {
-            if (hq == null || ReferenceEquals(hq, localHq) || !hq.IsServer || hq.faction == null)
+            if (hq == null
+                || !CommanderPlayerCommanderService.IsCommanded(hq, localHq)
+                || !hq.IsServer
+                || hq.faction == null)
             {
                 continue;
             }
 
-            Review(hq, localHq, mode, playerForce);
-            if (primary == null || hq.factionFunds > primary.factionFunds)
+            // Read per commander rather than once before the loop: every commander but the player's
+            // is playing the local HQ, so this is the same struct it used to be, but the player's
+            // own commander has to read whoever it is actually up against.
+            FactionHQ opponent = CommanderPlayerCommanderService.ChooseOpponent(hq, localHq);
+            ForceRead opponentForce = ReadForce(opponent);
+            Review(hq, localHq, opponent, mode, opponentForce);
+
+            // The ENEMY row stays about the enemy. The player's own commander has its own HUD row,
+            // so it must never win this pick and hide the plan the player is supposed to counter.
+            if (!ReferenceEquals(hq, localHq) && (primary == null || hq.factionFunds > primary.factionFunds))
             {
                 primary = hq;
             }
@@ -204,6 +240,13 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             ? $"{GetPlanLabel(primaryState.Plan)}   {FundsLabel(primary.factionFunds)}"
                 + (primaryState.Defending ? "   DEFENDING" : string.Empty)
             : string.Empty;
+
+        // PruneStates has just dropped the local HQ's state unless the player commander is on, so
+        // this row empties itself the review after the switch goes off.
+        PlayerStatusLine = states.TryGetValue(localHq, out CommanderState playerState)
+            ? $"{GetPlanLabel(playerState.Plan)}   {FundsLabel(localHq.factionFunds)}"
+                + (playerState.Defending ? "   DEFENDING" : string.Empty)
+            : string.Empty;
     }
 
     public void ResetSession()
@@ -212,7 +255,6 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         loggedAirRoster.Clear();
         airborneSince.Clear();
         lostAircraft.Clear();
-        playerHomeBase = null;
         staleHqs.Clear();
         catalog.Clear();
         candidates.Clear();
@@ -221,12 +263,14 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         defenceCandidates.Clear();
         staleDefenders.Clear();
         TotalPurchases = 0;
+        PlayerPurchases = 0;
         StatusLine = string.Empty;
+        PlayerStatusLine = string.Empty;
         nextReviewAt = 0f;
         nextDefenceAt = 0f;
     }
 
-    private void Review(FactionHQ hq, FactionHQ localHq, int mode, in ForceRead playerForce)
+    private void Review(FactionHQ hq, FactionHQ localHq, FactionHQ opponent, int mode, in ForceRead opponentForce)
     {
         if (!states.TryGetValue(hq, out CommanderState state))
         {
@@ -235,29 +279,43 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         }
 
         bool duel = IsDuelMission;
+        bool isLocal = ReferenceEquals(hq, localHq);
         if (!state.Prepared)
         {
-            if (mode == ModeMatched)
+            // Both openers are about putting an opposing faction on the player's economy, so both
+            // are skipped for the player's own commander: no matched balance copied onto itself, no
+            // duel head start. The switch hands the player a staff officer, not a different mission.
+            if (!isLocal)
             {
-                LevelEconomy(hq, localHq);
+                if (mode == ModeMatched)
+                {
+                    LevelEconomy(hq, localHq);
+                }
+                if (duel)
+                {
+                    PrepareDuel(hq);
+                }
             }
-            if (duel)
+            else
             {
-                PrepareDuel(hq);
+                CommanderPlugin.Log.LogInfo(
+                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} keeps the player's own "
+                        + "economy: no head start, no fund reset.");
             }
+
             state.Prepared = true;
         }
 
         if (duel)
         {
-            RevealPlayerBase(hq, localHq);
+            RevealPlayerBase(hq, opponent);
         }
 
-        UpdatePlan(hq, state, playerForce);
+        UpdatePlan(hq, state, opponentForce);
 
         // Posture comes before spending on purpose: a commander with an empty balance still has to
         // fly the aircraft and drive the radars it already owns.
-        ReviewPosture(hq, localHq, state, playerForce);
+        ReviewPosture(hq, opponent, state, opponentForce);
 
         // Whatever the economy service is saving for is off limits here. Both spenders draw on the
         // one factionFunds pool, and this one takes a fixed share of the balance every review — so
@@ -278,7 +336,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
         // Whatever the plan says, a commander with no air defence at all while the player is
         // flying is not playing the same game. One launcher first, then back to the plan.
-        bool blindToAir = playerForce.Aircraft > 0 && CountAirDefence(hq) == 0;
+        bool blindToAir = opponentForce.Aircraft > 0 && CountAirDefence(hq) == 0;
         int purchases = duel ? DuelPurchasesPerReview : PurchasesPerReview;
         if (duel)
         {
@@ -287,10 +345,10 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             // added up to an aircraft after the opening minutes — which is exactly how an enemy that
             // flew at the start ended up with no air force at all.
             spendable -= AccrueFund(ref state.AirFund, spendable * DuelAirframeBudgetShare);
-            state.AirFund -= BuyAirframe(hq, state, state.AirFund, playerForce);
+            state.AirFund -= BuyAirframe(hq, state, state.AirFund, opponentForce);
         }
 
-        spendable -= ReviewNaval(hq, localHq, state, spendable * NavalBudgetShare);
+        spendable -= ReviewNaval(hq, opponent, state, spendable * NavalBudgetShare);
 
         // An expansion with nothing that can take ground is an expansion that never happens, so a
         // capture unit outranks the plan exactly the way the first air-defence launcher does.
@@ -317,9 +375,9 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             hq.AddFunds(-cost);
             hq.ModifyUnitSupply(choice, 1);
             spendable -= cost;
-            TotalPurchases++;
+            RecordPurchase(hq);
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}, {GetPlanLabel(buyPlan)}) bought "
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq, GetPlanLabel(buyPlan))} bought "
                     + $"{CommanderGameAccess.GetVehicleLabel(choice)} for {cost:0}.");
         }
     }
@@ -330,14 +388,14 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     /// on every mission the commander is switched on for, because both are about units that are
     /// already paid for.
     /// </summary>
-    private void ReviewPosture(FactionHQ hq, FactionHQ localHq, CommanderState state, in ForceRead playerForce)
+    private void ReviewPosture(FactionHQ hq, FactionHQ opponent, CommanderState state, in ForceRead opponentForce)
     {
-        ReviewRecon(hq, localHq, state);
+        ReviewRecon(hq, opponent, state);
         if (IsDuelMission)
         {
             // Only on the mod's own map. Every other mission launches its own AI aircraft off
             // AIAircraftLimit and may script what they do; overriding that is not a bug fix.
-            TaskAirWing(hq, localHq, playerForce);
+            TaskAirWing(hq, state, opponent, opponentForce);
         }
     }
 
@@ -361,7 +419,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         hq.AIAircraftLimit = 0;
         hq.reserveAirframes = 0;
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction.name}) takes the duel head start: {hq.factionFunds:0} funds. "
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} takes the duel head start: {hq.factionFunds:0} funds. "
                 + "Automatic AI aircraft are off; every airframe is bought and launched.");
     }
 
@@ -374,14 +432,14 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     /// over your base without seeing it. The player's mobile units are left unrevealed on purpose —
     /// the enemy knows where your base is, not where your army is.
     /// </summary>
-    private static void RevealPlayerBase(FactionHQ hq, FactionHQ localHq)
+    private static void RevealPlayerBase(FactionHQ hq, FactionHQ opponent)
     {
-        if (localHq.factionUnits == null)
+        if (opponent.factionUnits == null)
         {
             return;
         }
 
-        foreach (PersistentID id in localHq.factionUnits)
+        foreach (PersistentID id in opponent.factionUnits)
         {
             if (id.TryGetUnit(out Unit unit)
                 && unit != null
@@ -411,12 +469,12 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         hq.killReward = localHq.killReward;
         hq.playerTaxRate = localHq.playerTaxRate;
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction.name}) matched to the player economy at {baseline:0}.");
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} matched to the player economy at {baseline:0}.");
     }
 
-    private void UpdatePlan(FactionHQ hq, CommanderState state, in ForceRead playerForce)
+    private void UpdatePlan(FactionHQ hq, CommanderState state, in ForceRead opponentForce)
     {
-        EnemyPlan wanted = ChoosePlan(playerForce);
+        EnemyPlan wanted = ChoosePlan(opponentForce);
         if (wanted == state.Plan)
         {
             state.Pending = wanted;
@@ -442,7 +500,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         state.Plan = wanted;
         state.PendingReviews = 0;
         CommanderPlugin.Log.LogInfo(
-            $"Enemy commander ({hq.faction.name}) switches plan to {GetPlanLabel(wanted)}.");
+            $"{CommanderPlayerCommanderService.CommanderLabel(hq)} switches plan to {GetPlanLabel(wanted)}.");
     }
 
     /// <summary>
@@ -553,13 +611,16 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         }
     }
 
-    /// <summary>Drops state for HQs that went away with a scene the reset did not catch.</summary>
+    /// <summary>Drops state for HQs that went away with a scene the reset did not catch, and for the
+    /// local HQ while nothing is commanding it — its state is only meaningful while the player
+    /// commander switch is on, and leaving it behind would keep a stale plan on the HUD.</summary>
     private void PruneStates(FactionHQ localHq)
     {
+        bool dropLocal = !CommanderPlayerCommanderService.IsCommanded(localHq, localHq);
         staleHqs.Clear();
         foreach (KeyValuePair<FactionHQ, CommanderState> entry in states)
         {
-            if (entry.Key == null || ReferenceEquals(entry.Key, localHq))
+            if (entry.Key == null || (dropLocal && ReferenceEquals(entry.Key, localHq)))
             {
                 staleHqs.Add(entry.Key!);
             }
@@ -614,7 +675,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         return count;
     }
 
-    /// <summary>What the player is actually fielding, which is the only input to the plan choice.</summary>
+    /// <summary>What the opponent is actually fielding, which is the only input to the plan choice.</summary>
     private static ForceRead ReadForce(FactionHQ hq)
     {
         ForceRead read = default;
@@ -716,6 +777,11 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
         /// <summary>Standing overwatch posts, picked once and then kept.</summary>
         internal readonly List<GlobalPosition> ReconPosts = new();
+
+        /// <summary>The opponent's opening airbase. See GetStrikeTarget. Per commander rather than
+        /// one field for the whole service: with the local HQ commanded too, two commanders remember
+        /// two different opening bases, and the shared field would be rewritten every review.</summary>
+        internal Airbase? StrikeBase;
 
         /// <summary>Last reason this commander bought no aircraft, so the log says it once and not
         /// twice a minute for the rest of the match.</summary>

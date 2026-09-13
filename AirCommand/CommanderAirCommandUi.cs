@@ -271,6 +271,18 @@ internal sealed class CommanderAirCommandUi
             y += 38f;
         }
 
+        {
+            bool oldHangar = GUI.enabled;
+            GUI.enabled = oldHangar && !dropdownOpen && !service.AwaitingAreaSelection;
+            service.LaunchFromHangar = GUI.Toggle(
+                new Rect(12f, y, windowRect.width - 24f, 32f),
+                service.LaunchFromHangar,
+                "HANGAR LAUNCH  |  taxi and take off instead of spawning airborne",
+                CommanderUiTheme.Toggle);
+            GUI.enabled = oldHangar;
+            y += 38f;
+        }
+
         if (service.SelectedMode == CommanderAirCommandService.AirCommandMode.StrategicStrike)
         {
             GUI.Box(new Rect(12f, y, windowRect.width - 24f, 34f), string.Empty, CommanderUiTheme.Panel);

@@ -440,7 +440,7 @@ internal sealed partial class CommanderEconomyService
 
         // Same ordering rule as the enemy commander: do not burn a review while no mission is
         // loaded, or the enemy's first mine lands a review after the match already started.
-        if (CommanderEnemyCommanderService.EffectiveMode != CommanderEnemyCommanderService.ModeOff
+        if (CommanderPlayerCommanderService.AnyCommanderOn
             && CommanderGameAccess.GetLocalHq() != null
             && CommanderScheduler.IsDue(ref nextEnemyReviewAt, EnemyReviewIntervalSeconds))
         {

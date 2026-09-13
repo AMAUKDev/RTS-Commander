@@ -74,6 +74,12 @@ driving a camera over a battlefield instead of flying an unwilling aeroplane.
 
 ### Fixed
 
+- **The mod silently failed to start when loaded by a hot-reload tool.** Loaded from memory (BepInEx
+  ScriptEngine, used during development) the plugin DLL has no file path, and asking for the folder
+  of an empty path throws on Mono. That exception escaped from start-up before the CMD button was
+  created, so the game ran with no mod and no error visible in the BepInEx log. Start-up now notices
+  the missing path, logs one line saying the shipped missions were not re-installed, and carries on.
+
 - **Air Command threw you onto the game's fullscreen map to place a mission area, then threw you
   back.** Picking a mission area, moving one, or adopting an aircraft opened the base game's big
   map over the whole screen, and closing the AIR window swapped back to the RTS map — so a single
@@ -220,6 +226,28 @@ driving a camera over a battlefield instead of flying an unwilling aeroplane.
   may script what they do, and overriding that is not a bug fix.
 
 ### Added
+
+- **The commander AI can run your faction too.** One button — **PLAYER COMMANDER** in
+  **Settings > Gameplay**, under ENEMY COMMANDER, with a remappable hotkey in **Controls** — and the
+  same commander that runs the enemy takes over your side as well: it earns, builds mines and radar,
+  buys and deploys vehicles, posts a home guard on your bases, drives radar trucks out onto the
+  approaches, launches and tasks aircraft, and sends squads to take airbases. While it is on, a
+  **YOU** row appears under your funds with its current plan and balance, and a toast confirms every
+  flip of the switch. **You keep command the whole time**: your own orders, your BUILD window and
+  your depot purchases all still work, and any unit you have given an order to is left alone by the
+  AI until it gets where you sent it — then it can be recruited back onto the ring. It gets **no head
+  start and no fund reset**: your economy is exactly what the mission authored, and everything it
+  buys comes out of the same balance you are spending. Off by default, host only, and turning it off
+  leaves everything it bought and positioned where it stands.
+
+- **You set the size of the commander UI yourself.** The scale used to be picked off your screen
+  height alone, which left the windows too small to read on plenty of displays and gave you nothing
+  to do about it. **Settings > UI / HIDE** now has a **UI scale** slider from **0.75x to 2.5x** that
+  rescales every commander window when you let go of it, and an **AUTO** button beside it that hands the
+  choice back to the automatic preset — the readout next to the button always tells you what that
+  preset is for your current resolution. Your value is saved as `UI/UiScaleOverride` in the
+  configuration file, so it survives a restart, and resizing the game window no longer throws away
+  a scale you set by hand.
 
 - **The enemy commander defends its base.** Everything it bought used to walk at you the moment it
   left the depot ramp, so its home was always empty behind the attack — which is how a match ended

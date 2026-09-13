@@ -94,16 +94,16 @@ internal sealed partial class CommanderEnemyCommanderService
     /// units can be put somewhere useful instead of driven there; strike the rest of the time,
     /// which is what actually hurts the player's base.
     /// </summary>
-    private static AirRole ChooseAirRole(FactionHQ hq, in ForceRead playerForce)
+    private static AirRole ChooseAirRole(FactionHQ hq, in ForceRead opponentForce)
     {
         int fighters = CountRole(hq, AirRole.Fighter);
         int transports = CountRole(hq, AirRole.Transport);
-        if (playerForce.Aircraft > 0 && fighters == 0)
+        if (opponentForce.Aircraft > 0 && fighters == 0)
         {
             return AirRole.Fighter;
         }
 
-        return transports < TransportLimit && playerForce.Ground > 0 ? AirRole.Transport : AirRole.Strike;
+        return transports < TransportLimit && opponentForce.Ground > 0 ? AirRole.Transport : AirRole.Strike;
     }
 
     /// <summary>How many airframes of one role this faction already has in the world.</summary>
@@ -165,7 +165,7 @@ internal sealed partial class CommanderEnemyCommanderService
     /// two apart from a playtest was not possible before.
     /// </para>
     /// </remarks>
-    private float BuyAirframe(FactionHQ hq, CommanderState state, float budget, in ForceRead playerForce)
+    private float BuyAirframe(FactionHQ hq, CommanderState state, float budget, in ForceRead opponentForce)
     {
         LogAirRosterOnce(hq);
         if (CountAirborne(hq) >= DuelAirborneLimit)
@@ -174,7 +174,7 @@ internal sealed partial class CommanderEnemyCommanderService
             return 0f;
         }
 
-        AirRole wanted = ChooseAirRole(hq, playerForce);
+        AirRole wanted = ChooseAirRole(hq, opponentForce);
         float spent = TryBuyRole(hq, state, budget, wanted, CountRole(hq, wanted) >= CheapAirframesPerRole);
         if (spent > 0f)
         {
@@ -243,10 +243,13 @@ internal sealed partial class CommanderEnemyCommanderService
             }
 
             LiveryKey livery = new(choice.aircraftParameters.GetRandomLiveryForFaction(hq.faction));
-            FactionHQ? localHq = CommanderGameAccess.GetLocalHq();
-            GlobalPosition facing = localHq == null
+            // Launched facing whoever this commander is up against. Only the review loop ever gets
+            // here, so for every commander but the player's own ChooseOpponent answers the local HQ,
+            // which is the value this used to pass straight in.
+            FactionHQ? player = CommanderGameAccess.GetLocalHq();
+            GlobalPosition facing = player == null
                 ? airbase.center.GlobalPosition()
-                : GetStrikeTarget(localHq);
+                : GetStrikeTarget(state, CommanderPlayerCommanderService.ChooseOpponent(hq, player));
             if (CommanderAirCommandService.LaunchAiAircraft(hq, airbase, choice, livery, loadout, fuel, facing) == null)
             {
                 continue;
@@ -254,10 +257,10 @@ internal sealed partial class CommanderEnemyCommanderService
 
             float cost = Mathf.Max(0f, choice.value);
             hq.AddFunds(-cost);
-            TotalPurchases++;
+            RecordPurchase(hq);
             state.LastAirDenial = string.Empty;
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) launched a {choice.unitName} "
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} launched a {choice.unitName} "
                     + $"({GetAirRole(choice)}) from {airbase.name} for {cost:0}.");
             return cost;
         }
@@ -384,7 +387,7 @@ internal sealed partial class CommanderEnemyCommanderService
         }
 
         state.LastAirDenial = reason;
-        CommanderPlugin.Log.LogInfo($"Enemy commander ({hq.faction.name}) bought no aircraft: {reason}.");
+        CommanderPlugin.Log.LogInfo($"{CommanderPlayerCommanderService.CommanderLabel(hq)} bought no aircraft: {reason}.");
     }
 
     /// <summary>
@@ -393,7 +396,7 @@ internal sealed partial class CommanderEnemyCommanderService
     /// part of the wing once the player is actually flying, because a strike package with nothing
     /// escorting it is a free kill.
     /// </summary>
-    private void TaskAirWing(FactionHQ hq, FactionHQ localHq, in ForceRead playerForce)
+    private void TaskAirWing(FactionHQ hq, CommanderState state, FactionHQ opponent, in ForceRead opponentForce)
     {
         ReportLostAircraft(hq);
         CommanderAirCommandService? airCommand = CommanderAirCommandService.Instance;
@@ -402,7 +405,7 @@ internal sealed partial class CommanderEnemyCommanderService
             return;
         }
 
-        GlobalPosition strikeTarget = GetStrikeTarget(localHq);
+        GlobalPosition strikeTarget = GetStrikeTarget(state, opponent);
         GlobalPosition homeCentre = CommanderCaptureService.GetTerritoryCenter(hq);
         int tasked = 0;
         foreach (PersistentID id in hq.factionUnits)
@@ -428,14 +431,14 @@ internal sealed partial class CommanderEnemyCommanderService
             {
                 tasked++;
                 CommanderPlugin.Log.LogInfo(
-                    $"Enemy commander ({hq.faction.name}) tasked {CommanderGameAccess.GetUnitLabel(aircraft)} "
+                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} tasked {CommanderGameAccess.GetUnitLabel(aircraft)} "
                         + $"with {CommanderAirCommandService.GetModeLabel(mode)}.");
             }
         }
     }
 
     /// <summary>
-    /// Where the enemy sends its strikes: the airbase the player started the mission holding.
+    /// Where a commander sends its strikes: the airbase the opponent started the mission holding.
     /// </summary>
     /// <remarks>
     /// This used to be <c>GetTerritoryCenter</c> — the average position of every airbase the player
@@ -447,27 +450,27 @@ internal sealed partial class CommanderEnemyCommanderService
     /// their main base — so it is remembered once and kept. It is only re-picked if the player loses
     /// it outright.
     /// </remarks>
-    private GlobalPosition GetStrikeTarget(FactionHQ localHq)
+    private static GlobalPosition GetStrikeTarget(CommanderState state, FactionHQ opponent)
     {
-        if (playerHomeBase == null
-            || playerHomeBase.disabled
-            || playerHomeBase.center == null
-            || !localHq.ContainsAirbase(playerHomeBase))
+        if (state.StrikeBase == null
+            || state.StrikeBase.disabled
+            || state.StrikeBase.center == null
+            || !opponent.ContainsAirbase(state.StrikeBase))
         {
-            playerHomeBase = null;
-            foreach (Airbase airbase in localHq.GetAirbases())
+            state.StrikeBase = null;
+            foreach (Airbase airbase in opponent.GetAirbases())
             {
                 if (airbase != null && !airbase.disabled && airbase.center != null)
                 {
-                    playerHomeBase = airbase;
+                    state.StrikeBase = airbase;
                     break;
                 }
             }
         }
 
-        return playerHomeBase != null && playerHomeBase.center != null
-            ? playerHomeBase.center.GlobalPosition()
-            : CommanderCaptureService.GetTerritoryCenter(localHq);
+        return state.StrikeBase != null && state.StrikeBase.center != null
+            ? state.StrikeBase.center.GlobalPosition()
+            : CommanderCaptureService.GetTerritoryCenter(opponent);
     }
 
     private void TrackAircraft(Aircraft aircraft)
@@ -502,7 +505,7 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             Aircraft aircraft = lostAircraft[i];
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) lost an airframe after "
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} lost an airframe after "
                     + $"{Time.time - airborneSince[aircraft]:0} s in the air.");
             airborneSince.Remove(aircraft);
         }

@@ -50,6 +50,10 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
     private readonly Dictionary<Unit, GlobalPosition> playerDestinations = new();
     private readonly Dictionary<Unit, UnitOrder> orders = new();
     private readonly Dictionary<Unit, CommanderStance> stances = new();
+
+    /// <summary>Game time (scaled clock) of the last order the player gave each unit, for
+    /// <see cref="HasPlayerOrder"/>'s hands-off window. Entries die with the unit.</summary>
+    private readonly Dictionary<Unit, float> playerOrderedAt = new();
     private readonly List<Unit> staleOrders = new();
     private readonly List<Unit> hostiles = new();
     private readonly List<Unit> staleStances = new();
@@ -320,6 +324,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
                 Shape = Formation == CommanderFormationShape.Ring ? CommanderFormationShape.Wedge : Formation,
             };
             orders[unit] = order;
+            MarkPlayerOrdered(unit);
             stoppedUnits.Remove(unit);
             playerDestinations.Remove(unit);
             CommanderGameAccess.SetUnitHoldPosition(unit, false);
@@ -400,6 +405,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
             order.Actions.Add(action);
             order.ResetProgress();
 
+            MarkPlayerOrdered(unit);
             stoppedUnits.Remove(unit);
             playerDestinations.Remove(unit);
             CommanderGameAccess.SetUnitHoldPosition(unit, false);
@@ -447,6 +453,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
     public void TickPersistent()
     {
         stoppedUnits.RemoveWhere(static unit => unit == null || unit.disabled);
+        PruneHandsOff();
         List<Unit>? staleDestinations = null;
         foreach (KeyValuePair<Unit, GlobalPosition> entry in playerDestinations)
         {
@@ -927,6 +934,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         CommanderGameAccess.SetUnitHoldPosition(unit, true);
         CommanderGameAccess.GetUnitCommand(unit)?.SetDestination(unit.transform.GlobalPosition(), false);
         stoppedUnits.Add(unit);
+        MarkPlayerOrdered(unit);
         playerDestinations.Remove(unit);
     }
 
@@ -1003,6 +1011,76 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
 
     /// <summary>True while the unit is held in place by a STOP order.</summary>
     internal bool IsStopped(Unit unit) => stoppedUnits.Contains(unit);
+
+    /// <summary>
+    /// True while the player has this unit under a standing order of their own, so the commander AI
+    /// must leave it where the player sent it. <c>orders</c> is the route table every Commander-issued
+    /// travel, attack, guard and capture order lives in; <c>stoppedUnits</c> is the STOP hold.
+    /// </summary>
+    /// <remarks>
+    /// <c>playerDestinations</c> is deliberately not consulted. It is filled by a Harmony postfix on
+    /// <c>UnitCommand.ServerSetDestination</c> that cannot tell a player's click from the home
+    /// guard's own <c>SetDestination(post, playerCommand: true)</c>, so counting it would have the
+    /// guard release and re-recruit its own defenders every review. Both tables here only ever hold
+    /// units the local HQ owns (see <c>CommanderGameAccess.ShouldAllowCommanderMove</c>), so for any
+    /// other faction's commander this is always false.
+    /// <para>
+    /// The order finishing is not the end of it. A unit stays off limits for
+    /// <c>PlayerCommanderHandsOffMinutes</c> of game time after the player's last order to it, so a
+    /// platoon parked on a hill by hand is not re-recruited the moment it stops moving. The clock is
+    /// the scaled one, like every other mod timer, so a pause does not run the window down.
+    /// </para>
+    /// </remarks>
+    internal bool HasPlayerOrder(Unit? unit)
+    {
+        if (unit == null)
+        {
+            return false;
+        }
+
+        if (orders.ContainsKey(unit) || stoppedUnits.Contains(unit))
+        {
+            return true;
+        }
+
+        return playerOrderedAt.TryGetValue(unit, out float at)
+            && Time.time - at < Mathf.Max(0f, CommanderSettings.PlayerCommanderHandsOffMinutes) * 60f;
+    }
+
+    /// <summary>Stamps a unit as just ordered by the player. One call site per order verb.</summary>
+    private void MarkPlayerOrdered(Unit unit)
+    {
+        playerOrderedAt[unit] = Time.time;
+    }
+
+    /// <summary>How often expired or dead hands-off stamps are swept. Nothing reads a stale entry
+    /// wrongly (the window check fails on its own), so this is housekeeping, not correctness.</summary>
+    private const float HandsOffPruneIntervalSeconds = 5f;
+    private float nextHandsOffPruneAt;
+    private readonly List<Unit> staleHandsOff = new();
+
+    private void PruneHandsOff()
+    {
+        if (playerOrderedAt.Count == 0 || !CommanderScheduler.IsDue(ref nextHandsOffPruneAt, HandsOffPruneIntervalSeconds))
+        {
+            return;
+        }
+
+        float window = Mathf.Max(0f, CommanderSettings.PlayerCommanderHandsOffMinutes) * 60f;
+        staleHandsOff.Clear();
+        foreach (KeyValuePair<Unit, float> entry in playerOrderedAt)
+        {
+            if (entry.Key == null || entry.Key.disabled || Time.time - entry.Value >= window)
+            {
+                staleHandsOff.Add(entry.Key!);
+            }
+        }
+
+        for (int i = 0; i < staleHandsOff.Count; i++)
+        {
+            playerOrderedAt.Remove(staleHandsOff[i]);
+        }
+    }
 
     internal CommanderStance GetStance(Unit? unit)
     {
@@ -1147,6 +1225,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
             order.Index = 0;
             order.Loop = false;
             order.GuardTarget = null;
+            MarkPlayerOrdered(unit);
             stoppedUnits.Remove(unit);
             CommanderGameAccess.SetUnitHoldPosition(unit, false);
             if (!BeginRetreat(unit, order))
@@ -1273,6 +1352,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         orders.Clear();
         stances.Clear();
         stoppedUnits.Clear();
+        playerOrderedAt.Clear();
         playerDestinations.Clear();
         hostiles.Clear();
         CommanderOrderPing.Clear();

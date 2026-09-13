@@ -140,7 +140,7 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
             RefreshTargets();
         }
 
-        if (CommanderEnemyCommanderService.EffectiveMode != CommanderEnemyCommanderService.ModeOff
+        if (CommanderPlayerCommanderService.AnyCommanderOn
             && CommanderScheduler.IsDue(ref nextEnemyReviewAt, EnemyReviewSeconds))
         {
             ReviewEnemies();
@@ -513,7 +513,10 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
 
         foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
         {
-            if (hq != null && !ReferenceEquals(hq, localHq) && hq.IsServer && hq.faction != null)
+            if (hq != null
+                && CommanderPlayerCommanderService.IsCommanded(hq, localHq)
+                && hq.IsServer
+                && hq.faction != null)
             {
                 ReviewEnemy(hq);
             }
@@ -544,7 +547,7 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
                 // catches every base that changes hands rather than only the one this drive was
                 // aimed at. Console line only here.
                 CommanderPlugin.Log.LogInfo(
-                    $"Enemy commander ({hq.faction.name}) captured {GetAirbaseLabel(drive.Target)}.");
+                    $"{CommanderPlayerCommanderService.CommanderLabel(hq)} captured {GetAirbaseLabel(drive.Target)}.");
             }
 
             drive.Target = ChooseEnemyTarget(hq);
@@ -584,7 +587,7 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
         {
             drive.Announced = true;
             CommanderPlugin.Log.LogInfo(
-                $"Enemy commander ({hq.faction.name}) is moving on {GetAirbaseLabel(drive.Target)} "
+                $"{CommanderPlayerCommanderService.CommanderLabel(hq)} is moving on {GetAirbaseLabel(drive.Target)} "
                     + $"with {squad.Count} unit(s).");
         }
     }
@@ -679,10 +682,14 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
             }
 
             // A vehicle standing on the commander's own base ring is spoken for: the home guard
-            // pins it with a player command and this would order it away again every review.
+            // pins it with a player command and this would order it away again every review. A
+            // vehicle the player has ordered somewhere is spoken for the same way — this re-issues
+            // a destination to every capture-capable unit it owns every review, so without the
+            // second test the AI would drive a troop carrier off the player's own order.
             if (id.TryGetUnit(out Unit unit)
                 && CanCapture(unit)
-                && !CommanderEnemyCommanderService.IsDefendingUnit(unit))
+                && !CommanderEnemyCommanderService.IsDefendingUnit(unit)
+                && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true)
             {
                 squad.Add(unit);
             }
@@ -773,12 +780,15 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
         }
     }
 
+    /// <summary>Drops drives for HQs that went away, and for the local HQ while nothing is
+    /// commanding it — the player's own expansion drive only exists while the switch is on.</summary>
     private void PruneDrives(FactionHQ localHq)
     {
+        bool dropLocal = !CommanderPlayerCommanderService.IsCommanded(localHq, localHq);
         staleDrives.Clear();
         foreach (KeyValuePair<FactionHQ, EnemyDrive> entry in drives)
         {
-            if (entry.Key == null || ReferenceEquals(entry.Key, localHq))
+            if (entry.Key == null || (dropLocal && ReferenceEquals(entry.Key, localHq)))
             {
                 staleDrives.Add(entry.Key!);
             }

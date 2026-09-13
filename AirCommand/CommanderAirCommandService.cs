@@ -66,6 +66,7 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     internal float SelectedTargetAltitude => selectedTargetAltitude;
     internal bool TargetOrdnance { get => CommanderSettings.AirGuardTargetOrdnance; set => CommanderSettings.AirGuardTargetOrdnance = value; }
     internal bool SaturationAttack { get => CommanderSettings.AradSaturationAttack; set => CommanderSettings.AradSaturationAttack = value; }
+    internal bool LaunchFromHangar { get => CommanderSettings.AirLaunchFromHangar; set => CommanderSettings.AirLaunchFromHangar = value; }
     internal bool IncludeInternalCannons
     {
         get => CommanderSettings.AirIncludeInternalCannons;

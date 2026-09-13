@@ -609,6 +609,24 @@ enemy commander spent whole matches building nothing but gold mines. Whatever it
 mine, then a factory, then a naval dock — is now held back from the unit spender until it is
 bought, and released again if the map turns out to have nowhere to put it.
 
+### Player commander
+
+Off by default. **Settings → Gameplay → PLAYER COMMANDER**, or the **Player commander** binding in
+**Controls** (unbound until you set it). Everything above — the buy review, the tactical plans, the
+home guard, the radar screen, the naval dock, the strike missions, the expansion drives — then runs
+for **your** faction as well, against the best-funded faction opposing you. Its plan and balance sit
+on a **YOU** row under your funds.
+
+It is a co-commander, not an autopilot. Your own orders, your BUILD window and your depot purchases
+keep working, and any unit you have given an order to is left where you sent it — the home guard
+will not re-pin a vehicle, the radar screen will not recall a truck, and a capture squad will not
+take a troop carrier off your route until it arrives. It gets no head start and no fund reset: your
+economy stays exactly what the mission authored, and everything it buys comes out of the balance you
+are also spending. Turn it off and it stops, leaving whatever it bought and positioned where it
+stands. Host only, same as the enemy commander.
+
+Config keys: `Gameplay/PlayerCommanderEnabled` and `Keybinds/TogglePlayerCommander`.
+
 ## Unit systems
 
 - Toggle compatible radar systems on or off, and show radar coverage on the map at an

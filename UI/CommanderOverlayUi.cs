@@ -80,6 +80,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
     private Rect launcherRect;
     private Rect moneyRect;
     private Rect enemyPlanRect;
+    private Rect playerPlanRect;
     private Rect panelRect;
     private Rect reserveWindowRect;
     private Rect selectionBarRect;
@@ -224,6 +225,7 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         launcherRect = new Rect(10f, centerY - 42f, 52f, 84f);
         moneyRect = new Rect((CommanderUiScale.Width - 250f) * 0.5f, 10f, 250f, 38f);
         enemyPlanRect = new Rect(moneyRect.x, moneyRect.yMax + 4f, 250f, 30f);
+        playerPlanRect = new Rect(enemyPlanRect.x, enemyPlanRect.yMax + 4f, 250f, 30f);
 
         if (!positionsInitialized)
         {
@@ -318,7 +320,8 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
         }
         return CommanderAlertUi.Instance?.ContainsScreenPoint(screenPoint) == true
             || launcherRect.Contains(guiPoint)
-            || (advanced && showFactionMoney && (moneyRect.Contains(guiPoint) || enemyPlanRect.Contains(guiPoint)))
+            || (advanced && showFactionMoney
+                && (moneyRect.Contains(guiPoint) || enemyPlanRect.Contains(guiPoint) || playerPlanRect.Contains(guiPoint)))
             || (panelVisible && panelRect.Contains(guiPoint))
             || (advanced && reserveWindowVisible && reserveWindowRect.Contains(guiPoint))
             || (showSelectionBar && selectionService.SelectedUnits.Count > 0 && selectionBarRect.Contains(guiPoint))
@@ -385,6 +388,14 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
             if (enemyStatus.Length > 0)
             {
                 GUI.Box(enemyPlanRect, $"ENEMY   {enemyStatus}", CommanderUiTheme.Money);
+            }
+
+            // Only ever non-empty while the player commander switch is on, so this row appears and
+            // disappears with the switch without the overlay having to read the setting itself.
+            string playerStatus = CommanderEnemyCommanderService.Instance?.PlayerStatusLine ?? string.Empty;
+            if (playerStatus.Length > 0)
+            {
+                GUI.Box(playerPlanRect, $"YOU   {playerStatus}", CommanderUiTheme.Money);
             }
         }
 
