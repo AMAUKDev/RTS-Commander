@@ -47,117 +47,202 @@ internal sealed partial class CommanderEconomyService
     /// <summary>The structure each building category resolves to, decided once per mission.</summary>
     private readonly Dictionary<BuildingType, BuildingDefinition?> categoryDefinitions = new();
 
-    private void ReviewEnemies()
-    {
-        FactionHQ? localHq = CommanderGameAccess.GetLocalHq();
-        foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
-        {
-            if (hq == null
-                || !CommanderPlayerCommanderService.IsCommanded(hq, localHq)
-                || !hq.IsServer
-                || hq.faction == null)
-            {
-                continue;
-            }
+    /// <summary>
+    /// Per-HQ savings toward the next structure (design.md, commander-priorities_20260914 Section 3,
+    /// rung 4): each review's building allocation banks here until the next want is affordable. Pure
+    /// bookkeeping — the money itself stays in <c>factionFunds</c> until a build charges it, which is
+    /// why the bank is capped at the next want's price (see <see cref="SpendEnemyStructures"/>).
+    /// </summary>
+    private readonly Dictionary<FactionHQ, float> structureSavings = new();
 
-            ReviewEnemy(hq);
+    /// <summary>
+    /// The next thing rung 4 wants and its price — ONE definition of "what to build next" (the
+    /// design's rule), in the exact order the spend walks: the build
+    /// <see cref="GetEnemyBuildReserve"/> names, then the dock, mine and factory upgrades. Zero when
+    /// the commander wants nothing. Internal: the priority ladder reads it for the rung's demand and
+    /// its allocation.
+    /// </summary>
+    internal static float NextEnemyStructureCost(FactionHQ hq)
+    {
+        float price = GetEnemyBuildReserve(hq);
+        if (price > 0f)
+        {
+            return price;
         }
+
+        CommanderEconomyService? service = Instance;
+        if (service == null || hq == null || hq.faction == null)
+        {
+            return 0f;
+        }
+
+        if (service.TryNextDockUpgrade(hq, out _, out float dockCost))
+        {
+            return dockCost;
+        }
+
+        if (service.TryNextMineUpgrade(hq, out _, out float mineCost))
+        {
+            return mineCost;
+        }
+
+        return service.NextFactoryUpgradeCost(hq);
     }
 
-    /// <summary>One economy purchase per review: a new mine while short of the target, else an upgrade.</summary>
-    private void ReviewEnemy(FactionHQ hq)
+    /// <summary>
+    /// Rung 4's spend (design Section 1), called from the priority ladder — the enemy commander's
+    /// review is the single spend site, so this service no longer spends on its own clock. Repair
+    /// crews stay ahead of the structure spend exactly as today (same price, same funds gate,
+    /// charged straight off the balance); the structure ladder spends ONLY out of what the rung
+    /// banked — this review's allocation plus previous reviews' savings — never straight off the
+    /// balance. The bank never grows past the next want's price, so a rung drawn first cannot hoard
+    /// the whole remainder against the rungs below. The old
+    /// <c>funds ≥ price × EnemyReserveMultiple</c> gate is gone from builds and upgrades: that
+    /// multiple existed to keep two spenders sharing one balance from starving each other, and the
+    /// ladder is that protection now — the gate is savings ≥ price and funds ≥ price. One purchase
+    /// per review, exactly as this service always did.
+    /// <para>Returns what rung 4 spent, for the ladder's diagnostics line.</para>
+    /// </summary>
+    internal float SpendEnemyStructures(FactionHQ hq, float allocation)
     {
         // Keeping what it owns comes before buying more of it: a bombed refinery that stays bombed
         // costs the enemy commander its income, which is the same trade the player is making.
         if (hq.factionFunds >= CommanderRepairService.CrewCost * EnemyReserveMultiple
             && CommanderRepairService.Instance?.TrySendEnemyRepairCrew(hq) == true)
         {
-            return;
+            return CommanderRepairService.CrewCost;
         }
 
-        // The price, not a multiple of it. GetEnemyBuildReserve holds this much back from the unit
-        // spender, so the balance is allowed to climb to it — see that method for why the multiple
-        // meant the commander only ever built mines.
-        float wanted = GetEnemyBuildReserve(hq);
-        if (wanted > 0f && hq.factionFunds >= wanted && TryBuildEnemyEconomy(hq))
+        float banked = structureSavings.TryGetValue(hq, out float saved) ? saved : 0f;
+        float price = NextEnemyStructureCost(hq);
+        float savings = banked;
+        float spent = 0f;
+        if (price > 0f)
         {
-            return;
-        }
-
-        int dockLevel = GetNavalDockLevel(hq);
-
-        if (dockLevel > 0 && dockLevel < MaxLevel && TryUpgradeEnemyNavalDock(hq))
-        {
-            return;
-        }
-
-        foreach (KeyValuePair<Unit, int> entry in mineLevels)
-        {
-            if (entry.Value >= MaxLevel
-                || entry.Key == null
-                || entry.Key.disabled
-                || entry.Key.NetworkHQ != hq)
+            savings = Mathf.Min(banked + Mathf.Max(0f, allocation), price);
+            if (savings >= price && hq.factionFunds >= price)
             {
-                continue;
+                spent = SpendNextEnemyStructure(hq);
+                if (spent > 0f)
+                {
+                    savings = Mathf.Max(0f, savings - spent);
+                }
             }
-
-            float cost = GetMineUpgradeCost(entry.Value);
-            if (hq.factionFunds < cost * EnemyReserveMultiple)
-            {
-                continue;
-            }
-
-            hq.AddFunds(-cost);
-            mineLevels[entry.Key] = entry.Value + 1;
-            CommanderAiLog.Note(hq, $"upgraded a gold mine to level {entry.Value + 1}.");
-            return;
         }
 
-        TryUpgradeEnemyFactory(hq);
+        // Not affordable yet (or the site search failed): the allocation stays banked for the next
+        // review — "the rung saves its allocation across reviews until the next structure is
+        // affordable" (design Section 3).
+        structureSavings[hq] = savings;
+        return spent;
     }
 
-    private void TryUpgradeEnemyFactory(FactionHQ hq)
+    /// <summary>
+    /// Performs the ONE purchase <see cref="NextEnemyStructureCost"/> named and returns what it
+    /// cost (0 when nothing could be bought — no reachable site for the mine, no room for the
+    /// factory). The spend order is the cost walk's own order, so the price the ladder banked toward
+    /// and the thing actually bought are the same decision.
+    /// </summary>
+    private float SpendNextEnemyStructure(FactionHQ hq)
+    {
+        float price = GetEnemyBuildReserve(hq);
+        if (price > 0f)
+        {
+            return TryBuildEnemyEconomy(hq) ? price : 0f;
+        }
+
+        float spent = TryUpgradeEnemyNavalDock(hq);
+        if (spent > 0f)
+        {
+            return spent;
+        }
+
+        spent = TryUpgradeEnemyMine(hq);
+        if (spent > 0f)
+        {
+            return spent;
+        }
+
+        return TryUpgradeEnemyFactory(hq);
+    }
+
+    /// <summary>
+    /// The first factory this commander could upgrade and its price — the factory leg of the ONE
+    /// definition of "what rung 4 wants next". The expensive <c>FindObjectsOfType</c> walk sits at
+    /// the very end of that order, as it always did, so it only runs when nothing cheaper is wanted.
+    /// </summary>
+    internal float NextFactoryUpgradeCost(FactionHQ hq)
+    {
+        return TryNextFactoryUpgrade(hq, out _, out _, out float cost) ? cost : 0f;
+    }
+
+    /// <summary>Charges and performs the next factory upgrade when the rung's bank covers it.
+    /// Returns the cost charged, or 0.</summary>
+    private float TryUpgradeEnemyFactory(FactionHQ hq)
+    {
+        if (!TryNextFactoryUpgrade(hq, out Unit? attached, out int level, out float cost)
+            || hq.factionFunds < cost)
+        {
+            return 0f;
+        }
+
+        hq.AddFunds(-cost);
+        factoryLevels[attached!] = level + 1;
+        CommanderAiLog.Note(
+            hq, $"upgraded {CommanderGameAccess.GetUnitLabel(attached)} to level {level + 1}.");
+        return cost;
+    }
+
+    /// <summary>The first upgradable factory this commander owns: the attached unit, its level and
+    /// the upgrade price — the candidate picker the cost read and the spend share (Reuse rule 4, one
+    /// definition, two callers), so the ladder can never bank toward a factory the spend would
+    /// skip.</summary>
+    private bool TryNextFactoryUpgrade(FactionHQ hq, out Unit? attached, out int level, out float cost)
     {
         Factory[] factories = UnityEngine.Object.FindObjectsOfType<Factory>();
         for (int i = 0; i < factories.Length; i++)
         {
-            Factory factory = factories[i];
-            Unit? attached = factory == null ? null : factory.attachedUnit;
-            if (factory == null
-                || attached == null
-                || attached.disabled
-                || attached.NetworkHQ != hq
-                || factory.ProductionUnit == null)
+            Factory candidate = factories[i];
+            Unit? candidateAttached = candidate == null ? null : candidate.attachedUnit;
+            if (candidate == null
+                || candidateAttached == null
+                || candidateAttached.disabled
+                || candidateAttached.NetworkHQ != hq
+                || candidate.ProductionUnit == null)
             {
                 continue;
             }
 
-            int level = GetFactoryLevel(factory);
-            float cost = GetFactoryUpgradeCost(level);
-            if (level >= MaxLevel || hq.factionFunds < cost * EnemyReserveMultiple)
+            int candidateLevel = GetFactoryLevel(candidate);
+            if (candidateLevel >= MaxLevel)
             {
                 continue;
             }
 
-            hq.AddFunds(-cost);
-            factoryLevels[attached] = level + 1;
-            CommanderAiLog.Note(
-                hq, $"upgraded {CommanderGameAccess.GetUnitLabel(attached)} to level {level + 1}.");
-            return;
+            attached = candidateAttached;
+            level = candidateLevel;
+            cost = GetFactoryUpgradeCost(candidateLevel);
+            return true;
         }
+
+        attached = null;
+        level = 0;
+        cost = 0f;
+        return false;
     }
 
     /// <summary>
-    /// What this commander is saving up for, or 0 when its economy is finished. Two spenders share
-    /// one <c>factionFunds</c> pool — this service and <see cref="CommanderEnemyCommanderService"/>
-    /// — and the unit spender takes a fixed fraction of the balance every review, so the balance
-    /// never climbed to a factory's price: the enemy built its opening mines out of the duel head
-    /// start and then bought convoys with everything for the rest of the match. The unit spender
-    /// now subtracts this from the pot it may touch, which is the same "save for it" fix
-    /// <c>AccrueFund</c> is for airframes and hulls, and the build gates below ask for the plain
-    /// price instead of a multiple of it, because a reserved price is already protected. A mine is
-    /// only wanted while a resource site is in reach; short of one, the commander saves for the
-    /// next thing instead of piling funds toward a mine it cannot site.
+    /// The price of the next structure rung 4 wants, or 0 when its build list is finished — still
+    /// THE definition of "what to build next" (design.md, commander-priorities_20260914), unchanged
+    /// in its order: radar cover first, then mines while a resource site is in reach, then
+    /// factories, then base defence, then the dock. What changed with the ladder (2026-09-14) is
+    /// only the pot: this no longer holds money back from the unit spender — the priority ladder
+    /// grants rung 4 its own allocation per review, the rung banks it in
+    /// <see cref="structureSavings"/> until this price is covered, and everything below rung 4
+    /// spends only what the draw left it. The old hold-back was a fix for two spenders draining one
+    /// balance faster than a factory could accumulate; the ladder prevents that structurally.
+    /// A mine is only wanted while a resource site is in reach; short of one, the commander saves
+    /// for the next thing instead of piling funds toward a mine it cannot site.
     /// </summary>
     internal static float GetEnemyBuildReserve(FactionHQ hq)
     {
@@ -195,7 +280,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         // A commander whose map gave it no coast hands the money back rather than reserving for a
-        // dock it can never site — the same reason AccrueFund caps the air and naval funds.
+        // dock it can never site — the same reason AccrueFund caps the naval fund.
         return GetNavalDockLevel(hq) <= 0 && !service.shoreSearchReported.Contains(hq)
             ? NavalDockBuildCost
             : 0f;
@@ -505,7 +590,10 @@ internal sealed partial class CommanderEconomyService
         return true;
     }
 
-    private bool TryUpgradeEnemyNavalDock(FactionHQ hq)
+    /// <summary>The first dock this commander owns below max level and its upgrade price — the dock
+    /// leg of the ONE definition of "what rung 4 wants next". The cost read and the spend share this
+    /// picker (Reuse rule 4), so the ladder banks toward the dock the spend would actually upgrade.</summary>
+    private bool TryNextDockUpgrade(FactionHQ hq, out Unit dock, out float cost)
     {
         foreach (KeyValuePair<Unit, int> entry in dockLevels)
         {
@@ -517,22 +605,74 @@ internal sealed partial class CommanderEconomyService
                 continue;
             }
 
-            float cost = GetNavalDockUpgradeCost(entry.Value);
-            if (hq.factionFunds < cost * EnemyReserveMultiple)
+            dock = entry.Key;
+            cost = GetNavalDockUpgradeCost(entry.Value);
+            return true;
+        }
+
+        dock = null!;
+        cost = 0f;
+        return false;
+    }
+
+    /// <summary>Charges and performs the next dock upgrade when the rung's bank covers it. Returns
+    /// the cost charged, or 0.</summary>
+    private float TryUpgradeEnemyNavalDock(FactionHQ hq)
+    {
+        if (!TryNextDockUpgrade(hq, out Unit dock, out float cost) || hq.factionFunds < cost)
+        {
+            return 0f;
+        }
+
+        int level = dockLevels[dock];
+        hq.AddFunds(-cost);
+        dockLevels[dock] = level + 1;
+        CommanderAiLog.Note(
+            hq,
+            $"upgraded its naval dock to level {level + 1}: "
+                + $"{CommanderNavalPurchaseService.GetLevelUnlockLabel(level + 1)}.");
+        return cost;
+    }
+
+    /// <summary>The first gold mine this commander owns below max level and its upgrade price — the
+    /// mine leg of the ONE definition of "what rung 4 wants next", shared by the cost read and the
+    /// spend (Reuse rule 4).</summary>
+    private bool TryNextMineUpgrade(FactionHQ hq, out Unit mine, out float cost)
+    {
+        foreach (KeyValuePair<Unit, int> entry in mineLevels)
+        {
+            if (entry.Value >= MaxLevel
+                || entry.Key == null
+                || entry.Key.disabled
+                || entry.Key.NetworkHQ != hq)
             {
                 continue;
             }
 
-            hq.AddFunds(-cost);
-            dockLevels[entry.Key] = entry.Value + 1;
-            CommanderAiLog.Note(
-                hq,
-                $"upgraded its naval dock to level {entry.Value + 1}: "
-                    + $"{CommanderNavalPurchaseService.GetLevelUnlockLabel(entry.Value + 1)}.");
+            mine = entry.Key;
+            cost = GetMineUpgradeCost(entry.Value);
             return true;
         }
 
+        mine = null!;
+        cost = 0f;
         return false;
+    }
+
+    /// <summary>Charges and performs the next mine upgrade when the rung's bank covers it. Returns
+    /// the cost charged, or 0.</summary>
+    private float TryUpgradeEnemyMine(FactionHQ hq)
+    {
+        if (!TryNextMineUpgrade(hq, out Unit mine, out float cost) || hq.factionFunds < cost)
+        {
+            return 0f;
+        }
+
+        int level = mineLevels[mine];
+        hq.AddFunds(-cost);
+        mineLevels[mine] = level + 1;
+        CommanderAiLog.Note(hq, $"upgraded a gold mine to level {level + 1}.");
+        return cost;
     }
 
     private bool TryFindShoreSite(FactionHQ hq, BuildingDefinition dock, out GlobalPosition site)

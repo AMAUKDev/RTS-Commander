@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -56,6 +56,91 @@ internal sealed partial class CommanderOperationsService
     /// should be allowed to fall back to driving.
     /// </summary>
     private const float StaleInsertionSeconds = 180f;
+
+    /// <summary>
+    /// How close a tracked hostile air-defence vehicle or aircraft has to be to the landing zone or
+    /// to the flight's route before the insertion is called off: the same 8 km ring the operations
+    /// service already reads enemy strength over (<see cref="ObservedRadiusMeters"/>, one
+    /// definition), which is also roughly the reach of the medium SAM and radar-guided AAA vehicles
+    /// a slow, low transport cannot survive. Derived rather than retyped so a retune of the ring
+    /// moves both together.
+    /// </summary>
+    internal const float InsertionThreatRadiusMeters = ObservedRadiusMeters;
+
+    /// <summary>
+    /// How finely the straight line from the launching airbase to the landing zone is sampled for
+    /// the threat test: every 2 km, a quarter of <see cref="InsertionThreatRadiusMeters"/>, so a
+    /// threat sitting beside the middle of a leg cannot hide between two samples — the widest a
+    /// sample can be from the true nearest point on the line is half the spacing, 1 km.
+    /// </summary>
+    internal const float InsertionRouteSampleMeters = 2000f;
+
+    /// <summary>
+    /// How many insertion flights may be lost back to back, with no successful drop in between,
+    /// before this commander stops sending them anywhere: two. The per-point cooldown alone only
+    /// moves the bleeding to the next hilltop — the first play test lost five flights in a row that
+    /// way — so the second loss is read as "the air is not ours today", not as bad luck at one point.
+    /// </summary>
+    internal const int InsertionLossStreakLimit = 2;
+
+    /// <summary>
+    /// How long that commander-wide pause lasts: 15 minutes. Long enough for the front to move and
+    /// for a lost transport's killer to be engaged or to move on (three times the per-point
+    /// cooldown), short enough that a commander whose rear points are genuinely safe resumes
+    /// filling them by air inside the same engagement.
+    /// </summary>
+    internal const float InsertionLossPauseMinutes = 15f;
+
+    /// <summary>
+    /// The commander-wide pause rule, pure: a run of <paramref name="limit"/> losses with no drop
+    /// in between stops every insertion, not just the one point's. A limit of zero or less disables
+    /// the pause entirely.
+    /// </summary>
+    internal static bool ShouldPauseInsertions(int lossStreak, int limit)
+    {
+        return limit > 0 && lossStreak >= limit;
+    }
+
+    /// <summary>
+    /// The positions the threat test measures against, pure: the straight line from
+    /// <paramref name="from"/> to <paramref name="to"/> cut into legs no longer than
+    /// <paramref name="spacingMeters"/>, both endpoints always included, so the landing zone and
+    /// the departure airbase are always tested even on a route shorter than one leg.
+    /// </summary>
+    internal static void BuildRouteSamples(Vector3 from, Vector3 to, float spacingMeters, List<Vector3> samples)
+    {
+        samples.Clear();
+        float length = CommanderGameAccess.HorizontalDistance(from, to);
+        int legs = Mathf.Max(1, Mathf.CeilToInt(length / Mathf.Max(1f, spacingMeters)));
+        for (int i = 0; i <= legs; i++)
+        {
+            samples.Add(Vector3.Lerp(from, to, (float)i / legs));
+        }
+    }
+
+    /// <summary>
+    /// Whether one threat covers a sampled route, pure: true when it lies within
+    /// <paramref name="radius"/> of any sample, horizontally (a map coordinate's height says
+    /// nothing about a missile's reach). <paramref name="distanceMeters"/> comes back as the
+    /// shortest distance to any sample, which is what the decline line quotes. A threat exactly on
+    /// the radius blocks — the safe side of the boundary, the opposite convention to the road gate,
+    /// because being wrong here costs a transport and two vehicles.
+    /// </summary>
+    internal static bool RouteThreatened(
+        IReadOnlyList<Vector3> samples, Vector3 threat, float radius, out float distanceMeters)
+    {
+        distanceMeters = float.MaxValue;
+        for (int i = 0; i < samples.Count; i++)
+        {
+            float distance = CommanderGameAccess.HorizontalDistance(samples[i], threat);
+            if (distance < distanceMeters)
+            {
+                distanceMeters = distance;
+            }
+        }
+
+        return distanceMeters <= radius;
+    }
 
     /// <summary>
     /// The demand gate, pure: a picket is flown in only when it is rear, short-handed, unbound and
@@ -181,6 +266,117 @@ internal sealed partial class CommanderOperationsService
             && state.CommanderAirframes.Contains(aircraft);
     }
 
+    /// <summary>Reused by the threat test so a review that gates several points does not allocate a
+    /// fresh sample list per point; the builder clears it before every fill.</summary>
+    private readonly List<Vector3> insertionRouteSamples = new();
+
+    /// <summary>
+    /// True when this commander has something tracked that kills transports within
+    /// <see cref="InsertionThreatRadiusMeters"/> of the landing zone or of the straight line to it
+    /// from <paramref name="from"/> — a hostile ground vehicle the shared
+    /// <see cref="CommanderEnemyCommanderService.IsAirDefence"/> test calls air defence, or any
+    /// hostile aircraft, because a transport that meets a fighter is a transport lost.
+    /// <paramref name="distanceMeters"/> is the closest such contact's distance to the route.
+    /// </summary>
+    /// <remarks>
+    /// The walk is <c>CountObserved</c>'s (Offensive.cs) with its <c>ThreatMemorySeconds</c>
+    /// freshness and its own-faction skip — the commander acts on what it has actually tracked, not
+    /// on the truth — widened from ground vehicles only to the two things that shoot helicopters.
+    /// </remarks>
+    private bool TryFindInsertionRouteThreat(
+        FactionHQ hq, GlobalPosition from, GlobalPosition to, out float distanceMeters)
+    {
+        BuildRouteSamples(from.AsVector3(), to.AsVector3(), InsertionRouteSampleMeters, insertionRouteSamples);
+        distanceMeters = float.MaxValue;
+        float now = Time.timeSinceLevelLoad;
+        foreach (KeyValuePair<PersistentID, TrackingInfo> entry in hq.trackingDatabase)
+        {
+            TrackingInfo info = entry.Value;
+            if (now - info.lastSpottedTime > CommanderEnemyCommanderService.ThreatMemorySeconds
+                || !info.TryGetUnit(out Unit unit)
+                || unit == null
+                || unit.disabled
+                || unit.NetworkHQ == null
+                || ReferenceEquals(unit.NetworkHQ, hq)
+                || !ThreatensTransports(unit))
+            {
+                continue;
+            }
+
+            if (RouteThreatened(
+                    insertionRouteSamples,
+                    info.lastKnownPosition.AsVector3(),
+                    InsertionThreatRadiusMeters,
+                    out float distance)
+                && distance < distanceMeters)
+            {
+                distanceMeters = distance;
+            }
+        }
+
+        return distanceMeters <= InsertionThreatRadiusMeters;
+    }
+
+    /// <summary>The two kinds of tracked contact that end an insertion: a ground vehicle that is air
+    /// defence, and any aircraft. Buildings are skipped as everywhere else — a static SAM building
+    /// is the enemy's own base defence, and the flight never routes over one to reach a rear point
+    /// of ours.</summary>
+    private static bool ThreatensTransports(Unit unit)
+    {
+        if (unit is Building)
+        {
+            return false;
+        }
+
+        if (unit is Aircraft)
+        {
+            return true;
+        }
+
+        return unit is GroundVehicle
+            && unit.definition is VehicleDefinition definition
+            && CommanderEnemyCommanderService.IsAirDefence(definition);
+    }
+
+    /// <summary>
+    /// Where an insertion would most likely lift from: this commander's own airbase nearest the
+    /// landing zone. The supply side picks the airbase that can actually field the load and applies
+    /// the same threat test to it (<see cref="IsInsertionRouteThreatened"/>), so this is the gate's
+    /// stand-in for the leg the flight will fly. False when the commander holds no airbase, in
+    /// which case only the landing zone itself is tested.
+    /// </summary>
+    private static bool TryFindInsertionLaunchBase(FactionHQ hq, GlobalPosition lz, out GlobalPosition position)
+    {
+        position = default;
+        float best = float.MaxValue;
+        foreach (Airbase airbase in hq.GetAirbases())
+        {
+            if (airbase == null || airbase.disabled || airbase.center == null)
+            {
+                continue;
+            }
+
+            GlobalPosition candidate = airbase.center.GlobalPosition();
+            float distance = CommanderGameAccess.HorizontalDistance(candidate.AsVector3(), lz.AsVector3());
+            if (distance < best)
+            {
+                best = distance;
+                position = candidate;
+            }
+        }
+
+        return best < float.MaxValue;
+    }
+
+    /// <summary>The threat test as the supply side's airbase choice reads it — one definition, two
+    /// callers (the demand gate here and the launch entry's per-airbase filter), so a flight is
+    /// never dispatched from a base whose route the gate would have refused.</summary>
+    internal static bool IsInsertionRouteThreatened(FactionHQ hq, GlobalPosition from, GlobalPosition to)
+    {
+        CommanderOperationsService? service = Instance;
+        return service != null && service.TryFindInsertionRouteThreat(hq, from, to, out _);
+    }
+
     /// <summary>Index of the cheapest candidate inside <paramref name="budget"/>, -1 when none is:
     /// either the air-defence candidates only, or everything but them. Pure, for the self-check.</summary>
     private static int CheapestInsertionCandidate(
@@ -230,10 +426,90 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
-    /// The review's insertion step (design Section 1): at most one request per review, over the
-    /// picket missions in ranked order, behind the gate. Runs after <c>PlanPickets</c> so the
-    /// missions it reads are this review's. Declines log once per point per reason (the
-    /// <c>ReportAirDenial</c> convention).
+    /// The structural half of the insertion gate for one point — the pure
+    /// <see cref="QualifiesForInsertion"/> test with this commander's live inputs. The request loop
+    /// and the priority ladder's rung-3 demand read share it (Reuse rule 4, one definition, two
+    /// callers); the launch-time gates (route threat, the rung's share) decide whether this cycle's
+    /// ask succeeds, not whether the rung has work.
+    /// </summary>
+    private static bool PointQualifiesForInsertion(
+        OperationsState state, CommanderRankedPoint ranked, CommanderOperationsMission mission, float roadDistance, int inFlight, int limit)
+    {
+        bool cooldownLive = state.InsertionCooldownUntil.TryGetValue(ranked.Point, out float until)
+            && Time.time < until;
+        return QualifiesForInsertion(
+            !ranked.IsFront,
+            mission.PicketMembers.Count < CommanderSettings.PointsMinGarrison,
+            !IsBoundToInsertion(state, ranked.Point),
+            cooldownLive,
+            roadDistance,
+            CommanderSettings.OperationsHeliInsertionOffRoadMeters,
+            inFlight,
+            limit);
+    }
+
+    /// <summary>
+    /// Whether any picket point would ask for a flight right now — rung 3's demand read for the
+    /// priority ladder's draw (design.md, commander-priorities_20260914 Section 3). The same
+    /// structural test the request loop uses, so the ladder's floor and the request can never
+    /// disagree about whether the rung has work; the post-commander pause counts as no demand for
+    /// as long as it runs.
+    /// </summary>
+    internal static bool HasInsertionDemand(FactionHQ hq)
+    {
+        CommanderOperationsService? service = Instance;
+        if (service == null
+            || !service.states.TryGetValue(hq, out OperationsState state)
+            || (state.InsertionPauseUntil > 0f && Time.time < state.InsertionPauseUntil))
+        {
+            return false;
+        }
+
+        int limit = Mathf.Max(0, CommanderSettings.OperationsHeliInsertionLimit);
+        int inFlight = CountInsertionsInFlight(state);
+        for (int i = 0; i < state.RankedPoints.Count; i++)
+        {
+            CommanderRankedPoint ranked = state.RankedPoints[i];
+            CommanderOperationsMission? mission = FindPicketFor(state, ranked.Point);
+            if (mission == null)
+            {
+                continue;
+            }
+
+            float roadDistance = CommanderStrategicPointService.Instance?.NearestRoadDistanceMeters(ranked.Point.Position)
+                ?? float.MaxValue;
+            if (PointQualifiesForInsertion(state, ranked, mission, roadDistance, inFlight, limit))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Insertion requests one review may issue, one per point (pickets-first design Section 4).
+    /// Three matches the airborne limit's own default, so a commander that starts a match with every
+    /// hilltop empty can fill that limit in a single review instead of one flight every 30 s — at
+    /// one request per review the first play test was still on its second hilltop when the match
+    /// turned. The airborne limit, not this, is what bounds how many are actually in the air.
+    /// </summary>
+    internal const int InsertionRequestsPerReview = 3;
+
+    /// <summary>One picket point that passed the structural gate this review, with the road distance
+    /// the farthest-off-road ordering sorts on. Scratch, so a review never allocates.</summary>
+    private readonly List<(CommanderRankedPoint Ranked, CommanderOperationsMission Mission, float RoadDistance)> insertionCandidates = new();
+
+    /// <summary>
+    /// The review's insertion step (design Section 1, widened by pickets-first Section 4): up to
+    /// <see cref="InsertionRequestsPerReview"/> requests per review, one per point, the point
+    /// farthest from a road first — the one a driving picket can least reach is the one that most
+    /// needs the flight. Runs after <c>PlanPickets</c> so the missions it reads are this review's.
+    /// Declines log once per point per reason (the <c>ReportAirDenial</c> convention).
+    /// <para>Since the priority ladder (2026-09-14), a request also spends the share rung 3 was
+    /// granted this cycle: the flight's hull and vehicles are charged against it (design Section 3),
+    /// and an empty share holds the flight — the point still fills from the pool, and asks again
+    /// next cycle.</para>
     /// </summary>
     private void PlanInsertions(FactionHQ hq, OperationsState state)
     {
@@ -243,10 +519,24 @@ internal sealed partial class CommanderOperationsService
             return;
         }
 
+        if (state.InsertionPauseUntil > 0f)
+        {
+            if (Time.time < state.InsertionPauseUntil)
+            {
+                return;
+            }
+
+            state.InsertionPauseUntil = 0f;
+            state.InsertionLossStreak = 0;
+            CommanderAiLog.Note(
+                hq, $"the {InsertionLossPauseMinutes:0} min insertion pause is over; picket flights may resume.");
+        }
+
         CommanderSupplyHeliService.Instance?.LogInsertionRosterOnce(hq);
 
         int limit = Mathf.Max(0, CommanderSettings.OperationsHeliInsertionLimit);
         int inFlight = CountInsertionsInFlight(state);
+        insertionCandidates.Clear();
         for (int i = 0; i < state.RankedPoints.Count; i++)
         {
             CommanderRankedPoint ranked = state.RankedPoints[i];
@@ -260,23 +550,63 @@ internal sealed partial class CommanderOperationsService
             // yet cannot happen here (no missions exist before discovery), but reads as roadless.
             float roadDistance = CommanderStrategicPointService.Instance?.NearestRoadDistanceMeters(ranked.Point.Position)
                 ?? float.MaxValue;
-            bool cooldownLive = state.InsertionCooldownUntil.TryGetValue(ranked.Point, out float until)
-                && Time.time < until;
-            if (!QualifiesForInsertion(
-                    !ranked.IsFront,
-                    mission.PicketMembers.Count < CommanderSettings.PointsMinGarrison,
-                    !IsBoundToInsertion(state, ranked.Point),
-                    cooldownLive,
-                    roadDistance,
-                    CommanderSettings.OperationsHeliInsertionOffRoadMeters,
-                    inFlight,
-                    limit))
+            if (!PointQualifiesForInsertion(state, ranked, mission, roadDistance, inFlight, limit))
             {
                 continue;
             }
 
-            RequestInsertion(hq, state, mission, ranked.Point, roadDistance);
-            return;
+            insertionCandidates.Add((ranked, mission, roadDistance));
+        }
+
+        // Farthest off the road first (pickets-first Section 4). The ranked order this loop used to
+        // run in is value order, which on a mountain map handed the flight to whichever point paid
+        // best rather than to the one no picket could ever drive to.
+        insertionCandidates.Sort(static (a, b) => b.RoadDistance.CompareTo(a.RoadDistance));
+
+        int requested = 0;
+        for (int i = 0; i < insertionCandidates.Count && requested < InsertionRequestsPerReview; i++)
+        {
+            (CommanderRankedPoint ranked, CommanderOperationsMission mission, float roadDistance) = insertionCandidates[i];
+
+            // The airborne limit binds inside one review too: every request granted above put
+            // another flight in the air, and the gate that admitted this candidate was read before
+            // any of them launched.
+            if (CountInsertionsInFlight(state) >= limit)
+            {
+                return;
+            }
+
+            // The launch gate: nothing that shoots helicopters may be tracked near the landing zone
+            // or along the way in. Without it the per-point cooldown simply moved the losses to the
+            // next hilltop — the first play test lost five flights out of five that way.
+            GlobalPosition origin = TryFindInsertionLaunchBase(hq, ranked.Point.Position, out GlobalPosition airbase)
+                ? airbase
+                : ranked.Point.Position;
+            if (TryFindInsertionRouteThreat(hq, origin, ranked.Point.Position, out float threatDistance))
+            {
+                ReportInsertionDenial(
+                    hq,
+                    state,
+                    ranked.Point,
+                    $"hostile air defence tracked {threatDistance / 1000f:0.0} km from the route",
+                    "route threat");
+                continue;
+            }
+
+            // The rung's share (design Section 3): a point that passed every gate but was granted
+            // nothing this cycle says so once and waits for the next grant. An empty share ends the
+            // review's requests, not just this point's — there is nothing left to charge them to.
+            if (state.InsertionAllowance <= 0f)
+            {
+                ReportInsertionDenial(
+                    hq, state, ranked.Point, "the priority ladder's picket share is empty this cycle");
+                return;
+            }
+
+            if (RequestInsertion(hq, state, mission, ranked.Point, roadDistance, state.InsertionAllowance))
+            {
+                requested++;
+            }
         }
     }
 
@@ -331,14 +661,14 @@ internal sealed partial class CommanderOperationsService
     /// commander's territory centre — the same posts the picket will hold, so the vehicles roll out
     /// of the ramp almost onto their stations.
     /// </summary>
-    private void RequestInsertion(
-        FactionHQ hq, OperationsState state, CommanderOperationsMission mission, CommanderStrategicPoint point, float roadDistance)
+    private bool RequestInsertion(
+        FactionHQ hq, OperationsState state, CommanderOperationsMission mission, CommanderStrategicPoint point, float roadDistance, float allowance)
     {
         List<GlobalPosition> posts = EnsureHoldPosts(point, Mathf.Max(1, CommanderSettings.PointsMinGarrison));
         if (posts.Count == 0)
         {
             ReportInsertionDenial(hq, state, point, "no dry landing post inside the ring");
-            return;
+            return false;
         }
 
         GlobalPosition territory = CommanderCaptureService.GetTerritoryCenter(hq);
@@ -373,24 +703,42 @@ internal sealed partial class CommanderOperationsService
             hq, $"PICKET {mission.Label}: requesting air insertion ({roadDistance:0} m from the nearest road).");
 
         string decline = "no transport service available";
-        if (CommanderSupplyHeliService.Instance?.TryLaunchInsertionAircraft(hq, point, lz, out decline) != true)
+        float charged = 0f;
+        if (CommanderSupplyHeliService.Instance?.TryLaunchInsertionAircraft(hq, point, lz, allowance, out decline, out charged) != true)
         {
             state.Insertions.Remove(insertion);
             ReportInsertionDenial(hq, state, point, decline);
+            return false;
         }
+
+        // The flight's cost comes off the rung's share and onto the tally the next ladder line
+        // reports (design Section 3: "hull + vehicles from the rung's share"). Charged is the
+        // worst-case total — a hull found free in stock leaves the share with headroom for the
+        // next flight inside the same cycle.
+        state.InsertionAllowance = Mathf.Max(0f, state.InsertionAllowance - charged);
+        state.InsertionSpentSinceLadder += charged;
+
+        // A flight that got away clears the point's last decline, so the next refusal — a threat
+        // that comes back over the same point, say — logs again instead of being swallowed as a
+        // repeat of a reason that has since been answered.
+        state.InsertionDenials.Remove(point);
+        return true;
     }
 
     /// <summary>Says why no flight was launched, but only when the reason changes for this point —
-    /// a review runs every 30 s and the same line every time is noise nobody reads.</summary>
+    /// a review runs every 30 s and the same line every time is noise nobody reads.
+    /// <paramref name="dedupKey"/> is for a reason whose wording carries a live measurement: a
+    /// threat that drifts from 3.1 km to 3.4 km is the same refusal, and must not log twice.</summary>
     private void ReportInsertionDenial(
-        FactionHQ hq, OperationsState state, CommanderStrategicPoint point, string reason)
+        FactionHQ hq, OperationsState state, CommanderStrategicPoint point, string reason, string? dedupKey = null)
     {
-        if (state.InsertionDenials.TryGetValue(point, out string? last) && last == reason)
+        string key = dedupKey ?? reason;
+        if (state.InsertionDenials.TryGetValue(point, out string? last) && last == key)
         {
             return;
         }
 
-        state.InsertionDenials[point] = reason;
+        state.InsertionDenials[point] = key;
         CommanderAiLog.Note(hq, $"PICKET {point.Label}: air insertion declined — {reason}.");
     }
 
@@ -435,6 +783,28 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
+            // The in-flight recall: the launch gate is re-run every review over what is left of the
+            // route — from where the transport actually is to its landing zone — so a threat that
+            // appears or is spotted after take-off turns the flight round instead of flying it into
+            // the same guns the launch gate would have refused.
+            if (insertion.Delivered < insertion.ExpectedLoads
+                && insertion.Aircraft != null
+                && !insertion.Aircraft.disabled
+                && TryFindInsertionRouteThreat(
+                    hq, insertion.Aircraft.GlobalPosition(), insertion.Lz, out float threatDistance))
+            {
+                CommanderSupplyHeliService.Instance?.CancelInsertion(hq, insertion.Point);
+                state.Insertions.RemoveAt(i);
+                state.InsertionCooldownUntil[insertion.Point] =
+                    Time.time + CommanderSettings.OperationsHeliInsertionCooldownMinutes * 60f;
+                CommanderAiLog.Note(
+                    hq,
+                    $"{insertion.Point.Label}: recalls the insertion flight; hostile air defence tracked "
+                        + $"{threatDistance / 1000f:0.0} km from the remaining route. Cooldown "
+                        + $"{CommanderSettings.OperationsHeliInsertionCooldownMinutes:0} min, the picket drives instead.");
+                continue;
+            }
+
             // The stale-request valve: a request whose transport never registered (a spawn queue
             // that never drained — a bound flight reaches its LZ well inside the window or the
             // record was never going to bind) releases the point after six reviews rather than
@@ -466,6 +836,17 @@ internal sealed partial class CommanderOperationsService
             hq,
             $"lost the insertion flight near {insertion.Point.Label}; cooldown "
                 + $"{CommanderSettings.OperationsHeliInsertionCooldownMinutes:0} min, the picket drives instead.");
+
+        state.InsertionLossStreak++;
+        if (ShouldPauseInsertions(state.InsertionLossStreak, InsertionLossStreakLimit)
+            && state.InsertionPauseUntil <= 0f)
+        {
+            state.InsertionPauseUntil = Time.time + InsertionLossPauseMinutes * 60f;
+            CommanderAiLog.Note(
+                hq,
+                $"{state.InsertionLossStreak} insertion flights lost in a row: no picket flies anywhere for "
+                    + $"{InsertionLossPauseMinutes:0} min.");
+        }
     }
 
     /// <summary>Called by the supply side when a spawned insertion transport registers with its
@@ -511,10 +892,16 @@ internal sealed partial class CommanderOperationsService
             }
 
             insertion.Delivered++;
+            // A vehicle on the ground is proof the air is flyable again: the run of losses that
+            // would otherwise pause every insertion starts over.
+            state.InsertionLossStreak = 0;
             if (insertion.Mission.Kind == CommanderMissionKind.Picket
                 && ReferenceEquals(insertion.Mission.Point, point))
             {
                 AdoptPicketVehicle(insertion.Mission.PicketMembers, state.Pool, unit);
+                // The marker's "Dropped, taking posts" window runs from here, not from the
+                // insertion record, which is swept as soon as the transport is recovered.
+                insertion.Mission.LastDropAt = Time.time;
                 CommanderAiLog.Note(
                     hq, $"dropped {CommanderGameAccess.GetUnitLabel(unit)} at {point.Label} ({insertion.Delivered}/{insertion.ExpectedLoads}).");
             }
@@ -630,5 +1017,105 @@ internal sealed partial class CommanderOperationsService
         AdoptPicketVehicle(members, pool, alreadyMember);
         Expect(failures, "an adopted vehicle leaves the pool", pool.Contains(alreadyMember), false);
         Expect(failures, "an adopted vehicle joins the picket exactly once", members.Count, 1);
+
+        CheckInsertionThreat(failures);
     }
+
+    /// <summary>
+    /// The launch gate's two pure pieces at their named boundaries: the route sampling that decides
+    /// where the threat test looks, and the commander-wide pause the run of losses triggers.
+    /// </summary>
+    private static void CheckInsertionThreat(List<string> failures)
+    {
+        Vector3 airbase = new(0f, 0f, 0f);
+        Vector3 landingZone = new(5000f, 0f, 0f);
+        List<Vector3> samples = new();
+
+        BuildRouteSamples(airbase, landingZone, InsertionRouteSampleMeters, samples);
+        Expect(failures, "a 5 km route at 2 km spacing is cut into three legs", samples.Count, 4);
+        Expect(
+            failures,
+            "the route sampling starts at the launching airbase",
+            CommanderGameAccess.HorizontalDistance(samples[0], airbase) < 0.01f,
+            true);
+        Expect(
+            failures,
+            "the route sampling ends at the landing zone",
+            CommanderGameAccess.HorizontalDistance(samples[samples.Count - 1], landingZone) < 0.01f,
+            true);
+        Expect(
+            failures,
+            "no gap between samples is wider than the spacing",
+            CommanderGameAccess.HorizontalDistance(samples[0], samples[1]) <= InsertionRouteSampleMeters,
+            true);
+
+        BuildRouteSamples(airbase, airbase, InsertionRouteSampleMeters, samples);
+        Expect(
+            failures,
+            "a route with no length still samples its own position",
+            samples.Count > 0 && CommanderGameAccess.HorizontalDistance(samples[0], airbase) < 0.01f,
+            true);
+
+        BuildRouteSamples(airbase, landingZone, InsertionRouteSampleMeters, samples);
+        Expect(
+            failures,
+            "a threat exactly on the threat radius blocks the flight",
+            RouteThreatened(
+                samples, new Vector3(0f, 0f, InsertionThreatRadiusMeters), InsertionThreatRadiusMeters, out _),
+            true);
+        Expect(
+            failures,
+            "a threat one metre outside the ring lets the flight go",
+            RouteThreatened(
+                samples, new Vector3(0f, 0f, InsertionThreatRadiusMeters + 1f), InsertionThreatRadiusMeters, out _),
+            false);
+        Expect(
+            failures,
+            "a threat beside the middle of the route blocks it, not just one beside an end",
+            RouteThreatened(samples, new Vector3(2500f, 0f, 500f), InsertionThreatRadiusMeters, out _),
+            true);
+        Expect(
+            failures,
+            "the quoted distance is the threat's distance to the nearest sample",
+            RouteThreatened(samples, new Vector3(5000f, 0f, 3000f), InsertionThreatRadiusMeters, out float quoted)
+                && Mathf.Abs(quoted - 3000f) < 1f,
+            true);
+
+        Expect(failures, "no loss at all never pauses", ShouldPauseInsertions(0, InsertionLossStreakLimit), false);
+        Expect(failures, "one lost flight never pauses", ShouldPauseInsertions(1, InsertionLossStreakLimit), false);
+        Expect(failures, "two lost flights in a row pause every insertion", ShouldPauseInsertions(2, InsertionLossStreakLimit), true);
+        Expect(failures, "a longer run stays paused", ShouldPauseInsertions(5, InsertionLossStreakLimit), true);
+        Expect(
+            failures,
+            "a drop between two losses resets the streak, so neither pauses",
+            ShouldPauseInsertions(1, InsertionLossStreakLimit),
+            false);
+        Expect(failures, "a zero limit turns the pause off", ShouldPauseInsertions(9, 0), false);
+
+        Expect(failures, "a review may always issue at least one insertion request", InsertionRequestsPerReview >= 1, true);
+        Expect(
+            failures,
+            "a review never issues more requests than the default airborne limit can carry",
+            InsertionRequestsPerReview <= DefaultHeliInsertionLimit,
+            true);
+        Expect(
+            failures,
+            "a commander at its airborne limit asks for nothing more",
+            QualifiesForInsertion(true, true, true, false, 5000f, 2000f, DefaultHeliInsertionLimit, DefaultHeliInsertionLimit),
+            false);
+        Expect(
+            failures,
+            "one flight already airborne no longer blocks the next",
+            QualifiesForInsertion(true, true, true, false, 5000f, 2000f, 1, DefaultHeliInsertionLimit),
+            true);
+        Expect(
+            failures,
+            "a commander one flight under its airborne limit still asks",
+            QualifiesForInsertion(true, true, true, false, 5000f, 2000f, DefaultHeliInsertionLimit - 1, DefaultHeliInsertionLimit),
+            true);
+    }
+
+    /// <summary>The shipped default of <c>OperationsHeliInsertionLimit</c>, so the self-check can
+    /// pin the per-review cap against it without reading a config a player may have retuned.</summary>
+    private const int DefaultHeliInsertionLimit = 3;
 }

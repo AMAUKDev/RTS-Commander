@@ -9,19 +9,20 @@ namespace GroundControlRts;
 
 internal sealed partial class CommanderAirCommandService
 {
-    private void RefreshOptions()
+    /// <summary>
+    /// Every aircraft definition the game carries — the encyclopedia's list plus anything loaded
+    /// as a live resource, deduplicated, in one list. Internal (one definition, two callers, Reuse
+    /// rule 4): the AIR window's option list and the AI buyers' candidate list are THE SAME LIST —
+    /// a commander that walked its faction supply instead (the first ladder build) could never see
+    /// an airbase's hangars will accept but the faction was never issued, so a highway-strip
+    /// commander sat on a full fund and bought no CAP fighter all match while the player launched
+    /// the same aircraft by hand (user report, 2026-09-14: Compass and VT-7 Vagrant with Scythes).
+    /// </summary>
+    internal static void CollectAircraftDefinitions(List<AircraftDefinition> definitions)
     {
-        options.Clear();
-        airbases.Clear();
-        FactionHQ? hq = CommanderGameAccess.GetLocalHq();
-        if (!uiVisible || hq == null)
-        {
-            return;
-        }
-
-        List<AircraftDefinition> definitions = new();
+        definitions.Clear();
         HashSet<AircraftDefinition> seen = new();
-        Encyclopedia encyclopedia = Encyclopedia.i;
+        Encyclopedia? encyclopedia = Encyclopedia.i;
         if (encyclopedia?.aircraft != null)
         {
             for (int i = 0; i < encyclopedia.aircraft.Count; i++)
@@ -43,6 +44,20 @@ internal sealed partial class CommanderAirCommandService
                 definitions.Add(definition);
             }
         }
+    }
+
+    private void RefreshOptions()
+    {
+        options.Clear();
+        airbases.Clear();
+        FactionHQ? hq = CommanderGameAccess.GetLocalHq();
+        if (!uiVisible || hq == null)
+        {
+            return;
+        }
+
+        List<AircraftDefinition> definitions = new();
+        CollectAircraftDefinitions(definitions);
 
         for (int i = 0; i < definitions.Count; i++)
         {

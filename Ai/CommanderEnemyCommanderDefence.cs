@@ -139,6 +139,11 @@ internal sealed partial class CommanderEnemyCommanderService
                 states[hq] = state;
             }
 
+            // The home CAP's loss bookkeeping rides this 10 s clock rather than the 30 s buy review
+            // (design.md, commander-priorities_20260914 Section 2): the "enemy air was near" observation
+            // has to be recent when a wreck is found, or every loss reads as an ordinary ground loss.
+            CommanderOperationsService.MaintainHomeCap(hq);
+
             ReviewDefence(hq, state);
         }
     }
@@ -245,7 +250,11 @@ internal sealed partial class CommanderEnemyCommanderService
         return false;
     }
 
-    private static bool IsNearOwnBase(FactionHQ hq, GlobalPosition position, float radius)
+    /// <summary>Whether <paramref name="position"/> is within <paramref name="radius"/> of an airbase
+    /// this faction holds. Internal (one-word widening, Reuse rule 4): the threat posture reads it at
+    /// <see cref="ThreatRadiusMeters"/>, and the home CAP's tracked-aircraft count reads the same
+    /// ring test at the CAP's own threat radius — one definition, two callers.</summary>
+    internal static bool IsNearOwnBase(FactionHQ hq, GlobalPosition position, float radius)
     {
         foreach (Airbase airbase in hq.GetAirbases())
         {

@@ -71,6 +71,35 @@ internal static class CommanderPlatoonRoles
     }
 }
 
+/// <summary>
+/// How a platoon is standing on the ground right now, inside whatever
+/// <see cref="CommanderPlatoonState"/> it is in (design.md, ground-tactics_20260914). The state
+/// says what the platoon is FOR; the posture says how it is deployed while doing it, and it is the
+/// posture the marker text and the movement tick's branches read.
+/// </summary>
+internal enum CommanderGroundPosture
+{
+    /// <summary>Spread over its point's ring on role-assigned posts, or marching in formation —
+    /// the ordinary posture, and what every platoon falls back to.</summary>
+    Ring,
+
+    /// <summary>Armour and carriers forward on an arc facing the threat while the point it holds is
+    /// in contact (design §2).</summary>
+    DefenceArc,
+
+    /// <summary>Crossing the ground to its objective in cross-country bounds rather than following
+    /// a road (design §3).</summary>
+    Bounding,
+
+    /// <summary>A reinforcement swinging wide of a point that is already held, to go in on the
+    /// attacker's flank (design §4).</summary>
+    CounterAttack,
+
+    /// <summary>A reinforcement sitting out on the most threatened approach to a point that is
+    /// already held, with nothing tracked to attack (design §4).</summary>
+    Screen,
+}
+
 /// <summary>What a platoon is doing right now (design SS1).</summary>
 internal enum CommanderPlatoonState
 {
@@ -145,6 +174,74 @@ internal sealed class CommanderPlatoon
     /// decision 2026-09-14). Negative when it has never been near the enemy, and reset the moment
     /// it stops marching. The air mirror of <see cref="InContactUntil"/>.</summary>
     internal float PreemptiveAirUntil = -1f;
+
+    /// <summary>
+    /// Scaled <c>Time.time</c> of the most recent member this platoon lost to death, capture by
+    /// another faction or removal from the game — stamped by the review sweep, negative when it
+    /// has never lost one (addendum 2026-09-14 §2). A loss this fresh is contact evidence for a
+    /// platoon standing on its posts even when nothing is tracked, read through
+    /// <c>CommanderOperationsService.LossIsRecent</c>.
+    /// </summary>
+    internal float LastLossAt = -1f;
+
+    /// <summary>
+    /// The label of the mission whose open reinforcement request this platoon is answering
+    /// (addendum 2026-09-14 §3), empty otherwise. Set when it is attached to a mission with an
+    /// open request, cleared when it leaves that mission or the request closes; the marker's
+    /// <c>Reinforcing &lt;label&gt;</c> flag and the <c>reinforces</c> log line both read it, so
+    /// a reinforcement is reported once when it is sent and not again every review.
+    /// </summary>
+    internal string ReinforcesLabel = string.Empty;
+
+    /// <summary>
+    /// How this platoon is deployed on the ground (ground-tactics design §5). Written once per
+    /// movement tick by the posture branches, read by the marker text and the review diagnostics.
+    /// </summary>
+    internal CommanderGroundPosture Posture = CommanderGroundPosture.Ring;
+
+    /// <summary>The bearing the current posture is aimed on: the defence arc's threat bearing, or
+    /// the bearing a screen faces out along. Meaningless in <see cref="CommanderGroundPosture.Ring"/>.</summary>
+    internal float PostureBearing = 0f;
+
+    /// <summary>Where the current cross-country bound ends (design §3), or null between bounds.</summary>
+    internal GlobalPosition? BoundTarget = null;
+
+    /// <summary>The objective the current bound was cut toward. When the review moves the
+    /// objective the bound is re-cut from where the platoon now stands rather than carrying it on
+    /// toward somewhere it is no longer going.</summary>
+    internal GlobalPosition BoundFor = default;
+
+    /// <summary>Scaled <c>Time.time</c> the current bound was issued — what the 90 s bound timeout
+    /// is measured from.</summary>
+    internal float BoundIssuedAt = -1f;
+
+    /// <summary>True once the "leaves the road … bounding" line has been written for this advance,
+    /// so an attack says it once and not every bound (design §3).</summary>
+    internal bool BoundLogged = false;
+
+    /// <summary>Where a counter-attacking reinforcement swings out to before it goes in (design
+    /// §4), or null while it is not counter-attacking.</summary>
+    internal GlobalPosition? FlankPosition = null;
+
+    /// <summary>True once the counter-attack has reached its flank position and is going in on the
+    /// enemy rather than still swinging out to the side.</summary>
+    internal bool FlankReached = false;
+
+    /// <summary>
+    /// Drops every posture the ground tactics keep between ticks, back to a platoon standing in its
+    /// ring. Called wherever a platoon's job changes under it — a new mission, a new bound line, a
+    /// contact that has lapsed — so no branch inherits another branch's half-finished manoeuvre.
+    /// </summary>
+    internal void ClearGroundPosture()
+    {
+        Posture = CommanderGroundPosture.Ring;
+        BoundTarget = null;
+        BoundFor = default;
+        BoundIssuedAt = -1f;
+        BoundLogged = false;
+        FlankPosition = null;
+        FlankReached = false;
+    }
 
     /// <summary>Where the line was formed. Fixed on first contact so the slots do not creep with the
     /// leader every movement tick; reset when the platoon marches again.</summary>
@@ -250,6 +347,52 @@ internal sealed class CommanderOperationsMission
     /// hold has to say itself somewhere.
     /// </summary>
     internal bool CasHoldLogged = false;
+
+    /// <summary>
+    /// Scaled <c>Time.time</c> until which this <see cref="CommanderMissionKind.Picket"/> or
+    /// <see cref="CommanderMissionKind.ForwardBase"/> mission is "in contact" — a tracked hostile
+    /// ground unit inside <c>CommanderOperationsService.ContactRangeMeters</c> of its point, or a
+    /// detachment member lost inside <c>CommanderOperationsService.LossContactSeconds</c>, holds
+    /// the same clock a platoon's <see cref="CommanderPlatoon.InContactUntil"/> carries (addendum
+    /// 2026-09-14 §2). Pickets are not platoons, so the point itself — not any platoon — is what
+    /// raises the contact-priority air demand when it is under attack with no platoon on it.
+    /// Negative when the point has never been in contact.
+    /// </summary>
+    internal float ContactUntil = -1f;
+
+    /// <summary>
+    /// Scaled <c>Time.time</c> of the most recent picket member this mission lost
+    /// (<see cref="CommanderOperationsMission.PicketMembers"/>), stamped by the picket sweep the
+    /// same way <see cref="CommanderPlatoon.LastLossAt"/> is for a platoon (addendum 2026-09-14
+    /// §2). Negative when it has never lost one.
+    /// </summary>
+    internal float LastLossAt = -1f;
+
+    /// <summary>
+    /// Scaled <c>Time.time</c> the most recent air-inserted vehicle was set down on this picket, or
+    /// negative when none ever was. The picket marker's <c>Dropped, taking posts</c> window reads
+    /// it (picket/truck markers, 2026-09-14), and it lives on the mission rather than on the
+    /// insertion record because that record is swept as soon as the transport is recovered — which
+    /// is well inside the window the marker still wants to report.
+    /// </summary>
+    internal float LastDropAt = -1f;
+
+    /// <summary>
+    /// How many of <see cref="WantedPlatoons"/> are the open reinforcement request (addendum
+    /// 2026-09-14 §3): zero with no request, otherwise the capped count a platoon outnumbered on
+    /// paper asked for. <see cref="WantedPlatoons"/> is always
+    /// <c>baseline + ReinforcePlatoons</c> — the request adjusts both together, so the existing
+    /// assignment, requisition and share passes need no changes to serve a request.
+    /// </summary>
+    internal int ReinforcePlatoons = 0;
+
+    /// <summary>
+    /// Scaled <c>Time.time</c> from which every assigned platoon's observed hostiles have stayed
+    /// below its own strength — the release timer of an open request (addendum 2026-09-14 §3),
+    /// which closes it after <c>CommanderOperationsService.ReinforceReleaseSeconds</c>. Negative
+    /// while any platoon is still outnumbered on paper, or with no request open.
+    /// </summary>
+    internal float ReinforceBelowSince = -1f;
 
     /// <summary>What the COMMANDER LOG calls this mission, e.g. a point's label or an airbase's.</summary>
     internal string Label = string.Empty;

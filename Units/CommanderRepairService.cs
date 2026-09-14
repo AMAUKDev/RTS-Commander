@@ -158,7 +158,30 @@ internal sealed class CommanderRepairService : ICommanderTickActive, ICommanderR
             return false;
         }
 
-        Unit? worst = null;
+        if (!TryFindWorstDamagedBuilding(hq, out Unit? worst) || !TryHireCrew(hq, worst!))
+        {
+            return false;
+        }
+
+        CommanderAiLog.Note(hq, $"sent a repair crew to {CommanderGameAccess.GetUnitLabel(worst)}.");
+        return true;
+    }
+
+    /// <summary>
+    /// The damaged building a repair crew would go to: the dearest one with no crew already on the
+    /// way, or none. Internal (one definition, two callers — Reuse rule 4): the send itself and the
+    /// priority ladder's building-rung demand read (<c>WantsEnemyRepairCrew</c>) must agree on
+    /// whether there is work at all, or the ladder would reserve rung money for a commander whose
+    /// repairs are already covered.
+    /// </summary>
+    internal bool TryFindWorstDamagedBuilding(FactionHQ hq, out Unit? worst)
+    {
+        worst = null;
+        if (hq.factionUnits == null)
+        {
+            return false;
+        }
+
         foreach (PersistentID id in hq.factionUnits)
         {
             if (!id.TryGetUnit(out Unit candidate)
@@ -177,13 +200,18 @@ internal sealed class CommanderRepairService : ICommanderTickActive, ICommanderR
             }
         }
 
-        if (worst == null || !TryHireCrew(hq, worst))
-        {
-            return false;
-        }
+        return worst != null;
+    }
 
-        CommanderAiLog.Note(hq, $"sent a repair crew to {CommanderGameAccess.GetUnitLabel(worst)}.");
-        return true;
+    /// <summary>
+    /// Whether this commander has a damaged building with no crew on the way — the repair half of
+    /// rung 4's demand (design.md, commander-priorities_20260914): repair crews stay ahead of the
+    /// structure spend, so a commander with a bombed refinery but a finished build list still gets
+    /// its turn in the draw.
+    /// </summary>
+    internal bool WantsEnemyRepairCrew(FactionHQ hq)
+    {
+        return hq.IsServer && TryFindWorstDamagedBuilding(hq, out _);
     }
 
     public void TickActive()

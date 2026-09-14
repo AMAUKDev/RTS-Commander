@@ -1965,3 +1965,104 @@ axis also resets `Arrived`; the abandon guard is gated on `FirstGroupArrivedAt >
 `Assigned.Count`; and the launched-attack resolve test also fires on `totalStrength == 0`.
 Attribution: the reserve `Holding` guard in the catch-all was written by the main session; the
 fix-cycle-2 fixer recorded the `Issued` threading. Both stand.
+
+## Addendum 2026-09-14 execution log
+
+Executed 2026-09-14 against `design-addendum-2026-09-14.md` (descriptive markers, reactive contact,
+reinforcement requests). All three parts plus their self-checks are in. Final build:
+`NUCLEAR_OPTION_DIR=... dotnet build GroundControlRts.csproj -c Release` → `0 Warning(s)`
+`0 Error(s)`. Two interim builds failed only inside `Ai/CommanderEnemyCommanderLadder.cs`, the
+concurrent session's in-flight file — no Operations error at any point. Not committed; no install
+script run; in-game verification below is the developer's to perform.
+
+### What changed
+
+- **§1 Markers** — `Operations/CommanderOperationsMarkers.cs`: the label is
+  `<NAME> n/m — <situation>[ · flags]`, built by `PlatoonMarkerLabel` from the pure
+  `MarkerSituation` table (Forming at / Moving to / Holding / Reserve at / Attacking /
+  Withdrawing to) and pure `MarkerFlags` (`In contact · Requesting CAS · CAS overhead ·
+  Requesting reinforcements · Reinforcing <label>`, that order). `SituationPlaceLabel`,
+  `NearestPlaceLabel`, `NearestAirbaseLabel` resolve place names from existing point and airbase
+  labels only — no invented strings; `FindPlatoonSortie` reads the live sortie for the CAS flags.
+  `GetStateLabel` deleted. Fields on `Operations/CommanderPlatoon.cs`:
+  `CommanderPlatoon.LastLossAt`, `CommanderPlatoon.ReinforcesLabel`,
+  `CommanderOperationsMission.ContactUntil` / `LastLossAt` / `ReinforcePlatoons` /
+  `ReinforceBelowSince`.
+- **§2 Reactive contact** — `Operations/CommanderOperationsService.cs`:
+  `DetectHoldingContact` (movement tick, the Holding branch) marks a garrison or reserve platoon
+  in contact on a tracked hostile ≤ `ContactRangeMeters` of the leader or a member loss ≤
+  `LossContactSeconds` (60 s), same 20 s `ContactHoldSeconds` hold, posts untouched;
+  `DetectMissionContact` holds the same clock on Picket/ForwardBase missions
+  (`ContactUntil`). Loss stamps: `SweepPool` (`Operations/CommanderOperationsRequisitions.cs`)
+  for platoon members, `PlanPickets` (`Operations/CommanderOperationsFront.cs`) for picket
+  members, both through `HasCombatLoss` — a player-ordered member is a hand-over, not a loss.
+  Air hook (additive, `Operations/CommanderOperationsAir.cs` `BuildAirDemand`): the
+  platoon-in-contact loop now also serves Holding platoons; a holding garrison's demand carries
+  its mission so one point never opens two sorties; a new loop demands contact-priority CAS for a
+  Picket/ForwardBase mission whose `ContactUntil` is live; the threatened-forward-base loop got an
+  `AlreadyDemanded` guard so a mission is never demanded twice.
+- **§3 Reinforcements** — `ReviewReinforcements` (`Operations/CommanderOperationsService.cs`,
+  in the review between `UpdatePressure` and `AssignPlatoons`) sizes the request per mission from
+  the worst in-contact platoon: `ReinforcementsFor(observed, strength, PlatoonSize,
+  ReinforceOddsRatio)` — nothing at equal numbers, else `ceil(deficit / PlatoonSize)` capped at
+  `MaxReinforcementPlatoons` (3) — and raises `WantedPlatoons` by it, so the existing assignment
+  pass and order book serve it unchanged. Release: after `ReinforceReleaseSeconds` (120 s) of
+  every assigned platoon being un-outnumbered, `CloseReinforcementRequest` lowers the wanted
+  count and releases the reinforcing platoons back to the pool (the reserve catch-all in the same
+  review sends them home). `AttachPlatoon` (`Operations/CommanderOperationsFront.cs`) is the one
+  attach point for the forward-base, attack and strip paths, and stamps `ReinforcesLabel` plus
+  the `reinforces` log line once. `FillReinforcementsFromPosts` / `TakeRearmostHoldingPlatoon`
+  strip Holding garrisons from the rear-most forward bases, never from an attack and never from a
+  mission with an open request of its own. `DemoteForwardBaseToPicket` and `ResolveAttack` reset
+  the bookkeeping. Review line (`Operations/CommanderOperationsDiagnostics.cs`) shows `+N reinf`.
+
+### Log lines (COMMANDER LOG; the three §3 lines verbatim from the addendum)
+
+- `<platoon> requests <n> platoon(s) of reinforcements at <label> (<observed> observed vs <strength>)`
+- `<platoon> reinforces <label>.`
+- `<label>: reinforcement request closed.`
+- Post-contact onset (debug log on): `<platoon> in contact at its post: hostile at <d> m, holds
+  its posts and calls for air support.` / `... a member was lost, holds its posts and calls for
+  air support.`
+
+### Self-checks (`CommanderOperationsService.SelfCheck`)
+
+`CheckMarkerLabels` (every state's text, the reserve variant, flag order), `CheckContactEvidence`
+(loss window boundaries, window > hold, window ≥ review + hold), `CheckReinforcements` (odds rule
+at equal/greater/less, count arithmetic at exact and fractional platoon deficits, the cap, release
+boundary inclusive at 120 s).
+
+### Reading decisions recorded
+
+1. "Holding platoons on rear points": platoons only ever hold front points (FOBs) or the reserve
+   ring — rear control points get pickets, which are not platoons. Read as: strip garrisons, the
+   point furthest from the enemy first.
+2. A mission with several in-contact platoons takes the WORST platoon's request, not the sum —
+   platoons at one point observe the same hostiles and a sum counts them twice.
+3. The release test reads every assigned platoon (reinforcements included), not only the original
+   requester — the request closes when nobody at the point is outnumbered.
+4. Reserve missions do not open requests (a reserve platoon IS the reinforcement); requests exist
+   only on ForwardBase and Attack missions.
+5. Requests log on open and on any change of size while open, at most three levels, at review
+   cadence.
+
+### In-game verification (developer steps, not yet run)
+
+Host `Ground Control Duel`, let FOBs form, then: (a) attack a held front point with a force the
+garrison can see — garrison marker reads `... — Holding <point> · In contact`, then
+`Requesting CAS` while the wing is short, then `CAS overhead`; log shows the post-contact line
+and `tasks <aircraft> with CAS over <platoon>`; (b) visibly outnumber the garrison —
+`requests N platoon(s) of reinforcements at <point> (X observed vs Y)`, `<platoon> reinforces
+<point>`, review line shows `+N reinf`; (c) drive the attack off and wait ~2 min —
+`<point>: reinforcement request closed`, reinforcing platoons return to reserve; (d) hit a rear
+picket with no platoon on it — contact-priority CAS tasked over the point label.
+
+### Repo check command (stop-gate, 2026-09-14)
+
+`check.mjs` at the repo root — the Roslyn Release build with `NUCLEAR_OPTION_DIR` set, exit code
+the build's. Gate proof per the project's own rule: clean tree passes (`0 Warning(s) 0 Error(s)`,
+~1 s); a planted `DoesNotExistForGateProof()` in
+`Operations/CommanderOperationsMarkers.cs` failed it with the named error `CS0103` and exit
+code 1; the plant was reverted byte-identical (git hash match) and the check passes again. The
+`.claude/check.cmd` variant was refused by the permission system, so the root convention was used;
+no `.claude/` settings or Stop-hook wiring was touched.

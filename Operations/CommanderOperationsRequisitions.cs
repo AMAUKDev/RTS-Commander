@@ -153,6 +153,14 @@ internal sealed partial class CommanderOperationsService
         state.Pool.RemoveAll(unit => IsStalePoolUnit(hq, unit));
         for (int i = 0; i < state.Platoons.Count; i++)
         {
+            // Before the removal, not after: a dead member is only visible to the loss stamp while
+            // it still sits in the list. The stamp is what makes a holding platoon that lost a
+            // vehicle count as in contact (addendum 2026-09-14 §2).
+            if (HasCombatLoss(hq, state.Platoons[i].Members))
+            {
+                state.Platoons[i].LastLossAt = Time.time;
+            }
+
             state.Platoons[i].Members.RemoveAll(unit => IsStalePoolUnit(hq, unit));
         }
 
@@ -282,15 +290,20 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
-    /// Pure, for the self-check. The ground buyer stops buying on plan once the commander fields
-    /// <paramref name="maxPlatoons"/> platoons and no requisition is open: vehicles cost 5–15 against
-    /// an income of tens per minute, so an uncapped plan buyer fielded 800 vehicles and 80 platoons
-    /// in one match — most of them parked. Replacements and reserve shortfalls still come through
-    /// the order book, so a capped commander is never left unable to refill a platoon.
+    /// Pure, for the self-check. True when the ground buyer must buy nothing this review: the
+    /// operations service owns this commander's ground force, so every vehicle is bought to order,
+    /// and the order book has no open line to buy for (DECISION-013).
+    /// <para>This replaces a platoon cap that never bound. The cap lifted the moment any requisition
+    /// was open and the book never emptied — the standing reserve alone kept a line open — so the
+    /// plan buyer went on buying vehicles nobody had asked for, and the player side reached 27
+    /// platoons spread over a map with no enemy near most of them. Counting platoons was the wrong
+    /// question: what matters is whether anything asked for the vehicle. Picket shortfalls,
+    /// forward-base trucks, platoon replacements, reinforcements and the standing reserve all post
+    /// lines, so a commander that needs a vehicle still gets one.</para>
     /// </summary>
-    internal static bool GroundBuyingCapped(bool ownsGroundForce, int platoonCount, int maxPlatoons, bool hasOpenRequisition)
+    internal static bool GroundBuyingBookOnly(bool ownsGroundForce, bool hasOpenRequisition)
     {
-        return ownsGroundForce && !hasOpenRequisition && maxPlatoons > 0 && platoonCount >= maxPlatoons;
+        return ownsGroundForce && !hasOpenRequisition;
     }
 
     /// <summary>Per-HQ state lifecycle: created once this commander is managed and the point list
@@ -429,12 +442,17 @@ internal sealed partial class CommanderOperationsService
     /// <summary>
     /// The roles the buyer should try this purchase, best first: an open <c>Truck</c> line always
     /// leads (a forward base without its truck runs dry, and one truck is cheap next to the vehicle
-    /// lines it was losing "largest line" to), then the remaining open lines largest first.
+    /// lines it was losing "largest line" to), then the roles a purpose FACING THE ENEMY is waiting
+    /// on, then everything else — which is where a picket's pair sits.
     /// <paramref name="boughtThisReview"/> is subtracted so five purchases in one review do not all
     /// chase the same line: the depot claim that credits a line only lands once the vehicle exists.
     /// The buyer takes the first role it can afford, and only falls back to its plan when it can
     /// afford none of them — before, one unaffordable "largest" role sent the whole purchase to the
     /// plan, which bought a cheap vehicle the recipe could not use.
+    /// <para>The urgency split is the 2026-09-14 fix. Sorted by size alone, sixteen rear pickets'
+    /// air-defence and carrier lines outweighed the armour a forward base in contact was asking
+    /// for, so every vehicle bought went to a quiet crossroads while the front stayed one platoon
+    /// deep.</para>
     /// </summary>
     internal static void OpenRolesByPriority(FactionHQ hq, int[] boughtThisReview, List<CommanderPlatoonRole> roles)
     {
@@ -444,24 +462,62 @@ internal sealed partial class CommanderOperationsService
             return;
         }
 
-        int[] totals = new int[RoleCount];
-        SumOrderBook(state.Requisitions, totals);
-        for (int i = 0; i < totals.Length && i < boughtThisReview.Length; i++)
+        int[] urgent = new int[RoleCount];
+        int[] other = new int[RoleCount];
+        SumOrderBookByUrgency(state, urgent, other);
+
+        // What has already been bought this review pays off the urgent lines first, for the same
+        // reason they are bought first: the vehicle on its way belongs to the threatened purpose.
+        for (int i = 0; i < RoleCount && i < boughtThisReview.Length; i++)
         {
-            totals[i] = Mathf.Max(0, totals[i] - boughtThisReview[i]);
+            int bought = Mathf.Max(0, boughtThisReview[i]);
+            int fromUrgent = Mathf.Min(urgent[i], bought);
+            urgent[i] -= fromUrgent;
+            other[i] = Mathf.Max(0, other[i] - (bought - fromUrgent));
         }
 
-        if (totals[(int)CommanderPlatoonRole.Truck] > 0)
+        OrderOpenRoles(urgent, other, roles);
+    }
+
+    /// <summary>
+    /// The buy order for one purchase, from the two halves of the order book: an open
+    /// <c>Truck</c> line first whichever half it is in, then the urgent roles largest line first,
+    /// then every other open role largest line first. Each role appears once, at its best position.
+    /// Pure, for the self-check.
+    /// </summary>
+    internal static void OrderOpenRoles(
+        IReadOnlyList<int> urgentTotals, IReadOnlyList<int> otherTotals, List<CommanderPlatoonRole> roles)
+    {
+        roles.Clear();
+        bool[] taken = new bool[RoleCount];
+        if (OpenTotal(urgentTotals, CommanderPlatoonRole.Truck) + OpenTotal(otherTotals, CommanderPlatoonRole.Truck) > 0)
         {
             roles.Add(CommanderPlatoonRole.Truck);
+            taken[(int)CommanderPlatoonRole.Truck] = true;
         }
 
+        AppendLargestFirst(urgentTotals, taken, roles);
+        AppendLargestFirst(otherTotals, taken, roles);
+    }
+
+    /// <summary>One role's open total out of a totals array, bounds-checked and never negative.</summary>
+    private static int OpenTotal(IReadOnlyList<int> totals, CommanderPlatoonRole role)
+    {
+        int index = (int)role;
+        return index >= 0 && index < totals.Count ? Mathf.Max(0, totals[index]) : 0;
+    }
+
+    /// <summary>Appends every role with an open line in <paramref name="totals"/>, largest first,
+    /// skipping the ones an earlier pass already placed. First index wins a tie, so the answer is
+    /// stable review to review — the <see cref="LargestOpenRole(IReadOnlyList{int})"/> convention.</summary>
+    private static void AppendLargestFirst(IReadOnlyList<int> totals, bool[] taken, List<CommanderPlatoonRole> roles)
+    {
         while (true)
         {
             int best = -1;
-            for (int i = 0; i < totals.Length; i++)
+            for (int i = 0; i < totals.Count && i < taken.Length; i++)
             {
-                if (i == (int)CommanderPlatoonRole.Truck || totals[i] <= 0)
+                if (taken[i] || totals[i] <= 0)
                 {
                     continue;
                 }
@@ -478,8 +534,56 @@ internal sealed partial class CommanderOperationsService
             }
 
             roles.Add((CommanderPlatoonRole)best);
-            totals[best] = 0;
+            taken[best] = true;
         }
+    }
+
+    /// <summary>
+    /// Splits the order book into the lines a purpose facing the enemy is waiting on and everything
+    /// else. A line with no mission of its own — the standing reserve and the platoon top-ups — is
+    /// never urgent: it is what the commander would like, not what the enemy is forcing.
+    /// </summary>
+    private static void SumOrderBookByUrgency(OperationsState state, int[] urgent, int[] other)
+    {
+        for (int i = 0; i < urgent.Length && i < other.Length; i++)
+        {
+            urgent[i] = 0;
+            other[i] = 0;
+        }
+
+        for (int i = 0; i < state.Requisitions.Count; i++)
+        {
+            CommanderRequisition requisition = state.Requisitions[i];
+            int role = (int)requisition.Role;
+            if (role < 0 || role >= urgent.Length)
+            {
+                continue;
+            }
+
+            int open = Mathf.Max(0, requisition.Wanted - requisition.Filled);
+            if (IsThreatenedPurpose(state, requisition.Mission))
+            {
+                urgent[role] += open;
+            }
+            else
+            {
+                other[role] += open;
+            }
+        }
+    }
+
+    /// <summary>A requisition raised by a purpose facing the enemy: any attack, or a forward base on
+    /// a front point under a threat mark or in contact. One definition of "facing the enemy" shared
+    /// with the pool order (<c>IsThreatenedFrontPoint</c>, Reuse rule 4).</summary>
+    private static bool IsThreatenedPurpose(OperationsState state, CommanderOperationsMission? mission)
+    {
+        if (mission == null)
+        {
+            return false;
+        }
+
+        return mission.Kind == CommanderMissionKind.Attack
+            || (mission.Kind == CommanderMissionKind.ForwardBase && IsThreatenedFrontPoint(state, mission));
     }
 
     internal static CommanderPlatoonRole LargestOpenRole(FactionHQ hq)
@@ -587,6 +691,33 @@ internal sealed partial class CommanderOperationsService
         SetRequisition(state, mission, CommanderPlatoonRole.Truck, mission.Truck == null ? 1 : 0);
     }
 
+    /// <summary>
+    /// Pure, for the self-check. How a picket's shortfall is written on the order book
+    /// (DECISION-013: pickets are the capture mechanic, so the buyer must be able to buy picket
+    /// vehicles when the pool is empty). The insertion load's own doctrine, in role form: the first
+    /// vehicle is air defence — a point away from the front is threatened by aircraft, not armour —
+    /// and every further one is a carrier, the cheapest non-air-defence combat role in the recipe
+    /// and the only one that can actually take a point, which is the whole of a picket's job. The
+    /// buyer's <c>ChooseForRole</c> still picks the cheapest definition inside the role.
+    /// </summary>
+    internal static void PicketRequisitionRoles(int shortfall, out int airDefence, out int carrier)
+    {
+        int wanted = Mathf.Max(0, shortfall);
+        airDefence = Mathf.Min(1, wanted);
+        carrier = wanted - airDefence;
+    }
+
+    /// <summary>A picket short of <c>PointsMinGarrison</c> posts its shortfall so the buyer fills it
+    /// when the pool has nothing to give (design Section 1). A filled picket posts a zero want,
+    /// which clears the line outright — the truck line's own convention.</summary>
+    private static void PostPicketRequisitions(OperationsState state, CommanderOperationsMission mission)
+    {
+        int shortfall = Mathf.Max(0, CommanderSettings.PointsMinGarrison - mission.PicketMembers.Count);
+        PicketRequisitionRoles(shortfall, out int airDefence, out int carrier);
+        SetRequisition(state, mission, CommanderPlatoonRole.AirDefence, airDefence);
+        SetRequisition(state, mission, CommanderPlatoonRole.Carrier, carrier);
+    }
+
     /// <summary>An attack posts <c>WantedPlatoons × PlatoonSize</c> across the recipe, proportioned
     /// by the recipe's own slot counts, less whatever its assigned platoons already field (design
     /// SS4).</summary>
@@ -634,6 +765,14 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
+            // A picket's line is a standing want, not a one-off request: it is re-posted a few lines
+            // below with a fresh clock for as long as the point is short. Saying "proceeds with what
+            // it has" every five minutes for every empty picket on the map is noise nobody reads.
+            if (mission.Kind == CommanderMissionKind.Picket)
+            {
+                continue;
+            }
+
             if (mission.Kind == CommanderMissionKind.ForwardBase && mission.Assigned.Count == 0)
             {
                 state.Missions.Remove(mission);
@@ -655,6 +794,10 @@ internal sealed partial class CommanderOperationsService
             else if (mission.Kind == CommanderMissionKind.Attack)
             {
                 PostAttackRequisitions(state, mission);
+            }
+            else if (mission.Kind == CommanderMissionKind.Picket)
+            {
+                PostPicketRequisitions(state, mission);
             }
         }
 
@@ -735,11 +878,25 @@ internal sealed partial class CommanderOperationsService
     /// on top of the same set.</summary>
     private static void CheckOrderBook(List<string> failures)
     {
-        Expect(failures, "eight platoons and an empty book cap the plan buyer", GroundBuyingCapped(true, 8, 8, false), true);
-        Expect(failures, "an open requisition lifts the cap", !GroundBuyingCapped(true, 8, 8, true), true);
-        Expect(failures, "seven platoons are under the cap", !GroundBuyingCapped(true, 7, 8, false), true);
-        Expect(failures, "an unmanaged commander is never capped", !GroundBuyingCapped(false, 50, 8, false), true);
-        Expect(failures, "a zero cap disables the rule", !GroundBuyingCapped(true, 50, 0, false), true);
+        Expect(failures, "an owned ground force with an empty order book buys nothing", GroundBuyingBookOnly(true, false), true);
+        Expect(failures, "an owned ground force with an open line buys", !GroundBuyingBookOnly(true, true), true);
+        Expect(failures, "a force this service does not own still runs the plan buyer", !GroundBuyingBookOnly(false, false), true);
+        Expect(failures, "a force this service does not own is never held by the book either", !GroundBuyingBookOnly(false, true), true);
+
+        PicketRequisitionRoles(2, out int picketAirDefence, out int picketCarrier);
+        Expect(failures, "an empty picket orders one air-defence vehicle", picketAirDefence, 1);
+        Expect(failures, "an empty picket orders one carrier beside it", picketCarrier, 1);
+        PicketRequisitionRoles(1, out picketAirDefence, out picketCarrier);
+        Expect(failures, "a picket one short orders the air-defence vehicle first", picketAirDefence, 1);
+        Expect(failures, "a picket one short orders no carrier", picketCarrier, 0);
+        PicketRequisitionRoles(0, out picketAirDefence, out picketCarrier);
+        Expect(failures, "a filled picket orders no air defence", picketAirDefence, 0);
+        Expect(failures, "a filled picket orders no carrier", picketCarrier, 0);
+        PicketRequisitionRoles(-1, out picketAirDefence, out picketCarrier);
+        Expect(failures, "an over-filled picket never orders a negative number of vehicles", picketAirDefence + picketCarrier, 0);
+        PicketRequisitionRoles(4, out picketAirDefence, out picketCarrier);
+        Expect(failures, "a larger garrison setting still orders exactly one air-defence vehicle", picketAirDefence, 1);
+        Expect(failures, "a larger garrison setting orders the rest as carriers", picketCarrier, 3);
         List<CommanderRequisition> requisitions = new()
         {
             new CommanderRequisition { Role = CommanderPlatoonRole.Armour, Wanted = 3, Filled = 1 },
@@ -775,5 +932,50 @@ internal sealed partial class CommanderOperationsService
             "an empty book leaves the plan-based counter triangle alone",
             LargestOpenRole(emptyTotals),
             -1);
+
+        CheckBuyOrder(failures);
+    }
+
+    /// <summary>
+    /// The buy order the 2026-09-14 fix installed: truck, then the roles a threatened purpose is
+    /// waiting on, then the picket and reserve lines — however much larger those are.
+    /// </summary>
+    private static void CheckBuyOrder(List<string> failures)
+    {
+        int[] urgent = new int[RoleCount];
+        int[] quiet = new int[RoleCount];
+        List<CommanderPlatoonRole> order = new();
+
+        // A forward base in contact wants three tanks; sixteen rear pickets want sixteen of
+        // everything else. The tanks must still be bought first.
+        urgent[(int)CommanderPlatoonRole.Armour] = 3;
+        quiet[(int)CommanderPlatoonRole.AirDefence] = 16;
+        quiet[(int)CommanderPlatoonRole.Carrier] = 16;
+        OrderOpenRoles(urgent, quiet, order);
+        Expect(failures, "a threatened purpose's armour outranks every picket line", order.Count > 0 ? (int)order[0] : -1, (int)CommanderPlatoonRole.Armour);
+        Expect(failures, "the picket lines are still bought, behind the threatened purpose", order.Count, 3);
+
+        // The truck leads whichever half of the book it sits in.
+        quiet[(int)CommanderPlatoonRole.Truck] = 1;
+        OrderOpenRoles(urgent, quiet, order);
+        Expect(failures, "an open truck line still leads the whole order", order.Count > 0 ? (int)order[0] : -1, (int)CommanderPlatoonRole.Truck);
+        Expect(failures, "the threatened purpose follows the truck", order.Count > 1 ? (int)order[1] : -1, (int)CommanderPlatoonRole.Armour);
+
+        // Nothing threatened: the book falls back to largest line first, as it always did.
+        System.Array.Clear(urgent, 0, urgent.Length);
+        quiet[(int)CommanderPlatoonRole.Truck] = 0;
+        OrderOpenRoles(urgent, quiet, order);
+        Expect(failures, "with nothing threatened the largest line leads", order.Count > 0 ? (int)order[0] : -1, (int)CommanderPlatoonRole.Carrier);
+
+        // A role wanted by both halves appears once, at its urgent position.
+        urgent[(int)CommanderPlatoonRole.Carrier] = 1;
+        OrderOpenRoles(urgent, quiet, order);
+        Expect(failures, "a role wanted by both halves leads once", order.Count > 0 ? (int)order[0] : -1, (int)CommanderPlatoonRole.Carrier);
+        Expect(failures, "a role wanted by both halves is never listed twice", order.Count, 2);
+
+        System.Array.Clear(urgent, 0, urgent.Length);
+        System.Array.Clear(quiet, 0, quiet.Length);
+        OrderOpenRoles(urgent, quiet, order);
+        Expect(failures, "an empty book asks the buyer for no role at all", order.Count, 0);
     }
 }

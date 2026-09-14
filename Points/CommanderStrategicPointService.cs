@@ -354,6 +354,27 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
     internal static float NearestRoadDistanceMeters(
         IReadOnlyList<List<GlobalPosition>> roads, GlobalPosition position)
     {
+        return TryNearestRoadPoint(roads, position, float.MaxValue, out _, out float distance)
+            ? distance
+            : float.MaxValue;
+    }
+
+    /// <summary>
+    /// The nearest point ON a road to <paramref name="position"/>, not merely how far away it is —
+    /// the same single walk of the retained polylines, generalised to hand back WHERE the road is
+    /// (Reuse rule 5). The ground-tactics screen reads it: a screen belongs on the approach it
+    /// watches, and an approach is a road. False when the map kept no roads or the nearest one is
+    /// past <paramref name="maxMeters"/>, which the callers read as "there is no road here".
+    /// Pure, for the self-check.
+    /// </summary>
+    internal static bool TryNearestRoadPoint(
+        IReadOnlyList<List<GlobalPosition>> roads,
+        GlobalPosition position,
+        float maxMeters,
+        out GlobalPosition closest,
+        out float distanceMeters)
+    {
+        closest = default;
         float bestSquared = float.MaxValue;
         for (int r = 0; r < roads.Count; r++)
         {
@@ -364,11 +385,30 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
                 if (segment < bestSquared)
                 {
                     bestSquared = segment;
+                    closest = ClosestPointOnSegment(position, points[i - 1], points[i]);
                 }
             }
         }
 
-        return bestSquared == float.MaxValue ? float.MaxValue : Mathf.Sqrt(bestSquared);
+        distanceMeters = bestSquared == float.MaxValue ? float.MaxValue : Mathf.Sqrt(bestSquared);
+        return distanceMeters <= maxMeters;
+    }
+
+    /// <summary>
+    /// The point on segment a–b closest to <paramref name="point"/>, horizontally, with its height
+    /// interpolated along the segment. The projection <see cref="SegmentDistanceSquared"/> measures
+    /// but does not return; that one is left exactly as it is because it is on the discovery walk's
+    /// hot path and every caller of it wants only the distance.
+    /// </summary>
+    private static GlobalPosition ClosestPointOnSegment(GlobalPosition point, GlobalPosition a, GlobalPosition b)
+    {
+        float abX = b.x - a.x;
+        float abZ = b.z - a.z;
+        float lengthSquared = abX * abX + abZ * abZ;
+        float travel = lengthSquared <= 0.0001f
+            ? 0f
+            : Mathf.Clamp01(((point.x - a.x) * abX + (point.z - a.z) * abZ) / lengthSquared);
+        return new GlobalPosition(a.x + abX * travel, a.y + (b.y - a.y) * travel, a.z + abZ * travel);
     }
 
     /// <summary>The live wrapper the insertion gate reads: the road polylines discovery retained
@@ -376,6 +416,13 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
     internal float NearestRoadDistanceMeters(GlobalPosition position)
     {
         return NearestRoadDistanceMeters(roadPointLists, position);
+    }
+
+    /// <summary>The live wrapper the ground-tactics screen reads, over the same retained
+    /// polylines.</summary>
+    internal bool TryNearestRoadPoint(GlobalPosition position, float maxMeters, out GlobalPosition closest)
+    {
+        return TryNearestRoadPoint(roadPointLists, position, maxMeters, out closest, out _);
     }
 
     /// <summary>

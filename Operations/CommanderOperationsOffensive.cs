@@ -969,6 +969,9 @@ internal sealed partial class CommanderOperationsService
             }
 
             platoon.Mission = null;
+            // An attack that resolves ends any reinforcement answer with it (addendum
+            // 2026-09-14 §3); the mission object is about to leave the list entirely.
+            platoon.ReinforcesLabel = string.Empty;
             if (success)
             {
                 platoon.State = CommanderPlatoonState.Moving;

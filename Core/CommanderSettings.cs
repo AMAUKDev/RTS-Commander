@@ -229,10 +229,18 @@ internal static class CommanderSettings
     // decisions, not this machinery.
     internal static bool OperationsDebugLog { get => Get("Operations", "DebugLog", true); set => Set("Operations", "DebugLog", value); }
     // Full platoons a commander keeps wanting with no job assigned. This is what keeps the order
-    // book open (and the buyer forming platoons) before the first mission exists; two is one to
-    // hold the base and one spare to start an attack with.
-    internal static int OperationsReservePlatoons { get => Get("Operations", "ReservePlatoons", 2); set => Set("Operations", "ReservePlatoons", value); }
-    internal static int OperationsMaxPlatoons { get => Get("Operations", "MaxPlatoons", 8); set => Set("Operations", "MaxPlatoons", value); }
+    // book open (and the buyer forming platoons) before the first mission exists. One since the
+    // pickets-first doctrine (2026-09-14): a platoon now forms only for a forward base on a front
+    // point, an attack, or this reserve, so the reserve is the whole of the commander's spare
+    // ground force rather than a floor under a force that grew on its own. Two kept a second full
+    // platoon parked at the base that the picket line would rather have had as six vehicles.
+    // Key renamed from ReservePlatoons when the default dropped 2 -> 1 (pickets-first, 2026-09-14):
+    // BepInEx keeps the value already in the cfg, so a default change under the old key never lands.
+    internal static int OperationsReservePlatoons { get => Get("Operations", "ReservePlatoonCount", 1); set => Set("Operations", "ReservePlatoonCount", value); }
+    // Operations/MaxPlatoons was deleted with the pickets-first doctrine (DECISION-013). The cap it
+    // held never bound — any open requisition lifted it and the order book never emptied — and what
+    // replaced it is GroundBuyingBookOnly: a commander buys ground vehicles only for lines on its
+    // order book. The key is left orphaned in existing config files on purpose; nothing reads it.
     internal static int OperationsPlatoonSize { get => Get("Operations", "PlatoonSize", 6); set => Set("Operations", "PlatoonSize", value); }
     internal static int OperationsRecipeArmour { get => Get("Operations", "RecipeArmour", 3); set => Set("Operations", "RecipeArmour", value); }
     internal static int OperationsRecipeCarrier { get => Get("Operations", "RecipeCarrier", 1); set => Set("Operations", "RecipeCarrier", value); }
@@ -267,6 +275,25 @@ internal static class CommanderSettings
     // rearm cycles are what should size the wing. Counts every live aircraft of the faction.
     internal static int AirborneCeiling { get => Get("Operations", "AirborneCeiling", 20); set => Set("Operations", "AirborneCeiling", value); }
 
+    // The smarter air wing (design.md, smarter-air-wing_20260914; user decision 2026-09-14).
+    // Config-file-only: doctrine knobs, not player taste, so there is no slider for them.
+    // Seconds a package waits at its form-up orbit after the first airframe reaches it before it
+    // goes in with whoever is there. 180 (user decision 2026-09-14): runway restrictions launch a
+    // four-aircraft demand one airframe at a time, roughly a minute apart, so a wait shorter than
+    // three minutes never assembles a package at all — and a longer one leaves the ground attack
+    // that is holding for CAS standing at its release point past its own 240 s form-up timeout.
+    internal static float PackageFormUpSeconds { get => Get("Operations", "PackageFormUpSeconds", 180f); set => Set("Operations", "PackageFormUpSeconds", value); }
+    // How far from an objective a pad or strip may be and still launch the attack helicopters that
+    // cover it. 40 km (user decision 2026-09-14): at the rotary transit speed the wing already uses
+    // (80 m/s) that is about eight minutes each way, which a helicopter's fuel and a forward base's
+    // patience both carry. Past it the sortie falls back to a jet.
+    internal static float RotaryCasRangeMeters { get => Get("Operations", "RotaryCasRangeMeters", 40000f); set => Set("Operations", "RotaryCasRangeMeters", value); }
+    // Tracked hostile air-defence vehicles that have to sit inside one 5 km cluster before the wing
+    // opens an anti-radiation sortie on it. 3 (user decision 2026-09-14): one or two vehicles is the
+    // ordinary air-defence a platoon carries and CAS is expected to survive; three together is a
+    // prepared belt, which is what kills CAS one airframe at a time.
+    internal static int AradClusterMinimum { get => Get("Operations", "AradClusterMinimum", 3); set => Set("Operations", "AradClusterMinimum", value); }
+
     // Picket insertion by transport helicopter (design.md, heli-picket-insertion_20260913).
     // Master toggle: visible AI spend, killable like every doctrine feature.
     internal static bool OperationsHeliInsertionEnabled { get => Get("Operations", "HeliInsertionEnabled", true); set => Set("Operations", "HeliInsertionEnabled", value); }
@@ -276,12 +303,67 @@ internal static class CommanderSettings
     internal static float OperationsHeliInsertionOffRoadMeters { get => Get("Operations", "HeliInsertionOffRoadMeters", 2000f); set => Set("Operations", "HeliInsertionOffRoadMeters", value); }
     // Insertion flights airborne per HQ at once (config-only: a balance knob in the recipe's
     // company). Transports deliver, they do not win fights — the same reasoning as the enemy
-    // commander's TransportLimit.
-    internal static int OperationsHeliInsertionLimit { get => Get("Operations", "HeliInsertionLimit", 1); set => Set("Operations", "HeliInsertionLimit", value); }
+    // commander's TransportLimit. Three since the pickets-first doctrine (2026-09-14): pickets are
+    // now the capture mechanic on every point away from the front, and a mountain map has more
+    // roadless hilltops than one flight at a time can ever garrison — a lift takes minutes, so at
+    // one flight the commander was still on its second hilltop when the match turned.
+    // Key renamed from HeliInsertionLimit when the default rose 1 -> 3 (pickets-first, 2026-09-14), same reason as ReservePlatoonCount.
+    internal static int OperationsHeliInsertionLimit { get => Get("Operations", "HeliInsertionFlights", 3); set => Set("Operations", "HeliInsertionFlights", value); }
     // Minutes after losing an insertion flight before the same point asks again (config-only;
     // confirmed by the user, 2026-09-13). An identical loss on retry a minute later is a waste;
     // an hour is cowardice.
     internal static float OperationsHeliInsertionCooldownMinutes { get => Get("Operations", "HeliInsertionCooldownMinutes", 10f); set => Set("Operations", "HeliInsertionCooldownMinutes", value); }
+
+    // Ground tactics (design.md, ground-tactics_20260914; user decision 2026-09-14, DECISION-012).
+    // Config-file-only: doctrine knobs, not player taste, so there is no slider for them.
+    // How far beyond its hold ring a garrison's tanks and IFVs push when the point comes under
+    // attack. 400 m: far enough that the armour meets an attack in front of the vehicles that keep
+    // the point paying rather than on top of them, and inside the 2.5 km at which the contact is
+    // noticed at all, so the arc forms before the shooting starts. On a point whose own radius is
+    // smaller than this the standoff is cut to that radius (CommanderOperationsService
+    // .DefenceArcDistanceMeters), so a tiny point never throws its armour a whole radius away.
+    internal static float DefenceArcStandoffMeters { get => Get("Operations", "DefenceArcStandoffMeters", 400f); set => Set("Operations", "DefenceArcStandoffMeters", value); }
+    // How far an attacking platoon advances in one cross-country bound once it has left its release
+    // point. 800 m: about one movement-tick-and-a-half of driving for a tank, short enough that the
+    // platoon re-forms its line several times on the way in rather than arriving strung out, and
+    // long enough that a 5 km approach is a handful of bounds and not a crawl. Reduce to 400 if the
+    // game's ground AI is seen snapping an 800 m off-road leg back onto the road network.
+    internal static float BoundMeters { get => Get("Operations", "BoundMeters", 800f); set => Set("Operations", "BoundMeters", value); }
+    // Within this of a tracked enemy every ground destination is issued as a bound rather than as a
+    // long path the game's own routing may take down a road. 1000 m (the user's rule, 2026-09-14):
+    // inside a kilometre of a known enemy a road is an ambush, and the last kilometre is the part
+    // worth driving across country.
+    internal static float OffRoadRangeMeters { get => Get("Operations", "OffRoadRangeMeters", 1000f); set => Set("Operations", "OffRoadRangeMeters", value); }
+
+    // The commander priority ladder (design.md, commander-priorities_20260914; user decision
+    // 2026-09-14): every commanded HQ spends from ONE pot per review, in a fixed order — home CAP
+    // first and strict, then platoons and their air, pickets, buildings sharing what is left by a
+    // weighted draw. Config-file-only: these are doctrine knobs, not player taste, so there is no
+    // slider for them.
+    // Home-CAP fighters the commander keeps over its own airbases before it will spend on anything
+    // else (user decision 2026-09-14: "strict" — while short, nothing below it is bought).
+    internal static int HomeCapBaseline { get => Get("Commander", "HomeCapBaseline", 2); set => Set("Commander", "HomeCapBaseline", value); }
+    // One more home-CAP fighter per this many tracked enemy aircraft inside 30 km of the commander's
+    // airbases. Two: a raid is a pair, and the wing scales with what is actually spotted, not with
+    // what might exist.
+    internal static int HomeCapPerEnemyAircraft { get => Get("Commander", "HomeCapPerEnemyAircraft", 2); set => Set("Commander", "HomeCapPerEnemyAircraft", value); }
+    // Ceiling on home-CAP fighters wanted. 4 (user decision 2026-09-14, replacing "no limit"): each
+    // side's home CAP counted as enemy aircraft for the other, so 2 + 1 per 2 fed itself and both
+    // sides bought CAP faster and faster. Threats beyond the ceiling are met by platoons requesting
+    // CAP over themselves when enemy aircraft appear near them, not by more fighters over the base.
+    internal static int HomeCapMax { get => Get("Commander", "HomeCapMax", 4); set => Set("Commander", "HomeCapMax", value); }
+    // Relative weights of the three lower rungs in each review's draw (platoons and their air /
+    // air-delivered pickets / buildings). Platoons at 60: "the map is huge, so there are nearly
+    // always more platoons that could be built" (user decision 2026-09-14) — the draw adds
+    // variability per review, not per commander, and the rung floor below keeps the other two
+    // always reachable.
+    internal static float LadderPlatoonWeight { get => Get("Commander", "LadderPlatoonWeight", 60f); set => Set("Commander", "LadderPlatoonWeight", value); }
+    internal static float LadderPicketWeight { get => Get("Commander", "LadderPicketWeight", 20f); set => Set("Commander", "LadderPicketWeight", value); }
+    internal static float LadderBuildingWeight { get => Get("Commander", "LadderBuildingWeight", 20f); set => Set("Commander", "LadderBuildingWeight", value); }
+    // Percent of the post-CAP remainder reserved for every rung that has open demand, so the weighted
+    // draw cannot starve pickets or buildings however heavy the platoon weight is. Ten percent of the
+    // remainder per demanding rung; money nobody spends stays in the balance.
+    internal static float LadderRungFloorPercent { get => Get("Commander", "LadderRungFloorPercent", 10f); set => Set("Commander", "LadderRungFloorPercent", value); }
 
     internal static KeyboardShortcut PrimaryAction { get => GetShortcut("PrimaryAction", KeyCode.Mouse0, "Select units and place world targets."); set => Set("Keybinds", "PrimaryAction", value); }
     internal static KeyboardShortcut SecondaryAction { get => GetShortcut("SecondaryAction", KeyCode.Mouse1, "Issue move orders."); set => Set("Keybinds", "SecondaryAction", value); }
@@ -436,7 +518,6 @@ internal static class CommanderSettings
         _ = OperationsPlatoonSize;
         _ = OperationsDebugLog;
         _ = OperationsReservePlatoons;
-        _ = OperationsMaxPlatoons;
         _ = OperationsRecipeArmour;
         _ = OperationsRecipeCarrier;
         _ = OperationsRecipeAirDefence;
@@ -446,10 +527,23 @@ internal static class CommanderSettings
         _ = OperationsOffensiveSpendFraction;
         _ = CasLossCooldownMinutes;
         _ = AirborneCeiling;
+        _ = PackageFormUpSeconds;
+        _ = RotaryCasRangeMeters;
+        _ = AradClusterMinimum;
         _ = OperationsHeliInsertionEnabled;
         _ = OperationsHeliInsertionOffRoadMeters;
         _ = OperationsHeliInsertionLimit;
         _ = OperationsHeliInsertionCooldownMinutes;
+        _ = DefenceArcStandoffMeters;
+        _ = BoundMeters;
+        _ = OffRoadRangeMeters;
+        _ = HomeCapBaseline;
+        _ = HomeCapPerEnemyAircraft;
+        _ = HomeCapMax;
+        _ = LadderPlatoonWeight;
+        _ = LadderPicketWeight;
+        _ = LadderBuildingWeight;
+        _ = LadderRungFloorPercent;
         _ = AirCommandMode;
         _ = AwacsRadiusKm;
         _ = CasRadiusKm;

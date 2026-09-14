@@ -643,7 +643,50 @@ internal sealed partial class CommanderAirCommandService
         return result;
     }
 
-    private static void AutoConfigureRoleLoadout(AirMissionOption option)
+    /// <summary>
+    /// The AIR window's own auto-configure, exposed for the AI buyers (one definition, two callers):
+    /// the best loadout the hardpoint picker can build for this airframe and mission mode — the
+    /// per-group best mount by the mode's scorer, conflicts resolved the window's way. With
+    /// <paramref name="preferArhMissiles"/> an active-radar-homing air-to-air missile outranks the
+    /// raw score inside its group (the home-CAP rule, user decision 2026-09-14), so the CAP gets
+    /// the fighter's radar missiles when it has them and its best other A/A when it does not.
+    /// </summary>
+    internal static bool TryBuildRoleLoadout(
+        AircraftDefinition definition,
+        FactionHQ hq,
+        AirCommandMode mode,
+        bool preferArhMissiles,
+        out Loadout loadout,
+        out float score)
+    {
+        loadout = null!;
+        score = 0f;
+        AirMissionOption? option = CreateVariableLoadoutOption(definition, hq, mode);
+        if (option == null)
+        {
+            return false;
+        }
+
+        // The commander's own builder always prefers the named CAS ordnance (design SS1); the
+        // player's AIR window never does, so its weapon list keeps its unweighted order.
+        AutoConfigureRoleLoadout(option, preferArhMissiles, preferCasOrdnance: true);
+        score = option.Score;
+        if (score <= 0f)
+        {
+            // No mountable weapon scores for this mode at all — a ground-attack-only aeroplane is
+            // not a CAP candidate however its role data reads, and vice versa. Capability is what
+            // the loadout can actually do, not what the data sheet says the airframe is for
+            // (user decision 2026-09-14: a Compass with Scythes is a CAP candidate).
+            return false;
+        }
+
+        loadout = option.BuildLoadout();
+        NormalizeLoadoutLength(loadout, definition);
+        return true;
+    }
+
+    private static void AutoConfigureRoleLoadout(
+        AirMissionOption option, bool preferArhMissiles = false, bool preferCasOrdnance = false)
     {
         for (int groupIndex = 0; groupIndex < option.HardpointGroups.Count; groupIndex++)
         {
@@ -652,7 +695,16 @@ internal sealed partial class CommanderAirCommandService
             float bestScore = 0f;
             for (int mountIndex = 0; mountIndex < group.Mounts.Count; mountIndex++)
             {
-                float score = ScoreMount(group.Mounts[mountIndex], option.Mode) * group.PhysicalMountCount;
+                WeaponMount mount = group.Mounts[mountIndex];
+                float score = ScoreMount(mount, option.Mode, preferCasOrdnance) * group.PhysicalMountCount;
+                if (preferArhMissiles && mount.info != null && IsArhAirToAirMissile(mount.info))
+                {
+                    // Big enough to win its group outright, small enough to stay out of the loadout
+                    // score the caller reads (score is recomputed from the built loadout, not from
+                    // these per-group numbers, so this only decides WHICH mount is picked).
+                    score += 1000f;
+                }
+
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -800,11 +852,11 @@ internal sealed partial class CommanderAirCommandService
         return true;
     }
 
-    private static float ScoreMount(WeaponMount mount, AirCommandMode mode)
+    private static float ScoreMount(WeaponMount mount, AirCommandMode mode, bool preferCasOrdnance = false)
     {
         Loadout loadout = new();
         loadout.weapons.Add(mount);
-        return ScoreLoadout(loadout, mode);
+        return ScoreLoadout(loadout, mode, null, preferCasOrdnance);
     }
 
     private static string GetHardpointSetName(HardpointSet set, int index)
@@ -819,6 +871,32 @@ internal sealed partial class CommanderAirCommandService
         if (info != null && !string.IsNullOrWhiteSpace(info.weaponName)) return info.weaponName;
         if (!string.IsNullOrWhiteSpace(mount.jsonKey)) return mount.jsonKey;
         return mount.name;
+    }
+
+    /// <summary>
+    /// Whether a built loadout carries the game's own airborne radar — a mount whose prefab holds a
+    /// <c>Radar</c> component, which is exactly what <see cref="GetSpecialAirSystem"/> calls
+    /// <see cref="SpecialAirSystem.Radar"/>. The AWACS candidate test (design.md,
+    /// smarter-air-wing_20260914 Section 4): the mode's scorer also rewards a jamming pod, and a
+    /// jammer is not an early-warning aircraft.
+    /// </summary>
+    internal static bool LoadoutHasRadarSystem(Loadout? loadout)
+    {
+        if (loadout?.weapons == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < loadout.weapons.Count; i++)
+        {
+            WeaponMount? mount = loadout.weapons[i];
+            if (mount != null && GetSpecialAirSystem(mount) == SpecialAirSystem.Radar)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static SpecialAirSystem GetSpecialAirSystem(WeaponMount mount)

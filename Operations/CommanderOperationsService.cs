@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -87,6 +87,20 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// (T9).</summary>
         internal readonly List<CommanderRequisition> Requisitions = new();
 
+        /// <summary>
+        /// Picket missions on a point away from the front still short of <c>PointsMinGarrison</c>
+        /// after this review's <c>FillPickets</c> — what <c>PicketsNeedThePool</c> reads
+        /// (DECISION-013: pickets take pool vehicles ahead of new platoon formation).
+        /// </summary>
+        internal int ShortPicketMissions = 0;
+
+        /// <summary>
+        /// Pool size the last "no purpose for a new platoon" line reported, or -1 while the gate is
+        /// open. The <c>ReportInsertionDenial</c> de-duplication convention: a review runs every
+        /// 30 s and the same line every time is noise nobody reads, so it is logged once per change.
+        /// </summary>
+        internal int NoPurposeLoggedPool = -1;
+
         /// <summary>Minutes of pressure accrued since the last attack (design SS3).</summary>
         internal float Pressure = 0f;
 
@@ -135,10 +149,78 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         internal readonly Dictionary<Aircraft, IssuedAirTask> AirIssued = new();
 
         /// <summary>
+        /// Airframes the idle sweep has already reported (design.md, smarter-air-wing_20260914
+        /// Section 6). An airframe with no mission has no RTB record, so the landing order is
+        /// re-issued every review; the log line is not. An airframe that comes back under orders is
+        /// dropped from here, so falling idle again is news again.
+        /// </summary>
+        internal readonly HashSet<Aircraft> IdleSweepReported = new();
+
+        /// <summary>
+        /// Aircraft that registered into this faction while a commander was already running
+        /// (design.md, smarter-air-wing_20260914 Section 15). A stock mission's authored free
+        /// aircraft exist before that moment and are never in here, which is what stops the stray
+        /// adoption below from seizing aircraft the mission author put in the sky on purpose.
+        /// </summary>
+        internal readonly HashSet<Aircraft> RegisteredWhileCommanded = new();
+
+        /// <summary>
         /// Picket insertion (design.md, heli-picket-insertion_20260913): the open insertion records
         /// — one per requested flight, bound to the picket mission it delivers for.
         /// </summary>
         internal readonly List<CommanderInsertion> Insertions = new();
+
+        /// <summary>
+        /// Home CAP (design.md, commander-priorities_20260914, rung 1): the fighters the ladder bought
+        /// to hold the standing patrol over the commander's own airbases. Only these count toward the
+        /// home CAP's size, and they are never lent to sorties — a sortie's escort is bought
+        /// separately in rung 2.
+        /// </summary>
+        internal readonly HashSet<Aircraft> HomeCapAirframes = new();
+
+        /// <summary>
+        /// Last "enemy aircraft tracked within <c>CapLossRadiusMeters</c> of this fighter" observation
+        /// per home-CAP fighter, refreshed by <c>MaintainHomeCap</c> on the defence review's fast
+        /// clock. When the fighter dies, its last observation decides whether the death was a loss to
+        /// enemy air (which buys another fighter) or an ordinary ground loss (which does not).
+        /// </summary>
+        internal readonly Dictionary<Aircraft, bool> HomeCapEnemyAirNear = new();
+
+        /// <summary>
+        /// Scaled <c>Time.time</c> of each home-CAP fighter lost to enemy air, pruned to the
+        /// <c>CapLossMemoryMinutes</c> window — one more wanted CAP fighter per loss inside it.
+        /// </summary>
+        internal readonly List<float> CapLossTimes = new();
+
+        /// <summary>
+        /// Home-CAP fighters currently lent forward to a sortie (design.md,
+        /// smarter-air-wing_20260914 Section 9). They are still in <see cref="HomeCapAirframes"/>,
+        /// so the ladder counts them as held; this set is what the recall walks and what the
+        /// <c>ladder:</c> line reports.
+        /// </summary>
+        internal readonly HashSet<Aircraft> LentHomeCap = new();
+
+        /// <summary>Scaled <c>Time.time</c> since which no hostile aircraft has been tracked inside
+        /// the base ring, or negative while one is. The loan's quiet clock.</summary>
+        internal float HomeCapQuietSince = -1f;
+
+        /// <summary>
+        /// Scaled <c>Time.time</c> at which each airframe was last moved from a quiet sortie to one
+        /// in contact (design.md, smarter-air-wing_20260914 Section 10). The hysteresis that stops
+        /// two short fights taking the same aeroplane off each other every review.
+        /// </summary>
+        internal readonly Dictionary<Aircraft, float> AirRetaskedAt = new();
+
+        /// <summary>
+        /// The priority ladder's picket share for this HQ, granted at each ladder review and spent
+        /// down by insertion flights as they charge (design Section 3, rung 3). Zero until the
+        /// ladder grants one; the next ladder review overwrites whatever was not consumed.
+        /// </summary>
+        internal float InsertionAllowance;
+
+        /// <summary>Insertion money actually charged since the last <c>ladder:</c> line, so the line
+        /// reports the picket rung's spend when it happens rather than when it was granted.</summary>
+        internal float InsertionSpentSinceLadder;
 
         /// <summary>Scaled <c>Time.time</c> until which a point that lost an insertion flight will
         /// not ask for another, keyed by the point (the ObservedFloors key convention).</summary>
@@ -147,6 +229,15 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// <summary>Last decline reason per point, so a declined insertion logs once per reason
         /// rather than once per 30 s review (the ReportAirDenial convention).</summary>
         internal readonly Dictionary<CommanderStrategicPoint, string> InsertionDenials = new();
+
+        /// <summary>How many insertion flights this commander has lost in a row with no successful
+        /// drop in between — the commander-wide pause's counter, reset by the next drop.</summary>
+        internal int InsertionLossStreak;
+
+        /// <summary>Scaled <c>Time.time</c> until which this commander sends no insertion at all
+        /// after a run of losses; zero when no pause is running. The per-point cooldown alone only
+        /// moves the bleeding to the next hilltop.</summary>
+        internal float InsertionPauseUntil;
     }
 
     public void TickPersistent()
@@ -203,6 +294,10 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             PlanInsertions(hq, state);
             PlanOffensive(hq, state);
             UpdatePressure(hq, state);
+            // Addendum 2026-09-14 §3: reinforcement requests are sized here — after the planning
+            // passes that decide which missions exist this review, before AssignPlatoons so a
+            // request raised now is manned by the assignment pass of this same review.
+            ReviewReinforcements(hq, state);
             // B1 fix: every mission this review's planning may have just opened (a forward base, a
             // picket or an attack, whether from PlanOffensive above or from the pressure clock inside
             // UpdatePressure) is manned here, before UpdateAttacks below ever tests an axis for
@@ -263,15 +358,36 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
                     platoon.Leader = FirstLiveMember(platoon);
                 }
 
+                // ground-tactics §4, ahead of every other branch: a platoon answering a
+                // reinforcement request at a point that is STILL HELD never joins its ring — it
+                // counter-attacks from a flank, or screens the approach — so this has to be decided
+                // before the march branch drives it onto the point and before the hold branch puts
+                // it on a post.
+                if (DriveReinforcement(entry.Key, platoon))
+                {
+                    continue;
+                }
+
                 if (platoon.State == CommanderPlatoonState.Holding)
                 {
+                    // Addendum 2026-09-14 §2: a quiet platoon holding a point (or the reserve
+                    // ring) that comes under attack is marked in contact here, detection only —
+                    // it keeps standing on the posts below.
+                    DetectHoldingContact(entry.Key, platoon);
+
                     // Root cause of the reserve thrash: these must feed platoon.Issued too, the same
                     // as IssuePlatoonMove below, or CountInCohesion keeps comparing a holding
                     // platoon's real position against the stale formation slot it arrived on rather
                     // than the post it is actually standing on.
                     if (platoon.Mission?.Point != null)
                     {
-                        DriveToHoldPosts(platoon.Mission.Point, platoon.Members, platoon.Issued);
+                        // ground-tactics §2: while the point is in contact the garrison stands on a
+                        // defence arc facing the threat instead of its ring; the ring is what it
+                        // returns to when the fight is over.
+                        if (!DriveDefenceArc(entry.Key, platoon, platoon.Mission.Point))
+                        {
+                            DriveToHoldPosts(entry.Key, platoon.Mission.Point, platoon.Members, platoon.Issued);
+                        }
                     }
                     else if (platoon.Mission?.Kind == CommanderMissionKind.Reserve)
                     {
@@ -287,10 +403,26 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
                     continue;
                 }
 
+                // ground-tactics §3: an attack past its release point, and anything whose
+                // destination is within a kilometre of a tracked enemy, crosses the ground in
+                // bounds rather than taking one long leg the game's routing drives down a road.
+                if (DriveBounds(entry.Key, platoon))
+                {
+                    continue;
+                }
+
+                if (platoon.Posture != CommanderGroundPosture.Ring)
+                {
+                    platoon.ClearGroundPosture();
+                }
+
                 CommanderMoveService.IssuePlatoonMove(
                     platoon.Members, platoon.Objective, CommanderFormationShape.Wedge, platoon.Issued);
             }
 
+            // Addendum 2026-09-14 §2: the same detection for points nobody is holding a platoon
+            // on — a picket detachment or an un-manned forward base.
+            DetectMissionContact(entry.Key, entry.Value);
             StagePool(entry.Key, entry.Value);
         }
     }
@@ -351,6 +483,42 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
     /// the tracking has decayed), one movement tick too short (a contact blinking in and out of
     /// tracking would flip the platoon between line and column every 5 s).</summary>
     private const float ContactHoldSeconds = 20f;
+
+    /// <summary>
+    /// How fresh a member loss must be to count as contact evidence for a platoon or detachment
+    /// standing on its posts (addendum 2026-09-14 §2): 60 s is two reviews — long enough that a
+    /// loss the once-per-review sweep stamps up to 30 s after the kill still carries the 20 s
+    /// contact hold through the next review — and short enough that a loss in a skirmish that is
+    /// already over does not keep a point "in contact" for a fifth of the threat memory window.
+    /// </summary>
+    private const float LossContactSeconds = 60f;
+
+    /// <summary>
+    /// The odds at which a platoon in contact is considered outnumbered and asks for
+    /// reinforcements (addendum 2026-09-14 §3): 1.0 — equal numbers is already a fair fight for
+    /// the defender, and below it the platoon is outnumbered. Every point of it above 1.0 makes a
+    /// request that much harder to open; the value is deliberately not a setting, it is the
+    /// doctrine's own number.
+    /// </summary>
+    private const float ReinforceOddsRatio = 1f;
+
+    /// <summary>
+    /// The most platoons one reinforcement request may ask for. Six since the pickets-first doctrine
+    /// (DECISION-013): the cap of three bound 24 times in one match, so a forward base facing a real
+    /// push simply never got the answer it had measured. Six is a counter-attack in its own right,
+    /// and it is affordable now for the reason the old three was not — platoons no longer form for
+    /// every point on the map, so the ones that exist are available to send.
+    /// </summary>
+    private const int MaxReinforcementPlatoons = 6;
+
+    /// <summary>
+    /// How long every assigned platoon must stay un-outnumbered on paper before an open
+    /// reinforcement request closes and the reinforcing platoons return to reserve (addendum
+    /// 2026-09-14 §3): 120 s is four reviews — long enough that one quiet review while tracking
+    /// blinks cannot close a request and send the reinforcements home, short enough that a fight
+    /// that is genuinely over releases them inside two minutes.
+    /// </summary>
+    private const float ReinforceReleaseSeconds = 120f;
 
     /// <summary>
     /// The contact drill. A platoon on the march travels the game's road graph in whatever order
@@ -437,6 +605,274 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         return distance <= range;
     }
 
+    /// <summary>
+    /// Addendum 2026-09-14 §2, the detection-only half of the contact drill: a platoon Holding
+    /// its posts — a forward base garrison or the reserve ring — that sees a tracked hostile
+    /// ground unit inside <see cref="ContactRangeMeters"/> of its leader, or has lost a member
+    /// inside <see cref="LossContactSeconds"/>, is marked in contact for the same
+    /// <see cref="ContactHoldSeconds"/> hold the marching drill uses, and is NOT moved off its
+    /// posts: the posts it already stands on are its fighting position. The mark is what the
+    /// "platoon in contact" air demand, the reinforcement odds rule and the marker's
+    /// <c>In contact</c> flag all read.
+    /// </summary>
+    private void DetectHoldingContact(FactionHQ hq, CommanderPlatoon platoon)
+    {
+        Unit? leader = platoon.Leader;
+        if (leader == null || leader.disabled)
+        {
+            return;
+        }
+
+        GlobalPosition here = leader.transform.GlobalPosition();
+        bool wasInContact = platoon.InContactUntil >= Time.time;
+        if (TryNearestTrackedHostile(hq, here, ContactRangeMeters, out GlobalPosition hostile, out float distance))
+        {
+            platoon.InContactUntil = Time.time + ContactHoldSeconds;
+            platoon.ContactBearingAnchor = hostile;
+            if (!wasInContact)
+            {
+                LogPostContact(hq, platoon, distance);
+            }
+
+            return;
+        }
+
+        if (LossIsRecent(platoon.LastLossAt, Time.time, LossContactSeconds))
+        {
+            platoon.InContactUntil = Time.time + ContactHoldSeconds;
+            // Nothing is tracked to face: the contact sortie orbits the platoon itself, the only
+            // evidence of where the fight is.
+            platoon.ContactBearingAnchor = here;
+            if (!wasInContact)
+            {
+                LogPostContact(hq, platoon, -1f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The same detection for a point nobody is holding a platoon on (addendum 2026-09-14 §2):
+    /// a picket detachment, or a forward base waiting for its garrison, is in contact while a
+    /// tracked hostile ground unit is inside <see cref="ContactRangeMeters"/> of the point or a
+    /// picket member was lost inside <see cref="LossContactSeconds"/>. The clock it sets is the
+    /// mission's own (<see cref="CommanderOperationsMission.ContactUntil"/>), which the air
+    /// demand reads so a point under attack raises CAS without a platoon on it.
+    /// </summary>
+    private void DetectMissionContact(FactionHQ hq, OperationsState state)
+    {
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if ((mission.Kind != CommanderMissionKind.Picket && mission.Kind != CommanderMissionKind.ForwardBase)
+                || mission.Point == null)
+            {
+                continue;
+            }
+
+            if (TryNearestTrackedHostile(hq, mission.Point.Position, ContactRangeMeters, out _, out _)
+                || LossIsRecent(mission.LastLossAt, Time.time, LossContactSeconds))
+            {
+                mission.ContactUntil = Time.time + ContactHoldSeconds;
+            }
+        }
+    }
+
+    /// <summary>
+    /// True while <paramref name="members"/> holds at least one vehicle the sweep is about to
+    /// remove for dying, disappearing or changing hands — the loss that counts as contact
+    /// evidence. A vehicle the player has merely taken orders on is a hand-over, not a loss, and
+    /// does not count.
+    /// </summary>
+    private static bool HasCombatLoss(FactionHQ hq, IReadOnlyList<Unit> members)
+    {
+        for (int i = 0; i < members.Count; i++)
+        {
+            Unit? unit = members[i];
+            if (unit == null || unit.disabled || unit.NetworkHQ != hq)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Pure, for the self-check. A member lost at <paramref name="lastLossAt"/> counts as contact
+    /// evidence for <paramref name="windowSeconds"/> after it happened, inclusive at the boundary
+    /// — the convention the rest of the mod uses. A negative timestamp (never lost one) never
+    /// counts.
+    /// </summary>
+    internal static bool LossIsRecent(float lastLossAt, float now, float windowSeconds)
+    {
+        return lastLossAt >= 0f && now - lastLossAt <= windowSeconds;
+    }
+
+    /// <summary>
+    /// Pure, for the self-check. Platoons of reinforcement one platoon outnumbered on paper asks
+    /// for (addendum 2026-09-14 §3): none while the hostiles it has observed do not exceed its own
+    /// live strength × <paramref name="oddsRatio"/> — equal numbers is already a fair fight for
+    /// the defender — otherwise one platoon per <paramref name="platoonSize"/> of the deficit,
+    /// rounded up, capped at <see cref="MaxReinforcementPlatoons"/>.
+    /// </summary>
+    internal static int ReinforcementsFor(int observedHostiles, int strength, int platoonSize, float oddsRatio)
+    {
+        if (observedHostiles <= strength * oddsRatio)
+        {
+            return 0;
+        }
+
+        int deficit = observedHostiles - strength;
+        return Mathf.Min(MaxReinforcementPlatoons, Mathf.CeilToInt(deficit / Mathf.Max(1f, platoonSize)));
+    }
+
+    /// <summary>
+    /// Pure, for the self-check. An open reinforcement request releases once the release clock
+    /// has run <paramref name="releaseSeconds"/> from <paramref name="belowSince"/> — inclusive at
+    /// the boundary, the convention the rest of the mod uses. A negative start (never
+    /// un-outnumbered) never releases.
+    /// </summary>
+    internal static bool ReinforcementReleases(float belowSince, float now, float releaseSeconds)
+    {
+        return belowSince >= 0f && now - belowSince >= releaseSeconds;
+    }
+
+    /// <summary>
+    /// Addendum 2026-09-14 §3, once per review per mission: a holding or attacking platoon in
+    /// contact whose observed hostiles exceed its own live strength ×
+    /// <see cref="ReinforceOddsRatio"/> opens a reinforcement request on its mission, and the
+    /// request rides <see cref="CommanderOperationsMission.WantedPlatoons"/> — raised by the
+    /// capped count, lowered again when it closes — so the existing assignment pass, the strip
+    /// step beside it and the order book all serve a request with no changes.
+    /// <para>Readings are per platoon, the spec's own rule, and the mission takes the WORST
+    /// in-contact platoon's request rather than the sum: two platoons at one point observe the
+    /// same hostiles, and summing would count every one of them twice. The release timer runs
+    /// while NO assigned platoon is outnumbered on paper — reinforcing platoons join the test
+    /// once they are assigned — and the request closes when that has held for
+    /// <see cref="ReinforceReleaseSeconds"/>, sending the reinforcing platoons back to reserve.</para>
+    /// </summary>
+    private void ReviewReinforcements(FactionHQ hq, OperationsState state)
+    {
+        for (int m = 0; m < state.Missions.Count; m++)
+        {
+            CommanderOperationsMission mission = state.Missions[m];
+            if (mission.Kind != CommanderMissionKind.ForwardBase && mission.Kind != CommanderMissionKind.Attack)
+            {
+                continue;
+            }
+
+            int requested = 0;
+            CommanderPlatoon? requester = null;
+            int observedForLog = 0;
+            int strengthForLog = 0;
+            bool anyReadable = false;
+            bool allBelow = true;
+            for (int i = 0; i < mission.Assigned.Count; i++)
+            {
+                CommanderPlatoon platoon = mission.Assigned[i];
+                if (platoon.State != CommanderPlatoonState.Holding && platoon.State != CommanderPlatoonState.Attacking)
+                {
+                    continue;
+                }
+
+                Unit? leader = platoon.Leader;
+                if (leader == null || leader.disabled)
+                {
+                    // Unreadable this instant; the sweep settles it next review.
+                    continue;
+                }
+
+                anyReadable = true;
+                int observed = EffectiveObserved(
+                    CountObserved(hq, leader.transform.GlobalPosition()),
+                    GetObservedFloor(state, ObservedFloorKey(mission.Point, mission.TargetAirbase)));
+                int strength = platoon.Members.Count;
+                if (platoon.InContactUntil >= Time.time)
+                {
+                    int need = ReinforcementsFor(
+                        observed, strength, Mathf.Max(1, CommanderSettings.OperationsPlatoonSize), ReinforceOddsRatio);
+                    if (need > requested)
+                    {
+                        requested = need;
+                        requester = platoon;
+                        observedForLog = observed;
+                        strengthForLog = strength;
+                    }
+                }
+
+                // The release test reads every platoon, in contact or not: the spec's release is
+                // about the odds picture, not about the shooting still going.
+                if (observed >= strength)
+                {
+                    allBelow = false;
+                }
+            }
+
+            if (requested > 0)
+            {
+                if (requested != mission.ReinforcePlatoons && requester != null)
+                {
+                    CommanderAiLog.Note(
+                        hq,
+                        $"{requester.Name} requests {requested} platoon(s) of reinforcements at {mission.Label} "
+                            + $"({observedForLog} observed vs {strengthForLog}).");
+                    mission.WantedPlatoons += requested - mission.ReinforcePlatoons;
+                    mission.ReinforcePlatoons = requested;
+                }
+
+                // A fight that still needs platoons keeps the ones it has, however quiet.
+                mission.ReinforceBelowSince = -1f;
+            }
+            else if (mission.ReinforcePlatoons > 0)
+            {
+                if (!anyReadable)
+                {
+                    // Nothing left to read the fight with: the garrison is gone and the request
+                    // closes now rather than holding platoons against a fight nobody is in.
+                    CloseReinforcementRequest(hq, mission);
+                }
+                else if (allBelow)
+                {
+                    if (mission.ReinforceBelowSince < 0f)
+                    {
+                        mission.ReinforceBelowSince = Time.time;
+                    }
+
+                    if (ReinforcementReleases(mission.ReinforceBelowSince, Time.time, ReinforceReleaseSeconds))
+                    {
+                        CloseReinforcementRequest(hq, mission);
+                    }
+                }
+                else
+                {
+                    mission.ReinforceBelowSince = -1f;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Closes an open reinforcement request (addendum 2026-09-14 §3): the wanted count falls back
+    /// to its baseline, and every platoon that was answering the request is released — the
+    /// assignment pass's reserve bucket picks them up later in the same review and sends them
+    /// home.
+    /// </summary>
+    private static void CloseReinforcementRequest(FactionHQ hq, CommanderOperationsMission mission)
+    {
+        mission.WantedPlatoons = Mathf.Max(0, mission.WantedPlatoons - mission.ReinforcePlatoons);
+        mission.ReinforcePlatoons = 0;
+        mission.ReinforceBelowSince = -1f;
+        for (int i = mission.Assigned.Count - 1; i >= 0; i--)
+        {
+            if (mission.Assigned[i].ReinforcesLabel == mission.Label)
+            {
+                ReleaseFromMission(mission.Assigned[i]);
+            }
+        }
+
+        CommanderAiLog.Note(hq, $"{mission.Label}: reinforcement request closed.");
+    }
+
     /// <summary>First live member the player is not driving; failing that, any live member.</summary>
     private static Unit? FirstLiveMember(CommanderPlatoon platoon)
     {
@@ -489,6 +925,56 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             true);
         Expect(failures, "exactly half the platoon closed up counts as arrived", HasArrived(100f, 400f, 3, 6), true);
         Expect(failures, "a one-vehicle platoon arrives when its leader does", HasArrived(0f, 400f, 1, 1), true);
+    }
+
+    /// <summary>
+    /// The loss window that carries contact for a platoon standing on its posts (addendum
+    /// 2026-09-14 §2), at its named boundaries.
+    /// </summary>
+    private static void CheckContactEvidence(List<string> failures)
+    {
+        Expect(failures, "a member lost exactly at the loss window's edge still counts as contact", LossIsRecent(0f, 60f, 60f), true);
+        Expect(failures, "a member lost just past the loss window no longer counts", LossIsRecent(0f, 60.5f, 60f), false);
+        Expect(failures, "a loss right now counts", LossIsRecent(60f, 60f, 60f), true);
+        Expect(failures, "a platoon that never lost a member is not in contact by loss", LossIsRecent(-1f, 0f, 60f), false);
+        Expect(
+            failures,
+            "the loss window outlasts the contact hold, or a loss would carry no contact at all",
+            LossContactSeconds > ContactHoldSeconds,
+            true);
+        Expect(
+            failures,
+            "the loss window covers a sweep-stamped loss plus one hold, so evidence is never stale on arrival",
+            LossContactSeconds >= ReviewIntervalSeconds + ContactHoldSeconds,
+            true);
+    }
+
+    /// <summary>
+    /// The reinforcement odds rule, count arithmetic, cap and release timer (addendum
+    /// 2026-09-14 §3), at their named boundaries.
+    /// </summary>
+    private static void CheckReinforcements(List<string> failures)
+    {
+        Expect(failures, "equal numbers is already a fair fight for the defender: no reinforcements", ReinforcementsFor(6, 6, 6, ReinforceOddsRatio), 0);
+        Expect(failures, "fewer observed than strength asks for nothing", ReinforcementsFor(5, 6, 6, ReinforceOddsRatio), 0);
+        Expect(failures, "one hostile over strength asks for one platoon", ReinforcementsFor(7, 6, 6, ReinforceOddsRatio), 1);
+        Expect(failures, "a deficit of one platoon and a bit rounds up to two platoons", ReinforcementsFor(13, 6, 6, ReinforceOddsRatio), 2);
+        Expect(failures, "a deficit of exactly two platoons asks for exactly two", ReinforcementsFor(18, 6, 6, ReinforceOddsRatio), 2);
+        Expect(failures, "an enormous deficit is capped at the maximum", ReinforcementsFor(100, 1, 6, ReinforceOddsRatio), MaxReinforcementPlatoons);
+        Expect(failures, "a deficit of exactly six platoons asks for all six", ReinforcementsFor(42, 6, 6, ReinforceOddsRatio), 6);
+        Expect(failures, "a deficit of seven platoons is still capped at six", ReinforcementsFor(48, 6, 6, ReinforceOddsRatio), 6);
+        Expect(failures, "the cap is large enough to answer a push a garrison can measure", MaxReinforcementPlatoons >= 6, true);
+        Expect(failures, "a sterner odds ratio raises the bar", ReinforcementsFor(9, 6, 6, 1.5f), 0);
+        Expect(failures, "a sterner odds ratio still asks once the bar is cleared", ReinforcementsFor(10, 6, 6, 1.5f), 1);
+        Expect(failures, "the release timer fires exactly at its boundary", ReinforcementReleases(0f, 120f, ReinforceReleaseSeconds), true);
+        Expect(failures, "the release timer holds one moment short", ReinforcementReleases(0f, 119.9f, ReinforceReleaseSeconds), false);
+        Expect(failures, "a request never un-outnumbered never releases", ReinforcementReleases(-1f, 1000f, ReinforceReleaseSeconds), false);
+        Expect(
+            failures,
+            "the release timer outlasts one review, or one quiet review would close a request",
+            ReinforceReleaseSeconds > ReviewIntervalSeconds,
+            true);
+        Expect(failures, "the reinforcement cap is at least one platoon", MaxReinforcementPlatoons >= 1, true);
     }
 
     /// <summary>
@@ -573,7 +1059,11 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
     /// (design SS1: a platoon forms on what it has and requisitions the rest — a platoon of one is
     /// <see cref="CommanderPlatoonState.Forming"/>, not a platoon that never exists).
     /// </summary>
-    private CommanderPlatoon? TryFormPlatoon(FactionHQ hq, OperationsState state, int wantedSize)
+    /// <param name="purpose">What this platoon is being built for, already phrased for the log —
+    /// <c>for ForwardBase CROSSROADS 13</c>, <c>for Attack Maris Airport</c> or <c>as the
+    /// reserve</c> (DECISION-013: a platoon forms only for a purpose facing the enemy, and the log
+    /// has to say which one, or a match cannot be read back from it).</param>
+    private CommanderPlatoon? TryFormPlatoon(FactionHQ hq, OperationsState state, int wantedSize, string purpose)
     {
         BuildRecipeArrays(state.Pool);
         int[] want =
@@ -607,7 +1097,7 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             ? ChooseFormUpPoint(platoon.Leader.transform.GlobalPosition())
             : CommanderCaptureService.GetTerritoryCenter(hq);
         state.Platoons.Add(platoon);
-        CommanderAiLog.Note(hq, $"forms {platoon.Name}: {platoon.Members.Count}/{wantedSize} vehicles.");
+        CommanderAiLog.Note(hq, $"forms {platoon.Name} {purpose}: {platoon.Members.Count}/{wantedSize} vehicles.");
         return platoon;
     }
 
@@ -1029,6 +1519,12 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         CheckPressure(failures);
         CheckAirSupport(failures);
         CheckInsertion(failures);
+        CheckMarkerLabels(failures);
+        CheckDetachmentMarkerLabels(failures);
+        CheckAirMarkerLabels(failures);
+        CheckContactEvidence(failures);
+        CheckReinforcements(failures);
+        CheckGroundTactics(failures);
 
         if (failures.Count == 0)
         {
@@ -1080,6 +1576,14 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         if (actual != expected)
         {
             failures.Add($"{name}: expected {expected}, got {actual}");
+        }
+    }
+
+    private static void Expect(List<string> failures, string name, string actual, string expected)
+    {
+        if (actual != expected)
+        {
+            failures.Add($"{name}: expected \"{expected}\", got \"{actual}\"");
         }
     }
 }

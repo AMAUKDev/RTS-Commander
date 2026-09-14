@@ -44,10 +44,146 @@ internal sealed partial class CommanderAirCommandService
         return loadout != null && score > 0f;
     }
 
+    /// <summary>
+    /// The ordnance a commander-built close-air-support loadout prefers above every other
+    /// air-to-ground store (design.md, smarter-air-wing_20260914 Section 1; user decision
+    /// 2026-09-14: "a strong preference for AGM-68 and AGM-48 ordnance in CAS missions"). Matched on
+    /// the designation prefix the game's own asset data carries — the missile definitions read
+    /// <c>AGM-48 </c> (with a trailing space) and <c>AGM-68</c>, and the mounts read
+    /// <c>AGM-48 x4</c>, <c>AGM-68 x2</c> and so on — so a prefix match catches every rack size and
+    /// the unspaced spellings catch a future rename. Verified against the strings in
+    /// <c>NuclearOption_Data/resources.assets</c>, 2026-09-14.
+    /// </summary>
+    private static readonly string[][] PreferredCasOrdnance =
+    {
+        new[] { "AGM-68", "AGM68" },
+        new[] { "AGM-48", "AGM48" },
+    };
+
+    /// <summary>
+    /// What a preferred CAS store adds to its mount's score. Additive and far above the whole range
+    /// an ordinary air-to-ground mount scores (effectiveness x sqrt(stores) x delivery x range
+    /// reaches about 10 for the heaviest rack on the roster), so a hardpoint group that can carry an
+    /// AGM-68 or an AGM-48 always picks it. It is applied inside the scorer, which only ever ranks
+    /// mounts the hardpoint set already offers: it can never make an incompatible store legal, and
+    /// the strip's own acceptance test (<see cref="IsCompatibleAirbase"/> and the mount checks in
+    /// <c>ValidateSelectedLoadout</c>) runs afterwards either way.
+    /// </summary>
+    private const float PreferredCasOrdnanceBonus = 100f;
+
+    /// <summary>How much better these missiles deliver their warhead than an ordinary store of the
+    /// same effectiveness — the standing multiplier the scorer has carried since the AIR window was
+    /// written (lock-on after launch, erratic terminal manoeuvring, launch from behind terrain).
+    /// Unchanged in value; it only moved here so the designation table has one home.</summary>
+    private const float PreferredCasOrdnanceDelivery = 1.42f;
+
+    /// <summary>Where this mount sits in the <see cref="PreferredCasOrdnance"/> table — 0 is the
+    /// most preferred tier (AGM-68), 1 the next (AGM-48), -1 not preferred at all. A store that is
+    /// nuclear, a jammer, or scores nothing against ground is never preferred however it is named:
+    /// the recon variant of the AGM-48 carries a sensor instead of a warhead. Internal (one-word
+    /// widening, Reuse rule 4): the loadout scorer ranks with it and the enemy commander's roster
+    /// line reports with it — one definition of "preferred CAS ordnance", two callers.</summary>
+    internal static int PreferredCasOrdnanceRank(WeaponMount? mount)
+    {
+        WeaponInfo? info = mount?.info;
+        if (info == null || info.nuclear || info.jammer || info.effectiveness.antiSurface <= 0.05f)
+        {
+            return -1;
+        }
+
+        string identity = GetWeaponIdentity(mount, info);
+        for (int tier = 0; tier < PreferredCasOrdnance.Length; tier++)
+        {
+            if (ContainsWeaponToken(identity, PreferredCasOrdnance[tier]))
+            {
+                return tier;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Whether this mount carries any preferred CAS ordnance at all.</summary>
+    internal static bool IsPreferredCasOrdnance(WeaponMount? mount)
+    {
+        return PreferredCasOrdnanceRank(mount) >= 0;
+    }
+
+    /// <summary>The commander's own CAS ranking for one mount — the number
+    /// <see cref="AutoConfigureRoleLoadout"/> picks each hardpoint group's store by. Internal
+    /// (one-word widening): the enemy commander's self-check asserts the ordnance order with it.</summary>
+    internal static float ScoreCasMountForCommander(WeaponMount mount)
+    {
+        return ScoreMount(mount, AirCommandMode.Cas, preferCasOrdnance: true);
+    }
+
+    /// <summary>Whether a built loadout carries any preferred CAS ordnance at all — what the launch
+    /// note and the roster line report.</summary>
+    internal static bool LoadoutHasPreferredCasOrdnance(Loadout? loadout)
+    {
+        if (loadout?.weapons == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < loadout.weapons.Count; i++)
+        {
+            if (IsPreferredCasOrdnance(loadout.weapons[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// What the commander's own CAS loadout for <paramref name="definition"/> ends up carrying:
+    /// whether it got one of the <see cref="PreferredCasOrdnance"/> designations, and the name of
+    /// the heaviest-scoring air-to-ground store it carries either way. False when the airframe has
+    /// no ground-attack loadout at all. What the <c>Air roster</c> line reports (design SS1:
+    /// "AGM-68/AGM-48 available" or "none — falls back to &lt;best A/G&gt;").
+    /// </summary>
+    internal static bool TryDescribeCasOrdnance(
+        AircraftDefinition definition, FactionHQ hq, out bool preferred, out string bestStore)
+    {
+        preferred = false;
+        bestStore = string.Empty;
+        if (!TryBuildRoleLoadout(definition, hq, AirCommandMode.Cas, preferArhMissiles: false, out Loadout loadout, out _))
+        {
+            return false;
+        }
+
+        preferred = LoadoutHasPreferredCasOrdnance(loadout);
+        float best = 0f;
+        for (int i = 0; i < loadout.weapons.Count; i++)
+        {
+            WeaponMount? mount = loadout.weapons[i];
+            if (mount == null)
+            {
+                continue;
+            }
+
+            float score = ScoreMount(mount, AirCommandMode.Cas);
+            if (score > best)
+            {
+                best = score;
+                bestStore = GetWeaponTypeName(mount);
+            }
+        }
+
+        return true;
+    }
+
+    /// <param name="preferCasOrdnance">Rank <see cref="PreferredCasOrdnance"/> above every other
+    /// air-to-ground store (design SS1). Only the commander's own loadout builder passes true: the
+    /// player's AIR window keeps its unweighted weapon list so the preference never reorders what a
+    /// human is choosing from.</param>
     private static float ScoreLoadout(
         Loadout loadout,
         AirCommandMode mode,
-        AircraftDefinition? aircraftDefinition = null)
+        AircraftDefinition? aircraftDefinition = null,
+        bool preferCasOrdnance = false)
     {
         float score = 0f;
         bool hasRadar = false;
@@ -89,6 +225,14 @@ internal sealed partial class CommanderAirCommandService
                     {
                         score += ScoreConventionalWeapon(
                             info.effectiveness.antiSurface, mount, info, ref remainingLaserTargets);
+                        int preferredTier = preferCasOrdnance ? PreferredCasOrdnanceRank(mount) : -1;
+                        if (preferredTier >= 0)
+                        {
+                            // One tier above the next, both far above every ordinary store: the
+                            // AGM-68 wins a hardpoint the AGM-48 could also fill, and either wins
+                            // over anything else the group offers.
+                            score += PreferredCasOrdnanceBonus * (PreferredCasOrdnance.Length - preferredTier);
+                        }
                     }
                     break;
 
@@ -178,7 +322,16 @@ internal sealed partial class CommanderAirCommandService
         float maxRange = Mathf.Max(info.targetRequirements.maxRange, 1000f);
         float rangeFactor = Mathf.Clamp(Mathf.Sqrt(maxRange / 10000f), 0.72f, 1.45f);
         string identity = GetWeaponIdentity(mount, info);
-        if (ContainsWeaponToken(identity, "AGM-48", "AGM48", "AGM-68", "AGM68")) delivery *= 1.42f;
+        // One definition of the preferred designations (Reuse rule 4): this delivery nudge and the
+        // commander's dominant CAS bonus read the same table, so a rename lands in both at once.
+        for (int tier = 0; tier < PreferredCasOrdnance.Length; tier++)
+        {
+            if (ContainsWeaponToken(identity, PreferredCasOrdnance[tier]))
+            {
+                delivery *= PreferredCasOrdnanceDelivery;
+                break;
+            }
+        }
         if (ContainsWeaponToken(identity, "AGM-99", "AGM99")) delivery *= 0.4f;
         if (ContainsWeaponToken(identity, "KINGPIN")) delivery *= 1.35f;
         if (info.glideBomb && ContainsWeaponToken(identity, "CLUSTER")) delivery *= 1.22f;
@@ -298,6 +451,24 @@ internal sealed partial class CommanderAirCommandService
             || info.weaponName?.IndexOf("ARAD", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
+    /// <summary>
+    /// Whether <paramref name="info"/> is an active-radar-homing air-to-air missile — the game's own
+    /// <c>ARHSeeker</c> component on the missile prefab (<c>Missile.Awake</c> reads its seeker off its
+    /// own GameObject, verified by decompile), on a weapon the game types as a missile and scores
+    /// against air. The air test is the same 0.05 the AIR window's loadout label uses for its <c>A/A</c>
+    /// tag — one threshold, two callers. Internal (one-word widening, Reuse rule 4): the enemy
+    /// commander's home-CAP buy classifies a fighter's loadout with the same test — the CAP must be
+    /// flown by an airframe that can shoot at something it has not been handed (user decision
+    /// 2026-09-14: home-CAP fighters carry an ARH missile).
+    /// </summary>
+    internal static bool IsArhAirToAirMissile(WeaponInfo info)
+    {
+        return info != null
+            && info.missile
+            && info.effectiveness.antiAir > 0.05f
+            && info.weaponPrefab?.GetComponentInChildren<ARHSeeker>(true) != null;
+    }
+
     private static void NormalizeLoadoutLength(Loadout loadout, AircraftDefinition definition)
     {
         Aircraft? aircraft = definition.unitPrefab != null
@@ -348,6 +519,31 @@ internal sealed partial class CommanderAirCommandService
     }
 
     /// <summary>
+    /// True when this airframe flies like a helicopter — its prefab carries a rotary pilot. The
+    /// definition-level twin of <see cref="IsRotaryPilot"/> (one definition of "flies like a
+    /// helicopter", read off the prefab instead of a live airframe), for the rotary CAS buy
+    /// (design.md, smarter-air-wing_20260914 Section 2).
+    /// </summary>
+    internal static bool IsRotaryAirframe(AircraftDefinition definition)
+    {
+        Aircraft? prefab = definition.unitPrefab != null ? definition.unitPrefab.GetComponent<Aircraft>() : null;
+        if (prefab?.pilots == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < prefab.pilots.Length; i++)
+        {
+            if (prefab.pilots[i] != null && IsRotaryPilot(prefab.pilots[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// True when the Basegame AI has a flight model for this airframe at all.
     /// <c>Pilot.SetStartingAiState</c> hands <c>PilotType.Plane</c> to <c>AIPilotCombatModes</c> and
     /// <c>Helo</c>/<c>Tiltwing</c> to <c>AIHeloCombatState</c>, and gives <c>PilotType.VTOL</c>
@@ -377,7 +573,12 @@ internal sealed partial class CommanderAirCommandService
         return false;
     }
 
-    private static bool IsCompatibleAirbase(Airbase? airbase, FactionHQ hq, AircraftDefinition definition)
+    /// <summary>Whether <paramref name="airbase"/> is one this faction holds whose hangars carry
+    /// <paramref name="definition"/> in their authored list. Internal (one-word widening, Reuse rule
+    /// 4): this is THE airbase acceptance test — the AIR window's launch gate and the AI buyers'
+    /// candidate gate read the same answer, so a commander can never be refused an aircraft the
+    /// player's own window launches from the same strip.</summary>
+    internal static bool IsCompatibleAirbase(Airbase? airbase, FactionHQ hq, AircraftDefinition definition)
     {
         if (airbase == null || airbase.disabled || !airbase.GetAvailableAircraft().Contains(definition))
         {

@@ -471,11 +471,19 @@ internal sealed partial class CommanderSupplyHeliService
     /// flight to the same queue-and-spawn path the SAM runs ride. The hull is charged at spawn and
     /// refunded on recovery by the existing chain; the vehicles are charged at spawn and never
     /// refunded.
+    /// <para>
+    /// <paramref name="allowance"/> is the priority ladder's rung-3 share for this HQ (design.md,
+    /// commander-priorities_20260914 Section 3): the flight's hull and vehicles are charged against
+    /// it, so the cargo budget is the smaller of what the faction holds and what the rung was
+    /// granted. <paramref name="charged"/> returns the worst-case total the rung's share must cover
+    /// (a hull found free in stock only makes the real flight cheaper).
+    /// </para>
     /// </summary>
     internal bool TryLaunchInsertionAircraft(
-        FactionHQ hq, CommanderStrategicPoint point, GlobalPosition target, out string decline)
+        FactionHQ hq, CommanderStrategicPoint point, GlobalPosition target, float allowance, out string decline, out float charged)
     {
         decline = string.Empty;
+        charged = 0f;
         if (NetworkManagerNuclearOption.i == null
             || !NetworkManagerNuclearOption.i.Server.Active
             || hq == null
@@ -502,18 +510,32 @@ internal sealed partial class CommanderSupplyHeliService
         float bestTotal = float.MaxValue;
         bool bestHasAirDefence = false;
         bool sawVehicleMount = false;
+        bool sawThreatenedRoute = false;
 
         for (int aircraftIndex = 0; aircraftIndex < aircraftOptions.Count; aircraftIndex++)
         {
             CargoAircraftOption aircraft = aircraftOptions[aircraftIndex];
             float hull = Mathf.Max(0f, aircraft.Definition.value);
             // Worst case the hull comes out of funds as well — TrySpawnCargoRunAtAirbase may still
-            // find one free in stock, which only makes the real flight cheaper.
-            float budget = hq.factionFunds - hull;
+            // find one free in stock, which only makes the real flight cheaper. The rung's share
+            // caps it before the balance does, whichever is smaller.
+            float budget = Mathf.Min(hq.factionFunds, Mathf.Max(0f, allowance)) - hull;
             foreach (Airbase airbase in hq.GetAirbases())
             {
                 if (!IsAvailableAirbase(airbase, hq, aircraft.Definition))
                 {
+                    continue;
+                }
+
+                // The operations side's launch gate measured the route from the airbase nearest the
+                // point; the cheapest complete load may sit at a different one, so every candidate
+                // base is put through the same test here. One definition, two callers — a flight is
+                // never dispatched down a leg the gate would have refused.
+                if (airbase.center != null
+                    && CommanderOperationsService.IsInsertionRouteThreatened(
+                        hq, airbase.center.GlobalPosition(), target))
+                {
+                    sawThreatenedRoute = true;
                     continue;
                 }
 
@@ -550,11 +572,28 @@ internal sealed partial class CommanderSupplyHeliService
 
         if (bestAircraft == null || bestAirbase == null || bestLoadout == null)
         {
+            if (sawThreatenedRoute && !sawVehicleMount)
+            {
+                decline = "hostile air defence tracked along every route to the point";
+                return false;
+            }
+
+            // The share, not the balance, was the binding limit when the allowance sits below the
+            // funds — the rung will grant again next ladder review, so the reason says whose
+            // pocket is short.
+            if (sawVehicleMount && allowance < hq.factionFunds)
+            {
+                decline = "the ladder's picket share cannot cover the flight";
+                return false;
+            }
+
             decline = sawVehicleMount
                 ? "cannot afford the picket's vehicles"
                 : "no transport fields mountable ground vehicles";
             return false;
         }
+
+        charged = bestTotal;
 
         QueuedCargoSpawn request = new(
             bestAircraft,

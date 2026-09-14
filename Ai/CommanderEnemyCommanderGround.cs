@@ -177,27 +177,39 @@ internal sealed partial class CommanderEnemyCommanderService
     }
 
     /// <summary>
+    /// Whether this commander is in the market for a hull at all — a dock built and fewer hulls afloat
+    /// than the target. The buy's own early-return test and the priority ladder's rung-2 demand read
+    /// ask the same question (Reuse rule 4, one definition, two callers).
+    /// </summary>
+    private static bool WantsNavalHull(FactionHQ hq)
+    {
+        return CommanderEconomyService.GetNavalDockLevel(hq) > 0 && CountShips(hq) < NavalHullTarget;
+    }
+
+    /// <summary>
     /// Buys a hull through the faction's own naval dock, under the same level gate the player is on:
-    /// no dock, no ships, and each dock level opens the next class. The dock itself is built by the
-    /// economy spender, the same split as mines and factories — one buys units, the other buys the
-    /// ability to buy them.
+    /// no dock, no ships, and each dock level opens the next class. The dock itself is built by rung
+    /// 4 of the priority ladder, the same split as mines and factories — one rung buys units, the
+    /// other buys the ability to buy them.
     /// <para>
-    /// Returns what it took out of this review's pot, which is the saved share and not the purchase:
-    /// a commander with no dock takes nothing, so a faction that will never go to sea does not
-    /// quietly withhold a fifth of every review from its convoys.
+    /// The share is now a share of rung 2's grant rather than of the whole review (user decision
+    /// 2026-09-14: "naval keeps its current share inside rung 2's air side, unchanged behaviour
+    /// otherwise"). Returns what it took out of the rung's budget, which is the saved share and not
+    /// the purchase: a commander with no dock takes nothing, so a faction that will never go to sea
+    /// does not quietly withhold a fifth of the rung from its convoys.
     /// </para>
     /// </summary>
     private float ReviewNaval(FactionHQ hq, FactionHQ opponent, CommanderState state, float share)
     {
         CommanderNavalPurchaseService? naval = CommanderNavalPurchaseService.Instance;
         int dockLevel = CommanderEconomyService.GetNavalDockLevel(hq);
-        if (naval == null || dockLevel <= 0 || CountShips(hq) >= NavalHullTarget)
+        if (naval == null || !WantsNavalHull(hq))
         {
             return 0f;
         }
 
-        // The naval fund keeps the plain reviews-of-saving ceiling; the air fund's floor (enough
-        // for MaxAirBuysPerReview of the dearest fighter) is an air-wing rule, 2026-09-13.
+        // The naval fund keeps the plain reviews-of-saving ceiling (the air fund that shared it is
+        // retired with the ladder, 2026-09-14 — the wing buys straight out of the rung's grant).
         float taken = AccrueFund(ref state.NavalFund, share, share * FundSaveReviews);
         RefreshShipCatalog();
         ShipDefinition? choice = null;

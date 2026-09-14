@@ -57,8 +57,22 @@ internal sealed partial class CommanderOperationsService
             // Insertion flights in the air for this commander (design.md,
             // heli-picket-insertion_20260913, Section 4). The air-support summary rides the end of
             // this same line via DescribeAir below; keep this field beside the ground counts.
+            // Flights airborne over the airborne limit (pickets-first Section 4): the limit moved
+            // from one to three, so the bare count no longer says whether the commander is holding
+            // back because it is full or because nothing asked.
             .Append(" heli=").Append(CountInsertionsInFlight(state))
-            .Append(" platoons=").Append(state.Platoons.Count).Append(" [");
+            .Append('/').Append(CommanderSettings.OperationsHeliInsertionLimit)
+            .Append(" platoons=").Append(state.Platoons.Count);
+
+        // What the commander has a REASON to field, beside what it actually fields (fix,
+        // 2026-09-14): a platoon count stuck below the purpose count is a commander that cannot
+        // afford to grow, and one stuck at it is a commander that has no reason to — and the review
+        // line could not tell the two apart, which is how a whole match went by with one platoon.
+        CountPurposes(state, out int purposeForwardBases, out int purposeAttacks, out int purposeReserve);
+        diagnostics.Append(" purposes=").Append(purposeForwardBases)
+            .Append('/').Append(purposeAttacks)
+            .Append('/').Append(purposeReserve)
+            .Append(" [");
         for (int i = 0; i < state.Platoons.Count; i++)
         {
             CommanderPlatoon platoon = state.Platoons[i];
@@ -66,7 +80,16 @@ internal sealed partial class CommanderOperationsService
             diagnostics.Append(platoon.Name).Append(' ')
                 .Append(platoon.Members.Count).Append('/').Append(platoon.Establishment).Append(' ');
             AppendComposition(diagnostics, platoon);
-            diagnostics.Append(' ').Append(platoon.State).Append('@').Append(DescribeMission(platoon.Mission));
+            diagnostics.Append(' ').Append(platoon.State);
+            // ground-tactics §5: how the platoon is deployed, not only what it is for — a platoon
+            // reading "Holding" and a platoon reading "Holding/DefenceArc" are standing on very
+            // different ground. Ring is the ordinary case and says nothing.
+            if (platoon.Posture != CommanderGroundPosture.Ring)
+            {
+                diagnostics.Append('/').Append(platoon.Posture);
+            }
+
+            diagnostics.Append('@').Append(DescribeMission(platoon.Mission));
         }
 
         diagnostics.Append("] missions=[");
@@ -76,6 +99,12 @@ internal sealed partial class CommanderOperationsService
             if (i > 0) diagnostics.Append("; ");
             diagnostics.Append(mission.Kind).Append(' ').Append(mission.Label)
                 .Append(' ').Append(mission.Assigned.Count).Append('/').Append(mission.WantedPlatoons);
+            // Addendum 2026-09-14 §3: an open reinforcement request shows as its own wanted count,
+            // so a mission reads "1/3 +2 reinf" while two of the three are the request.
+            if (mission.ReinforcePlatoons > 0)
+            {
+                diagnostics.Append(" +").Append(mission.ReinforcePlatoons).Append(" reinf");
+            }
             if (mission.Kind == CommanderMissionKind.Picket)
             {
                 diagnostics.Append(" pickets=").Append(mission.PicketMembers.Count);
@@ -152,6 +181,74 @@ internal sealed partial class CommanderOperationsService
         }
 
         CommanderAiLog.Note(hq, $"{platoon.Name} in contact: hostile at {distanceMeters:0} m, deploys into line.");
+    }
+
+    /// <summary>
+    /// One line when a platoon standing on its posts first comes under attack (addendum
+    /// 2026-09-14 §2) — the detection-only contact, logged where the marching line's is so a match
+    /// can be debugged from the log alone. A negative distance means the evidence was a member
+    /// loss with nothing tracked. Debug-gated, like <see cref="LogContact"/>.
+    /// </summary>
+    private static void LogPostContact(FactionHQ hq, CommanderPlatoon platoon, float distanceMeters)
+    {
+        if (!CommanderSettings.OperationsDebugLog)
+        {
+            return;
+        }
+
+        CommanderAiLog.Note(
+            hq,
+            distanceMeters >= 0f
+                ? $"{platoon.Name} in contact at its post: hostile at {distanceMeters:0} m, holds its posts and calls for air support."
+                : $"{platoon.Name} in contact at its post: a member was lost, holds its posts and calls for air support.");
+    }
+
+    /// <summary>
+    /// One line when a garrison forms its defence arc (ground-tactics §2) and one when it gives it
+    /// up. Not debug-gated: a platoon changing how it is deployed is a commander decision, and the
+    /// COMMANDER LOG is where the design's own acceptance test reads it.
+    /// </summary>
+    private static void LogDefenceArc(FactionHQ hq, CommanderPlatoon platoon, float bearingDegrees, string label)
+    {
+        CommanderAiLog.Note(hq, $"{platoon.Name} forms a defence arc toward {bearingDegrees:0}° at {label}.");
+    }
+
+    /// <summary>The other half of <see cref="LogDefenceArc"/>: the fight is over and the platoon
+    /// spreads back out over the whole point.</summary>
+    private static void LogReturnsToRing(FactionHQ hq, CommanderPlatoon platoon)
+    {
+        CommanderAiLog.Note(hq, $"{platoon.Name} returns to the ring.");
+    }
+
+    /// <summary>One line the first time a platoon leaves the road network for cross-country bounds
+    /// (ground-tactics §3) — once per advance, not once per bound.</summary>
+    private static void LogBounding(FactionHQ hq, CommanderPlatoon platoon, string label)
+    {
+        CommanderAiLog.Note(
+            hq,
+            $"{platoon.Name} leaves the road at the release point; bounding to {label} in "
+                + $"{CommanderSettings.BoundMeters:0} m steps.");
+    }
+
+    /// <summary>One line when a reinforcement sent to a point that is already held goes round the
+    /// attack instead of joining the ring (ground-tactics §4).</summary>
+    private static void LogCounterAttack(FactionHQ hq, CommanderPlatoon platoon, string label)
+    {
+        CommanderAiLog.Note(hq, $"{platoon.Name} counter-attacks from the flank at {label}.");
+    }
+
+    /// <summary>One line when a reinforcement takes up a screen instead, with nothing tracked to
+    /// counter-attack (ground-tactics §4).</summary>
+    private static void LogScreen(FactionHQ hq, CommanderPlatoon platoon, string label)
+    {
+        CommanderAiLog.Note(hq, $"{platoon.Name} screens the approach to {label}.");
+    }
+
+    /// <summary>One line when the garrison has dropped below the minimum and the reinforcement
+    /// gives up its manoeuvre to stand on the point itself (ground-tactics §4).</summary>
+    private static void LogFoldsIntoRing(FactionHQ hq, CommanderPlatoon platoon, string label)
+    {
+        CommanderAiLog.Note(hq, $"{platoon.Name} folds into the ring at {label}: the garrison is below strength.");
     }
 
     /// <summary>Role tally of a platoon as <c>A3/C1/D2</c> (armour / carrier / air defence), with

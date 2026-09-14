@@ -503,6 +503,81 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         }
     }
 
+    /// <summary>
+    /// Send an AI airframe home with no mission record involved — the idle sweep's RTB (design.md,
+    /// smarter-air-wing_20260914 Section 6). <see cref="RequestReturnToBase"/> cannot serve here: it
+    /// needs a mission, and the airframes the sweep finds are exactly the ones that have none. A
+    /// transport never had one at all, because <see cref="TryTaskAiAircraft"/> refuses anything
+    /// without a plane pilot. Refuses a helicopter with nowhere to put down, for the same reason
+    /// <see cref="RequestReturnToBase"/> does: the rotary landing state ejects the crew when it
+    /// finds no airbase. Returns whether the airframe was actually sent home.
+    /// </summary>
+    internal static bool TryReturnAiAircraftHome(Aircraft? aircraft)
+    {
+        if (aircraft == null || aircraft.disabled || aircraft.Player != null || aircraft.pilots == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < aircraft.pilots.Length; i++)
+        {
+            Pilot pilot = aircraft.pilots[i];
+            if (pilot == null)
+            {
+                continue;
+            }
+
+            if (IsRotaryPilot(pilot))
+            {
+                if (!HasVerticalPad(aircraft))
+                {
+                    return false;
+                }
+
+                if (pilot.AIHeloLandingState == null) pilot.AIHeloLandingState = new AIHeloLandingState();
+                pilot.SwitchState(pilot.AIHeloLandingState);
+            }
+            else
+            {
+                if (pilot.AILandingState == null) pilot.AILandingState = new AIPilotLandingState();
+                pilot.SwitchState(pilot.AILandingState);
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when this airframe has nothing left to shoot with but its guns — "Winchester" in the
+    /// idle sweep's sense (design SS6). Guns are deliberately not counted: a pilot with cannon
+    /// rounds left keeps making strafing runs, which is the behaviour the wing's INTERNAL CANNONS
+    /// rule already exists to stop. Cargo stations are not weapons.
+    /// </summary>
+    internal static bool IsWinchester(Aircraft? aircraft)
+    {
+        if (aircraft?.weaponStations == null || aircraft.weaponStations.Count == 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < aircraft.weaponStations.Count; i++)
+        {
+            WeaponStation station = aircraft.weaponStations[i];
+            if (station != null
+                && !station.Cargo
+                && station.WeaponInfo != null
+                && !station.WeaponInfo.gun
+                && station.Ammo > 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>Internal (one-word widening): the operations air step reads it for the rotary leg
     /// of its transit estimate. One definition of "flies like a helicopter", two callers.</summary>
     internal static bool IsRotaryPilot(Pilot pilot)

@@ -23,9 +23,9 @@ internal enum CommanderBuildKind
 /// unit reserve, and the upgrades that multiply what each of them produces.
 /// <para>
 /// Both sides play by these rules. The player spends through the BUILD window; hostile factions
-/// spend through <see cref="ReviewEnemy"/>, gated on the same ENEMY COMMANDER setting as
-/// <see cref="CommanderEnemyCommanderService"/>. The two AI spenders deliberately share one pot
-/// and take separate slices of it — one buys units, this one buys the ability to buy more units.
+/// spend through <see cref="SpendEnemyStructures"/>, called by the priority ladder's rung 4 out of
+/// the enemy commander's review (user decision 2026-09-14) — one pot, one ladder, and this service
+/// is the rung that buys the ability to buy more units.
 /// </para>
 /// </summary>
 /// <remarks>
@@ -42,7 +42,6 @@ internal sealed partial class CommanderEconomyService
     internal const string MineDisplayName = "Gold Mine";
 
     private const float IncomeIntervalSeconds = 15f;
-    private const float EnemyReviewIntervalSeconds = 30f;
     private const float FactoryRefreshIntervalSeconds = 5f;
 
     /// <summary>Mines an enemy commander builds before it starts upgrading what it has.</summary>
@@ -118,7 +117,6 @@ internal sealed partial class CommanderEconomyService
     private int productionIndex;
     private int builtNameCounter;
     private float nextIncomeAt;
-    private float nextEnemyReviewAt;
     private float nextFactoryRefreshAt;
 
     internal static CommanderEconomyService? Instance { get; private set; }
@@ -127,7 +125,6 @@ internal sealed partial class CommanderEconomyService
     {
         Instance = this;
         nextIncomeAt = CommanderScheduler.Stagger("economy.income", IncomeIntervalSeconds);
-        nextEnemyReviewAt = 0f;
     }
 
     internal string StatusText { get; private set; } = string.Empty;
@@ -460,14 +457,9 @@ internal sealed partial class CommanderEconomyService
             PayIncome();
         }
 
-        // Same ordering rule as the enemy commander: do not burn a review while no mission is
-        // loaded, or the enemy's first mine lands a review after the match already started.
-        if (CommanderPlayerCommanderService.AnyCommanderOn
-            && CommanderGameAccess.GetLocalHq() != null
-            && CommanderScheduler.IsDue(ref nextEnemyReviewAt, EnemyReviewIntervalSeconds))
-        {
-            ReviewEnemies();
-        }
+        // The enemy structure loop no longer spends on its own clock (user decision 2026-09-14, the
+        // priority ladder): rung 4 is called from the enemy commander's review — the single spend
+        // site — through SpendEnemyStructures, so income is this service's only clock-bound job.
     }
 
     public void Deactivate()
@@ -502,9 +494,11 @@ internal sealed partial class CommanderEconomyService
         dockDefinition = null;
         dockDefinitionResolved = false;
         shoreSearchReported.Clear();
+        // Rung-4 savings (design.md, commander-priorities_20260914): a new mission starts a new
+        // bank, like every other per-HQ state.
+        structureSavings.Clear();
         StatusText = string.Empty;
         nextIncomeAt = CommanderScheduler.Stagger("economy.income", IncomeIntervalSeconds);
-        nextEnemyReviewAt = 0f;
     }
 
     internal void BeginBuild(CommanderBuildKind kind)

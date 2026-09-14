@@ -60,24 +60,9 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     /// than one purchase a review to actually field them before the pressure clock fires again.</summary>
     private const int OffensivePurchasesPerReview = 5;
 
-    /// <summary>
-    /// Share of the balance the unit spender may draw on even while the economy service is saving
-    /// for a structure. Structures cost 250–500+ and vehicles 7–13, so "balance minus the whole
-    /// structure reserve" was zero or negative for every review of a commander with a long build
-    /// list — the player's own commander bought nothing for a whole match while its balance sat in
-    /// the hundreds. A quarter keeps the balance climbing (income per review outruns a quarter of
-    /// it times the tempo fraction) while never leaving the platoons unfunded.
-    /// </summary>
-    private const float UnitSpendFloorShare = 0.25f;
-
     /// <summary>Skipped buy reviews between two "holds" log lines. Every review would be noise;
     /// never would leave a silent commander looking broken, which is how this constant came to be.</summary>
     private const int HoldReportEveryReviews = 4;
-
-    /// <summary>Share of one review's budget set aside for the air fund — an air force must not
-    /// starve the convoys. Was the duel-only <c>DuelAirframeBudgetShare</c>; the duel gate on the
-    /// air leg is gone, so the share lost its prefix and kept its value.</summary>
-    private const float AirframeBudgetShare = 0.4f;
 
     private readonly Dictionary<FactionHQ, CommanderState> states = new();
 
@@ -198,7 +183,11 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         CheckPlan("nothing dominant", new ForceRead { Ground = 2, Armour = 1, Guns = 1 }, EnemyPlan.ReconScreen);
         CheckPlan("empty field", default, EnemyPlan.ReconScreen);
         CheckAirRoles();
+        // Wired in 2026-09-14: this check was written for the 2026-09-13 air track and never called,
+        // so a retune that reordered ChooseAirRole or retyped the Cricket would have passed silently.
+        CheckAirBuyRules();
         CheckDefencePosture();
+        CheckLadder();
     }
 
     private static void CheckPlan(string name, in ForceRead force, EnemyPlan expected)
@@ -295,6 +284,10 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         shipCatalog.Clear();
         defenceCandidates.Clear();
         staleDefenders.Clear();
+        // The air candidate catalog re-resolves on the next buy — the encyclopedia/resource scan is
+        // a once-per-mission cost by design (see RefreshAirCatalog).
+        airCatalog.Clear();
+        airCatalogResolved = false;
         TotalPurchases = 0;
         PlayerPurchases = 0;
         StatusLine = string.Empty;
@@ -304,9 +297,11 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     }
 
     /// <summary>
-    /// This commander's whole review: economy prep, plan, posture, then spend. With an operations
-    /// order book open the buy loop spends on what its missions asked for; with the book empty it
-    /// buys the plan-based counter triangle exactly as before (design SS4).
+    /// This commander's whole review: prep, plan, posture, then spend — one pot per review, spent
+    /// top-down through the priority ladder (design.md, commander-priorities_20260914): a strict
+    /// home CAP first, then platoons and their air, pickets and buildings sharing the remainder by
+    /// a weighted draw. Inside the platoon rung the operations order book comes first when it is
+    /// open; with the book empty the plan-based counter triangle buys as before (design SS4).
     /// </summary>
     private void Review(FactionHQ hq, FactionHQ localHq, FactionHQ opponent, int mode, in ForceRead opponentForce)
     {
@@ -353,31 +348,28 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         // fly the aircraft and drive the radars it already owns.
         ReviewPosture(hq, opponent, state, opponentForce);
 
-        // Whatever the economy service is saving for is off limits here. Both spenders draw on the
-        // one factionFunds pool, and this one takes a fixed share of the balance every review — so
-        // without the hold-back the balance never climbed to a factory or a dock and the enemy
-        // commander built nothing but its opening mines all match.
-        float reserve = CommanderEconomyService.GetEnemyBuildReserve(hq);
-        float pot = Mathf.Max(hq.factionFunds - reserve, hq.factionFunds * UnitSpendFloorShare);
+        // One pot per review (user decision 2026-09-14, design.md commander-priorities_20260914):
+        // the whole balance times the tempo fraction, spent top-down by the priority ladder in
+        // ReviewPurchases. The reserve hold-back (GetEnemyBuildReserve) and the quarter-of-balance
+        // unit floor (UnitSpendFloorShare) that used to carve this pot up are gone — both were
+        // fixes for the same starvation (spenders draining one shared balance faster than a big
+        // purchase could accumulate), and the ladder prevents that structurally instead: priority
+        // is decided once at the top, and everything below spends only what its rung is granted.
         // An open attack requisition raises the tempo for this review only (design SS4): an attack
         // waiting on bodies needs more of the pot than the duel/matched tempo knob normally allows.
         float fraction = CommanderOperationsService.HasOpenAttackRequisition(hq)
             ? CommanderSettings.OperationsOffensiveSpendFraction
             : (duel ? DuelSpendFraction : SpendFraction);
-        float spendable = pot * fraction;
+        float spendable = hq.factionFunds * fraction;
         CollectCatalog(hq);
-        if (spendable <= 0f || catalog.Count == 0)
+        if (spendable <= 0f)
         {
-            ReportHold(hq, state, reserve, spendable);
+            ReportHold(hq, state, spendable, string.Empty);
             return;
         }
 
         int boughtCount = ReviewPurchases(hq, state, duel, opponent, opponentForce, spendable);
-        if (boughtCount == 0)
-        {
-            ReportHold(hq, state, reserve, spendable);
-        }
-        else
+        if (boughtCount > 0)
         {
             state.SkippedBuyReviews = 0;
         }
@@ -385,10 +377,11 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
     /// <summary>
     /// One log line every <see cref="HoldReportEveryReviews"/> reviews in which the commander bought
-    /// no vehicle, saying why in numbers: the balance, what the economy service is saving for, what
-    /// was left for units, and how many vehicle types were on offer. Diagnostic only.
+    /// no vehicle, saying why in numbers: the reason (the strict home-CAP hold, when that is what
+    /// stopped the review), the balance, what was left to spend, and how many vehicle types were on
+    /// offer. Diagnostic only.
     /// </summary>
-    private void ReportHold(FactionHQ hq, CommanderState state, float reserve, float spendable)
+    private void ReportHold(FactionHQ hq, CommanderState state, float spendable, string reason)
     {
         state.SkippedBuyReviews++;
         if (state.SkippedBuyReviews % HoldReportEveryReviews != 1)
@@ -396,16 +389,185 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             return;
         }
 
+        string why = string.IsNullOrEmpty(reason)
+            ? string.Empty
+            : $"{reason}; ";
         CommanderAiLog.Note(
             hq,
-            $"holds: balance {hq.factionFunds:0}, saving {reserve:0} for structures, unit budget {spendable:0}, "
+            $"holds: {why}balance {hq.factionFunds:0}, unit budget {spendable:0}, "
                 + $"{catalog.Count} vehicle types on offer ({state.SkippedBuyReviews} quiet reviews).");
     }
 
-    /// <summary>The buy loop proper. Returns how many vehicles it bought this review.</summary>
+    /// <summary>
+    /// The priority ladder's spend walk (design.md, commander-priorities_20260914). Rung 1 — the home
+    /// CAP — draws first and is strict: while it is short, the review ends here and nothing
+    /// below it is bought. The survivors share the remainder by a weighted draw each review —
+    /// platoons 60 / pickets 20 / buildings 20, with a floor for every rung with open demand.
+    /// Returns how many vehicles it bought this review.
+    /// </summary>
     private int ReviewPurchases(FactionHQ hq, CommanderState state, bool duel, FactionHQ opponent, in ForceRead opponentForce, float spendable)
     {
         int boughtCount = 0;
+        float pot = spendable;
+
+        // ---- Rung 1: home CAP, strict (design Section 2) ----
+        HomeCapRead cap = ReviewHomeCap(hq, state, spendable);
+        boughtCount += cap.Buys;
+        spendable -= cap.Spent;
+        if (cap.Impossible)
+        {
+            // The deadlock valve (user follow-up, 2026-09-14): no air-to-air-capable airframe can
+            // launch from any base this commander holds, so a strict hold would freeze the whole
+            // ladder for the rest of the match. The rung is skipped, the periodic holds line says
+            // which strips were found incapable, and the lower rungs proceed.
+            ReportHold(
+                hq,
+                state,
+                spendable,
+                $"home CAP impossible — no air-to-air-capable airframe can launch from {HeldBaseNames(hq)}");
+        }
+        else if (LadderHoldsForCap(cap.Short, cap.CeilingBlocked))
+        {
+            // No draw ran, so the order list is last review's — empty it or the line would print a
+            // draw that never happened.
+            ladderOrder.Clear();
+            ReportHold(hq, state, spendable, $"home CAP short {cap.Short} (wanted {cap.Wanted}, alive {cap.Alive})");
+            ReportLadder(hq, in cap, ladderOrder, pot, cap.Spent, 0f, CommanderOperationsService.TakeInsertionSpend(hq), 0f, state.AirFund, state.AirFundCap);
+            return boughtCount;
+        }
+
+        // ---- Rungs 2-4: the weighted draw with a floor (design Section 3) ----
+        // An expansion with nothing that can take ground is an expansion that never happens, so a
+        // capture unit outranks the plan exactly the way the first air-defence launcher does.
+        bool needsCaptureUnit = CommanderCaptureService.Instance?.WantsCaptureUnit(hq) == true;
+        bool hasOpenBook = CommanderOperationsService.HasOpenRequisition(hq);
+        bool bookOnly = CommanderOperationsService.GroundBuyingBookOnly(
+            CommanderOperationsService.OwnsGroundForce(hq),
+            hasOpenBook);
+        if (bookOnly != state.GroundBookOnly)
+        {
+            state.GroundBookOnly = bookOnly;
+            CommanderAiLog.Note(
+                hq,
+                bookOnly
+                    ? "holds ground purchases: every vehicle is bought to order and the order book is empty."
+                    : "resumes ground purchases: the order book has an open line.");
+        }
+
+        // Rung 2's demand: the wing's sorties, the naval market, or any ground want at all. Since
+        // DECISION-013 a commander whose ground force this service owns demands only what its order
+        // book asks for; an undiscovered one still keeps the rung demanding on plan.
+        bool platoonDemand = !bookOnly
+            || needsCaptureUnit
+            || state.WantsReconUnit
+            || CommanderOperationsService.HasAirDemand(hq)
+            || WantsNavalHull(hq);
+        // Rung 3's demand: a picket point that would ask for a flight. Rung 4's: anything the
+        // economy wants next, or a building that needs a repair crew.
+        bool picketDemand = CommanderOperationsService.HasInsertionDemand(hq);
+        bool buildingDemand = CommanderEconomyService.NextEnemyStructureCost(hq) > 0f
+            || CommanderRepairService.Instance?.WantsEnemyRepairCrew(hq) == true;
+
+        // The draw: a weighted random permutation of the demanding rungs (design Section 3,
+        // user decision 2026-09-14 — variability per review, not per commander).
+        ladderWeights[RungPlatoons] = platoonDemand ? CommanderSettings.LadderPlatoonWeight : 0f;
+        ladderWeights[RungPickets] = picketDemand ? CommanderSettings.LadderPicketWeight : 0f;
+        ladderWeights[RungBuildings] = buildingDemand ? CommanderSettings.LadderBuildingWeight : 0f;
+        ladderOrder.Clear();
+        while (true)
+        {
+            int pick = LadderDrawPick(ladderWeights, Random.value * LadderWeightTotal(ladderWeights));
+            if (pick < 0)
+            {
+                break;
+            }
+
+            ladderOrder.Add(pick);
+            ladderWeights[pick] = 0f;
+        }
+
+        float pool = spendable;
+        float floor = LadderFloor(pool, CommanderSettings.LadderRungFloorPercent);
+        float platoonSpent = 0f;
+        float buildingSpent = 0f;
+        for (int position = 0; position < ladderOrder.Count; position++)
+        {
+            // Every rung in the order has demand by construction, so the floors still owed are the
+            // demanding rungs drawn after this one — the floor is what guarantees them a share
+            // however greedy the rungs drawn first are.
+            int rung = ladderOrder[position];
+            float budget = LadderRungBudget(pool, floor, ladderOrder.Count - position - 1);
+            if (rung == RungPickets)
+            {
+                // The grant IS the rung's take (design Section 3): the operations review charges the
+                // flight against it and the consumption shows on the next ladder line. It is not
+                // earmarked out of this review's pool — the flight charges the balance on its own
+                // clock, and the next ladder review overwrites whatever was not consumed (plan.md,
+                // departure 3).
+                CommanderOperationsService.GrantInsertionAllowance(hq, budget);
+                continue;
+            }
+
+            if (budget <= 0f)
+            {
+                continue;
+            }
+
+            if (rung == RungPlatoons)
+            {
+                platoonSpent = SpendPlatoons(
+                    hq, state, duel, opponent, opponentForce, budget, hasOpenBook, bookOnly, needsCaptureUnit, ref boughtCount);
+                pool -= platoonSpent;
+            }
+            else
+            {
+                buildingSpent = CommanderEconomyService.Instance?.SpendEnemyStructures(hq, budget) ?? 0f;
+                pool -= buildingSpent;
+            }
+        }
+
+        // A rung with no demand this cycle must not fly on a stale allowance from the last one.
+        if (!picketDemand)
+        {
+            CommanderOperationsService.GrantInsertionAllowance(hq, 0f);
+        }
+
+        // The review's hold line lives here now, not in Review: the strict path reports its own
+        // hold above, so a second report from the caller would count the same review twice against
+        // the throttle.
+        if (boughtCount == 0)
+        {
+            ReportHold(hq, state, Mathf.Max(0f, pot - cap.Spent - platoonSpent - buildingSpent), string.Empty);
+        }
+
+        ReportLadder(hq, in cap, ladderOrder, pot, cap.Spent, platoonSpent, CommanderOperationsService.TakeInsertionSpend(hq), buildingSpent, state.AirFund, state.AirFundCap);
+        return boughtCount;
+    }
+
+    /// <summary>
+    /// Rung 2: platoons and their air support (design Section 3's internal order) — the wing's
+    /// sorties first (CAP demand, then CAS, then the pre-emptive baseline — the demand queue's own
+    /// order), then the naval share (the one pot the ladder deliberately kept inside this rung,
+    /// unchanged in its behaviour: dock-gated, hull-capped, saved across reviews), then the order
+    /// book by <c>OpenRolesByPriority</c>, the capture and recon overrides, and the plan buyer
+    /// and — only for a commander whose ground force the operations service does NOT own — the
+    /// capture and recon overrides and the plan buyer. <c>GroundBuyingBookOnly</c> decides which of
+    /// those two worlds this commander is in (DECISION-013). Returns what it took out of the rung's
+    /// budget; what it does not spend flows to the rungs drawn after it.
+    /// </summary>
+    private float SpendPlatoons(
+        FactionHQ hq,
+        CommanderState state,
+        bool duel,
+        FactionHQ opponent,
+        in ForceRead opponentForce,
+        float budget,
+        bool hasOpenBook,
+        bool bookOnly,
+        bool needsCaptureUnit,
+        ref int boughtCount)
+    {
+        float grant = budget;
 
         // Whatever the plan says, a commander with no air defence at all while the player is
         // flying is not playing the same game. One launcher first, then back to the plan.
@@ -413,15 +575,6 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         int purchases = CommanderOperationsService.HasOpenAttackRequisition(hq)
             ? OffensivePurchasesPerReview
             : (duel ? DuelPurchasesPerReview : PurchasesPerReview);
-        // The air share is set aside rather than spent-or-lost. An airframe costs several ground
-        // vehicles, so a flat slice of a pot the commander keeps draining on convoys never once
-        // added up to an aircraft after the opening minutes — which is exactly how an enemy that
-        // flew at the start ended up with no air force at all. No longer duel-only (user answer
-        // 2026-09-13): every commanded HQ accrues a fund and fields its wing, and what it buys
-        // flies the sorties the ground plan asked for. The ceiling keeps a flush commander from
-        // hoarding, but never sits below one review's buys of the dearest fighter (2026-09-13).
-        float airShare = spendable * AirframeBudgetShare;
-        spendable -= AccrueFund(ref state.AirFund, airShare, AirFundCeiling(airShare, DearestFighterPrice(hq)));
 
         // The once-per-review demand read (design SS4, chatty detail behind OperationsDebugLog):
         // what the wing is short of and what caps it, so a quiet sky in a rich match is explained
@@ -432,14 +585,39 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             CommanderPlugin.Log.LogInfo(
                 $"Ops {CommanderPlayerCommanderService.CommanderLabel(hq)}: air demand: CAP {capBound}/{capWanted}, "
                     + $"CAS {casBound}/{casWanted}, ceiling {CountAirborne(hq)}/{CommanderSettings.AirborneCeiling}, "
-                    + $"fund {state.AirFund:0}.");
+                    + $"budget {budget:0}.");
         }
 
-        // Buy while the air fund covers the next wanted airframe and the ceiling allows, bounded by
-        // MaxAirBuysPerReview (user decision 2026-09-13: the one-airframe-per-review throttle left
-        // five short sorties waiting half the match). A buy that comes back empty — fund short,
-        // ceiling reached, nothing fits the strip — ends the loop with its once-per-reason line.
-        for (int airBuy = 0; AirBuyContinues(airBuy); airBuy++)
+        // The wing buys straight out of what the rung was granted (design Section 1): the 40 % air
+        // fund that used to be set aside first is one of the pots the ladder retired — the fund
+        // existed because a flat per-review slice could never add up to an airframe while convoys
+        // drained the balance, and the ladder's grant is the structural answer to the same
+        // starvation. What it buys still flies the sorties the ground plan asked for, bounded by
+        // MaxAirBuysPerReview (user decision 2026-09-13) and the ceiling.
+        // ... except that a per-review slice never reached the price of a strike airframe: the wing
+        // asked for a 36-value Brawler or a 145-value Medusa out of whatever was left after the
+        // home CAP's replacements, and logged "its air budget is short of the cheapest … airframe"
+        // every review of the 2026-09-14 match. The slice now ACCUMULATES, exactly the way the
+        // naval hull's does and for exactly the same reason (Reuse rule 4, one AccrueFund): a share
+        // set aside each review, bounded at a few reviews' worth so a wing that can never spend it
+        // does not withhold it from the rest of the rung forever.
+        // ... and the ceiling it accumulates to is the PRICE OF WHAT IT IS SAVING FOR (fix,
+        // 2026-09-14), not six reviews of the share. The share-based ceiling had no relationship to
+        // any airframe, so a rich review banked far past the dearest thing the wing wanted and the
+        // ground never saw the money: `air saved 372` on the ladder line while the order book sat
+        // six lines deep. Anything already above the ceiling — a demand that closed, a strip lost —
+        // flows straight back into this review's pot before the share is taken.
+        float airCeiling = AirFundCeiling(hq, state);
+        state.AirFundCap = airCeiling;
+        if (state.AirFund > airCeiling)
+        {
+            budget += state.AirFund - airCeiling;
+            state.AirFund = airCeiling;
+        }
+
+        float airTaken = AccrueFund(ref state.AirFund, budget * AirBudgetShare, airCeiling);
+        budget -= airTaken;
+        for (int airBuy = 0; AirBuyContinues(airBuy) && state.AirFund > 0f; airBuy++)
         {
             float airSpent = BuyAirframe(hq, state, state.AirFund, opponentForce);
             if (airSpent <= 0f)
@@ -450,34 +628,15 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             state.AirFund -= airSpent;
         }
 
-        spendable -= ReviewNaval(hq, opponent, state, spendable * NavalBudgetShare);
+        budget -= ReviewNaval(hq, opponent, state, budget * NavalBudgetShare);
 
-        // An expansion with nothing that can take ground is an expansion that never happens, so a
-        // capture unit outranks the plan exactly the way the first air-defence launcher does.
-        bool needsCaptureUnit = CommanderCaptureService.Instance?.WantsCaptureUnit(hq) == true;
-        bool hasOpenBook = CommanderOperationsService.HasOpenRequisition(hq);
-        bool groundCapped = CommanderOperationsService.GroundBuyingCapped(
-            CommanderOperationsService.OwnsGroundForce(hq),
-            CommanderOperationsService.PlatoonCount(hq),
-            CommanderSettings.OperationsMaxPlatoons,
-            hasOpenBook);
-        if (groundCapped != state.GroundCapped)
+        if (bookOnly)
         {
-            state.GroundCapped = groundCapped;
-            CommanderAiLog.Note(
-                hq,
-                groundCapped
-                    ? $"holds ground purchases: {CommanderOperationsService.PlatoonCount(hq)} platoons at the cap of {CommanderSettings.OperationsMaxPlatoons} and no open requisition."
-                    : "resumes ground purchases: a requisition is open or a platoon was lost.");
-        }
-
-        if (groundCapped)
-        {
-            return boughtCount;
+            return grant - budget;
         }
 
         System.Array.Clear(boughtThisReview, 0, boughtThisReview.Length);
-        for (int purchase = 0; purchase < purchases && spendable > 0f; purchase++)
+        for (int purchase = 0; purchase < purchases && budget > 0f; purchase++)
         {
             // Two overrides on the plan, both about a base rather than a front: no air defence at
             // all while the player flies, and a home-guard ring the commander cannot fill out of
@@ -503,7 +662,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
                 CommanderOperationsService.OpenRolesByPriority(hq, boughtThisReview, openRoles);
                 for (int r = 0; r < openRoles.Count && choice == null; r++)
                 {
-                    choice = ChooseForRole(spendable, openRoles[r]);
+                    choice = ChooseForRole(budget, openRoles[r]);
                     if (choice != null)
                     {
                         role = openRoles[r];
@@ -512,31 +671,36 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
                 }
             }
 
-            if (choice == null)
+            // DECISION-013: once the operations service owns this commander's ground force, the
+            // order book is the ONLY reason to buy a ground vehicle. The capture override, the recon
+            // override and the plan-based counter triangle below are what an undiscovered commander
+            // runs on — they are also what kept buying vehicles nobody had requested, filling the
+            // pool the platoon loop then turned into platoons nobody needed.
+            if (choice == null && !CommanderOperationsService.OwnsGroundForce(hq))
             {
                 if (purchase == 0 && needsCaptureUnit)
                 {
-                    choice = ChooseCaptureUnit(spendable) ?? Choose(spendable, buyPlan);
+                    choice = ChooseCaptureUnit(budget) ?? Choose(budget, buyPlan);
                 }
                 else if (state.WantsReconUnit && purchase == purchases - 1)
                 {
-                    choice = ChooseReconUnit(spendable) ?? Choose(spendable, buyPlan);
+                    choice = ChooseReconUnit(budget) ?? Choose(budget, buyPlan);
                 }
                 else
                 {
-                    choice = Choose(spendable, buyPlan);
+                    choice = Choose(budget, buyPlan);
                 }
             }
 
             if (choice == null)
             {
-                return boughtCount;
+                return grant - budget;
             }
 
             float cost = Mathf.Max(0f, choice.value);
             hq.AddFunds(-cost);
             hq.ModifyUnitSupply(choice, 1);
-            spendable -= cost;
+            budget -= cost;
             boughtCount++;
             RecordPurchase(hq);
             CommanderAiLog.Note(
@@ -545,9 +709,8 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
                 role == null ? GetPlanLabel(buyPlan) : $"{GetPlanLabel(buyPlan)}, for {GetRoleLabel(role.Value)}");
         }
 
-        return boughtCount;
+        return grant - budget;
     }
-
     /// <summary>
     /// What the commander does with what it already owns, as opposed to what it buys: park the radar
     /// screen on the approaches, and give every idle airframe a mission. Both run every review and
@@ -985,17 +1148,35 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         internal int PendingReviews;
         internal bool Prepared;
 
-        /// <summary>Funds set aside for the next airframe and the next hull. Both are worth several
-        /// ground vehicles, so a per-review slice has to accumulate or it never buys anything.</summary>
-        internal float AirFund;
+        /// <summary>Funds set aside for the next hull. A hull is worth several ground vehicles, so a
+        /// per-review slice has to accumulate or it never buys anything. The air fund that used to
+        /// live beside it is retired with the ladder (2026-09-14): airframes are bought directly out
+        /// of the rung's grant. This one survives as rung 2's internal ship accumulator — see
+        /// <see cref="CommanderEnemyCommanderGround.ReviewNaval"/>.</summary>
         internal float NavalFund;
+
+        /// <summary>
+        /// Rung 2's air savings account (fix, 2026-09-14): a share of each review's grant set aside
+        /// until it reaches the price of an airframe the wing actually wants. A strike jet costs
+        /// several reviews' worth of a slice that the home CAP's replacements have already been
+        /// through, so without accumulation the wing reported the same "short of the cheapest
+        /// airframe" denial every review and bought nothing but the cheap fighters.
+        /// </summary>
+        internal float AirFund;
+
+        /// <summary>The ceiling <see cref="AirFund"/> was last held to — the price of the dearest
+        /// airframe an open demand wanted that review. Reported beside the savings on the ladder
+        /// line so a wing that is saving and a wing that is hoarding can be told apart from the log
+        /// alone.</summary>
+        internal float AirFundCap;
 
         /// <summary>Consecutive buy reviews that bought nothing; drives the "holds" log line.</summary>
         internal int SkippedBuyReviews;
 
-        /// <summary>Whether the last review found the platoon cap binding (see GroundBuyingCapped),
-        /// so the hold/resume log line fires once per transition rather than every review.</summary>
-        internal bool GroundCapped;
+        /// <summary>Whether the last review found ground buying held to an empty order book (see
+        /// GroundBuyingBookOnly), so the hold/resume log line fires once per transition rather than
+        /// every review.</summary>
+        internal bool GroundBookOnly;
 
         /// <summary>Short of a radar vehicle for the overwatch screen.</summary>
         internal bool WantsReconUnit;
@@ -1023,8 +1204,46 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         /// two different opening bases, and the shared field would be rewritten every review.</summary>
         internal Airbase? StrikeBase;
 
-        /// <summary>Last reason this commander bought no aircraft, so the log says it once and not
-        /// twice a minute for the rest of the match.</summary>
+        /// <summary>Last reason this commander bought no aircraft, so a repeated refusal logs on the
+        /// <c>HoldReportEveryReviews</c> cadence instead of vanishing for the rest of the match (a
+        /// silent air force is indistinguishable from a broken one, and "once per reason" proved to
+        /// mean once per MATCH for a reason that never changes).</summary>
         internal string LastAirDenial = string.Empty;
+
+        /// <summary>Consecutive reviews this commander has been refused an aircraft for the reason in
+        /// <see cref="LastAirDenial"/> — the re-log cadence's counter.</summary>
+        internal int AirDenialReviews;
+
+        /// <summary>Per airframe, the AIR window's AIR SUPERIORITY score of the best air-to-air
+        /// loadout its own picker can build for it (0 = no A/A-capable option at all), memoized for
+        /// the mission (user decision 2026-09-14: CAP and escort candidates are chosen by what the
+        /// loadout can do, not by the airframe's role identity).</summary>
+        internal readonly Dictionary<AircraftDefinition, float> CapScores = new();
+
+        /// <summary>Per airframe, the same read on the CAS scorer (0 = no ground-attack option),
+        /// memoized for the mission.</summary>
+        internal readonly Dictionary<AircraftDefinition, float> CasScores = new();
+
+        /// <summary>Per airframe, the same read on the ARAD scorer (0 = no anti-radiation option),
+        /// memoized for the mission (design.md, smarter-air-wing_20260914 Section 5).</summary>
+        internal readonly Dictionary<AircraftDefinition, float> AradScores = new();
+
+        /// <summary>Per airframe, whether the commander's own loadout builder can give it the game's
+        /// radar pod — the AWACS candidate test (Section 4). Memoized for the mission: it builds a
+        /// whole loadout to answer.</summary>
+        internal readonly Dictionary<AircraftDefinition, bool> AwacsCapable = new();
+
+        /// <summary>Sortie labels whose rotary CAS request has already been reported as falling back
+        /// to a jet, so the line is printed once per objective rather than once per 30 s review
+        /// (design.md, smarter-air-wing_20260914 Section 2; the <c>ReportAirDenial</c>
+        /// convention).</summary>
+        internal readonly HashSet<string> RotaryFallbackLogged = new();
+
+        /// <summary>Role-and-tier pairs whose "the tier above cannot launch from these strips" note
+        /// has already been printed, so the line appears once per commander per fallback rather than
+        /// once per 30 s review (design.md, airframe-selection_20260914 Section 4; the same
+        /// convention as <see cref="RotaryFallbackLogged"/>). Cleared with the rest of the state at
+        /// session reset, so capturing an airbase mid-match re-announces the tier it unlocked.</summary>
+        internal readonly HashSet<string> TierFallbackLogged = new();
     }
 }

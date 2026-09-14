@@ -14,6 +14,11 @@ Active and completed development tracks.
 | persist-reload-state_20260913 | Preserve Air Command and economy state across hot reload | infrastructure | new | NOT_STARTED | 2026-09-13 |
 | air-support-tasking_20260913 | Air support tasking driven by the ground plan (CAS + CAP escort) | feature | new | DESIGN | 2026-09-13 |
 | heli-picket-insertion_20260913 | Transport helicopters insert two-vehicle pickets at control points | feature | new | DESIGN | 2026-09-13 |
+| commander-priorities_20260914 | Commander priority ladder (strict home CAP, weighted draw) | feature | new | PLAN | 2026-09-14 |
+| smarter-air-wing_20260914 | Smarter air wing (ordnance, heli CAS, packages, AWACS, ARAD, idle sweep) | feature | new | PLAN | 2026-09-14 |
+| airframe-selection_20260914 | Airframe selection by fitness tier | feature | new | PLAN | 2026-09-14 |
+| ground-tactics_20260914 | Ground tactics: wide ring, defence arc, bounding advance, counter-attack | feature | new | PLAN | 2026-09-14 |
+| pickets-first_20260914 | Pickets first: pickets capture, platoons only toward the enemy, book-only buying | feature | new | PLAN | 2026-09-14 |
 
 ## Completed Tracks
 

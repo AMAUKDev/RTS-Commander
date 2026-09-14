@@ -73,11 +73,25 @@ internal sealed partial class CommanderOperationsService
     /// </summary>
     private static float NearestEnemyAssetDistance(FactionHQ hq, GlobalPosition position)
     {
-        float best = float.MaxValue;
+        return TryNearestEnemyAsset(hq, position, out _, out float distance) ? distance : float.MaxValue;
+    }
+
+    /// <summary>
+    /// The nearest point or base another live HQ holds, and how far away it is — the walk
+    /// <see cref="NearestEnemyAssetDistance"/> used to do inline, generalised to hand back WHERE
+    /// that asset is (Reuse rule 5, behaviour-neutral). The ground-tactics screen reads the
+    /// direction: with nothing tracked, the way the enemy lies is the most threatened approach.
+    /// False when the commander holds every point on the map, or none exist yet.
+    /// </summary>
+    private static bool TryNearestEnemyAsset(
+        FactionHQ hq, GlobalPosition position, out GlobalPosition asset, out float distance)
+    {
+        asset = default;
+        distance = float.MaxValue;
         IReadOnlyList<CommanderStrategicPoint>? points = CommanderStrategicPointService.Instance?.Points;
         if (points == null)
         {
-            return best;
+            return false;
         }
 
         for (int i = 0; i < points.Count; i++)
@@ -89,14 +103,15 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
-            float distance = CommanderGameAccess.HorizontalDistance(position.AsVector3(), point.Position.AsVector3());
-            if (distance < best)
+            float candidate = CommanderGameAccess.HorizontalDistance(position.AsVector3(), point.Position.AsVector3());
+            if (candidate < distance)
             {
-                best = distance;
+                distance = candidate;
+                asset = point.Position;
             }
         }
 
-        return best;
+        return distance < float.MaxValue;
     }
 
     /// <summary>
@@ -217,14 +232,12 @@ internal sealed partial class CommanderOperationsService
         return point.y > sum / OverlookSampleCount;
     }
 
-    /// <summary>Hold posts per point, built once and kept — a point does not move. Cleared in
+    /// <summary>Hold posts per point, kept between ticks — a point does not move, and rebuilding a
+    /// set snaps every post to the terrain. Rebuilt when the garrison's composition or the threat
+    /// bearing changes (<see cref="EnsureHoldPostSet"/>). Cleared in
     /// <see cref="ResetSession"/> for the reason the garrison step's own clear gave: the point
     /// objects a stale cache keys on do not survive a mission reload.</summary>
-    private readonly Dictionary<CommanderStrategicPoint, List<GlobalPosition>> holdPosts = new();
-
-    /// <summary>How far inside a point's own control ring hold posts sit — inside the ring, not
-    /// standing on its edge. The value the garrison step used (moved here, Reuse rule 3).</summary>
-    private const float HoldRingFraction = 0.6f;
+    private readonly Dictionary<CommanderStrategicPoint, CommanderHoldPostSet> holdPosts = new();
 
     /// <summary>A member this close to its hold post is on station; re-ordering it only makes it
     /// shuffle, and every issue is a networked RPC (the same reasoning as
@@ -258,21 +271,23 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
-    /// Ring posts for a point: <paramref name="slots"/> of them, evenly spaced at
-    /// <c>Radius * HoldRingFraction</c>, cached per point (a point does not move). Ledger row 19:
-    /// cut out of the points track's original garrison-post builder (Reuse rule 3), which forwarded
-    /// here from T7 and was deleted along with the rest of its file in T11.
+    /// The point's fighting ring as plain positions, for a caller that wants somewhere on the point
+    /// to put vehicles and has no platoon composition to spread by (the picket insertion's landing
+    /// posts, <c>Operations/CommanderOperationsInsertion.cs</c>). A ring a garrison has already
+    /// planned is handed back as it stands rather than re-planned for this caller's slot count, so
+    /// two callers with different needs cannot thrash the cache between them. Ledger row 19: cut out
+    /// of the points track's original garrison-post builder (Reuse rule 3), which forwarded here
+    /// from T7 and was deleted along with the rest of its file in T11; the ring moved from
+    /// <c>Radius * HoldRingFraction</c> to the full radius with ground-tactics §1.
     /// </summary>
     internal List<GlobalPosition> EnsureHoldPosts(CommanderStrategicPoint point, int slots)
     {
-        if (holdPosts.TryGetValue(point, out List<GlobalPosition> posts))
+        if (holdPosts.TryGetValue(point, out CommanderHoldPostSet cached) && cached.Outer.Count > 0)
         {
-            return posts;
+            return cached.Outer;
         }
 
-        posts = BuildHoldRing(point.Position, point.Radius * HoldRingFraction, slots);
-        holdPosts[point] = posts;
-        return posts;
+        return EnsureHoldPostSet(point, 0f, Mathf.Max(1, slots), 0, 0).Outer;
     }
 
     /// <summary>Midpoint of the home guard's own ring clamp
@@ -296,8 +311,16 @@ internal sealed partial class CommanderOperationsService
     /// to <c>Holding</c>, and was driven straight back out again — forever). Pickets pass no
     /// dictionary: a picket detachment is not a platoon and has no cohesion to measure.
     /// </summary>
+    /// <param name="stableByInstanceId">True — the default — sorts the members by instance id so a
+    /// member tends to keep the same post between reviews. False keeps the caller's own order,
+    /// which is what a defence arc needs: its slot 0 is the centre of the line and has to be a tank
+    /// (ground-tactics §2), so the caller has already ordered its members by
+    /// <see cref="MarchRank"/>.</param>
     private void DriveMembersToPosts(
-        IReadOnlyList<Unit> members, List<GlobalPosition> posts, Dictionary<Unit, GlobalPosition>? issued = null)
+        IReadOnlyList<Unit> members,
+        List<GlobalPosition> posts,
+        Dictionary<Unit, GlobalPosition>? issued = null,
+        bool stableByInstanceId = true)
     {
         if (posts.Count == 0)
         {
@@ -306,7 +329,10 @@ internal sealed partial class CommanderOperationsService
 
         holdMembersScratch.Clear();
         holdMembersScratch.AddRange(members);
-        holdMembersScratch.Sort(static (a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
+        if (stableByInstanceId)
+        {
+            holdMembersScratch.Sort(static (a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
+        }
         for (int i = 0; i < holdMembersScratch.Count; i++)
         {
             Unit unit = holdMembersScratch[i];
@@ -330,10 +356,29 @@ internal sealed partial class CommanderOperationsService
         }
     }
 
+    /// <summary>
+    /// Spreads a garrison over its point's whole ring by role (design §1): the umbrella on the
+    /// inner pair facing the threat, the carrier and the truck on the inner pair opposite, the
+    /// tanks on the fighting ring at the point's full radius. Each group goes through the same
+    /// <see cref="DriveMembersToPosts"/> the single-ring version used, so the stable member sort,
+    /// the on-station skip and the <paramref name="issued"/> write are unchanged.
+    /// </summary>
     private void DriveToHoldPosts(
-        CommanderStrategicPoint point, IReadOnlyList<Unit> members, Dictionary<Unit, GlobalPosition>? issued = null)
+        FactionHQ hq,
+        CommanderStrategicPoint point,
+        IReadOnlyList<Unit> members,
+        Dictionary<Unit, GlobalPosition>? issued = null)
     {
-        DriveMembersToPosts(members, EnsureHoldPosts(point, Mathf.Max(1, members.Count)), issued);
+        SplitByHoldRole(members, holdRoleOuter, holdRoleAirDefence, holdRoleInner);
+        CommanderHoldPostSet posts = EnsureHoldPostSet(
+            point,
+            ThreatBearingFor(hq, point),
+            Mathf.Max(1, holdRoleOuter.Count),
+            holdRoleAirDefence.Count,
+            holdRoleInner.Count);
+        DriveMembersToPosts(holdRoleOuter, posts.Outer, issued);
+        DriveMembersToPosts(holdRoleAirDefence, PostsOrFallback(posts.AirDefence, posts.Outer), issued);
+        DriveMembersToPosts(holdRoleInner, PostsOrFallback(posts.Inner, posts.Outer), issued);
     }
 
     /// <summary>The reserve platoon's ring: around the HQ's territory centre rather than a point,
@@ -739,6 +784,12 @@ internal sealed partial class CommanderOperationsService
     {
         platoon.Mission?.Assigned.Remove(platoon);
         platoon.Mission = null;
+        // Leaving the mission ends any reinforcement answer with it (addendum 2026-09-14 §3) —
+        // the single choke point every departure path already goes through.
+        platoon.ReinforcesLabel = string.Empty;
+        // And with it every ground posture: a platoon whose job has changed under it must not
+        // inherit the arc, bound or flank it was halfway through for the last one (ground-tactics).
+        platoon.ClearGroundPosture();
     }
 
     /// <summary>
@@ -819,10 +870,8 @@ internal sealed partial class CommanderOperationsService
                     continue;
                 }
 
-                platoon.Mission = mission;
-                platoon.State = CommanderPlatoonState.Moving;
                 platoon.Objective = mission.Point.Position;
-                mission.Assigned.Add(platoon);
+                AttachPlatoon(hq, platoon, mission, CommanderPlatoonState.Moving);
             }
         }
 
@@ -843,20 +892,26 @@ internal sealed partial class CommanderOperationsService
                     continue;
                 }
 
-                platoon.Mission = mission;
-                platoon.State = CommanderPlatoonState.Attacking;
-                mission.Assigned.Add(platoon);
+                AttachPlatoon(hq, platoon, mission, CommanderPlatoonState.Attacking);
             }
         }
+
+        // Addendum 2026-09-14 §3: a reinforcement request the released reserve platoons above
+        // could not fill is answered by pulling a platoon that is Holding another forward base —
+        // the most rear point first, never from an attack in progress. Whatever this cannot fill
+        // stays on the requisition the mission's raised wanted count already posts, so the buyer
+        // builds the rest.
+        FillReinforcementsFromPosts(hq, state);
 
         // T11: whatever the forward-base share leaves becomes the reserve — the home guard's old
         // job (design SS1: "the home guard becomes the base's reserve platoon(s)").
         CommanderOperationsMission reserve = FindOrCreateReserveMission(state);
         GlobalPosition territoryCenter = CommanderCaptureService.GetTerritoryCenter(hq);
+        int reserveWanted = Mathf.Max(0, CommanderSettings.OperationsReservePlatoons);
         for (int i = 0; i < state.Platoons.Count; i++)
         {
             CommanderPlatoon platoon = state.Platoons[i];
-            if (IsAvailableForMission(platoon))
+            if (IsAvailableForMission(platoon) && reserve.Assigned.Count < reserveWanted)
             {
                 platoon.Mission = reserve;
                 reserve.Assigned.Add(platoon);
@@ -871,6 +926,24 @@ internal sealed partial class CommanderOperationsService
                     platoon.Objective = territoryCenter;
                 }
             }
+        }
+
+        // DECISION-013: a platoon whose purpose has resolved — its point lost or no longer front,
+        // its attack over — and that the standing reserve does not want either has no reason to
+        // exist. It dissolves here so its six vehicles become picket stock, which is what actually
+        // takes ground on a map whose points are mostly away from the enemy. Backwards, because the
+        // dissolve takes the platoon out of the list being walked. Forming and withdrawing platoons
+        // are not "available" and are never touched by this.
+        for (int i = state.Platoons.Count - 1; i >= 0; i--)
+        {
+            CommanderPlatoon platoon = state.Platoons[i];
+            if (!IsAvailableForMission(platoon))
+            {
+                continue;
+            }
+
+            CommanderAiLog.Note(hq, $"{platoon.Name} has no purpose left; its vehicles become picket stock.");
+            DissolveToPool(state, platoon);
         }
 
         for (int i = 0; i < state.Platoons.Count; i++)
@@ -904,30 +977,380 @@ internal sealed partial class CommanderOperationsService
             }
         }
 
-        // Every full platoon the pool can field forms this review, plus at most one partial one.
-        // One per review used to read better in the log, but a hot reload hands the whole roster
-        // back as a pool — 69 vehicles on one side — and at one platoon per 30 s that force stood
-        // idle for six minutes while the game's own brain pulled at it.
-        for (int formed = 0; formed < MaxPlatoonsFormedPerReview && state.Pool.Count > 0; formed++)
+        FormPlatoonsForPurpose(hq, state);
+    }
+
+    /// <summary>
+    /// Pure, for the self-check. Platoons this commander has a reason to field (DECISION-013: "a
+    /// platoon forms only for a purpose facing the enemy"): one per platoon a forward base on a
+    /// FRONT point wants, one per platoon an attack wants, plus the standing reserve. A negative
+    /// setting never subtracts from another purpose.
+    /// </summary>
+    internal static int PlatoonPurposeCount(int forwardBasePlatoonsWanted, int attackPlatoonsWanted, int reservePlatoons)
+    {
+        return Mathf.Max(0, forwardBasePlatoonsWanted)
+            + Mathf.Max(0, attackPlatoonsWanted)
+            + Mathf.Max(0, reservePlatoons);
+    }
+
+    /// <summary>This review's live purpose count broken out the way the review line reports it
+    /// (<c>purposes=fob/attack/reserve</c>): platoons wanted by forward bases still on front points,
+    /// by attacks, and by the standing reserve. One walk, two callers — the purpose count itself and
+    /// the diagnostics line (Reuse rule 4).</summary>
+    private static void CountPurposes(OperationsState state, out int forwardBases, out int attacks, out int reserve)
+    {
+        forwardBases = 0;
+        attacks = 0;
+        reserve = Mathf.Max(0, CommanderSettings.OperationsReservePlatoons);
+        for (int i = 0; i < state.Missions.Count; i++)
         {
-            CommanderPlatoon? platoon = TryFormPlatoon(hq, state, CommanderSettings.OperationsPlatoonSize);
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.ForwardBase
+                && mission.Point != null
+                // A forward base whose point has stopped being front is about to be demoted to a
+                // picket; it is no longer a reason to build a platoon.
+                && (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront))
+            {
+                forwardBases += Mathf.Max(0, mission.WantedPlatoons);
+            }
+            else if (mission.Kind == CommanderMissionKind.Attack)
+            {
+                attacks += Mathf.Max(0, mission.WantedPlatoons);
+            }
+        }
+    }
+
+    /// <summary>This review's live purpose count: what the missions on the board ask for, plus the
+    /// standing reserve.</summary>
+    private static int PlatoonPurposeCount(OperationsState state)
+    {
+        CountPurposes(state, out int forwardBases, out int attacks, out int reserve);
+        return PlatoonPurposeCount(forwardBases, attacks, reserve);
+    }
+
+    /// <summary>
+    /// The purpose the next platoon is being formed for, phrased for the log — the first purpose
+    /// the board has not yet filled, taken in the order <see cref="PlatoonPurposeCount(OperationsState)"/>
+    /// sums them: an unfilled forward base on a front point, then an unfilled attack, then the
+    /// standing reserve. The formation gate has already established that SOME purpose is unfilled,
+    /// so the reserve is a true fallback rather than a guess.
+    /// </summary>
+    private static string NextPlatoonPurpose(OperationsState state)
+    {
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.ForwardBase
+                && mission.Point != null
+                && mission.Assigned.Count < mission.WantedPlatoons
+                && (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront))
+            {
+                return $"for ForwardBase {mission.Label}";
+            }
+        }
+
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.Attack && mission.Assigned.Count < mission.WantedPlatoons)
+            {
+                return $"for Attack {mission.Label}";
+            }
+        }
+
+        return "as the reserve";
+    }
+
+    /// <summary>
+    /// Forms platoons while the commander still has a purpose for one and the pickets do not want
+    /// the pool first (DECISION-013). Before the pickets-first doctrine this formed every full
+    /// platoon the pool could field, which is how a map with no enemy anywhere near most of it ended
+    /// up carrying 27 platoons; <see cref="MaxPlatoonsFormedPerReview"/> stays as the runaway-loop
+    /// guard, but what actually bounds the force now is the purpose count. A hot reload still hands
+    /// the whole roster back as one pool, and that pool still goes under orders inside two reviews —
+    /// as pickets first, then as many platoons as there are jobs for.
+    /// </summary>
+    private void FormPlatoonsForPurpose(FactionHQ hq, OperationsState state)
+    {
+        int openThreatened = CountOpenThreatenedPlatoons(state);
+        if (PicketsNeedThePool(state.ShortPicketMissions, openThreatened))
+        {
+            return;
+        }
+
+        int allowed = PlatoonsAheadOfPickets(state.ShortPicketMissions, openThreatened, MaxPlatoonsFormedPerReview);
+        for (int formed = 0; formed < allowed && state.Pool.Count > 0; formed++)
+        {
+            if (PlatoonPurposeCount(state) <= state.Platoons.Count)
+            {
+                ReportNoPlatoonPurpose(hq, state);
+                return;
+            }
+
+            state.NoPurposeLoggedPool = -1;
+            CommanderPlatoon? platoon = TryFormPlatoon(
+                hq, state, CommanderSettings.OperationsPlatoonSize, NextPlatoonPurpose(state));
             if (platoon == null || platoon.Members.Count < platoon.Establishment)
             {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Says that the pool is standing idle on purpose, not by accident (DECISION-013): with no
+    /// forward base, attack or reserve short of a platoon, the vehicles left over are picket stock,
+    /// and a commander that says nothing here reads as a commander that has stopped working. Logged
+    /// once per change in the idle count, the <c>ReportInsertionDenial</c> convention — a review
+    /// runs every 30 s and the same line every time is noise nobody reads.
+    /// </summary>
+    private static void ReportNoPlatoonPurpose(FactionHQ hq, OperationsState state)
+    {
+        if (state.Pool.Count == 0 || state.NoPurposeLoggedPool == state.Pool.Count)
+        {
+            return;
+        }
+
+        state.NoPurposeLoggedPool = state.Pool.Count;
+        CommanderAiLog.Note(
+            hq, $"no purpose for a new platoon; {state.Pool.Count} vehicles wait as picket stock.");
+    }
+
+    /// <summary>
+    /// The one attach point for every site that assigns a platoon to a mission (Reuse rule 4):
+    /// the forward-base and attack matching loops above, and the reinforcement strip below. Sets
+    /// the platoon's reinforcement bookkeeping on the way — a platoon attached to a mission with an
+    /// open request (addendum 2026-09-14 §3) is answering it, and says so once, here, rather than
+    /// on every review it stays assigned; a mission with no request clears any stale answer.
+    /// </summary>
+    private static void AttachPlatoon(
+        FactionHQ hq, CommanderPlatoon platoon, CommanderOperationsMission mission, CommanderPlatoonState state)
+    {
+        platoon.Mission = mission;
+        platoon.State = state;
+        mission.Assigned.Add(platoon);
+        if (mission.ReinforcePlatoons > 0)
+        {
+            if (platoon.ReinforcesLabel != mission.Label)
+            {
+                platoon.ReinforcesLabel = mission.Label;
+                CommanderAiLog.Note(hq, $"{platoon.Name} reinforces {mission.Label}.");
+            }
+        }
+        else
+        {
+            platoon.ReinforcesLabel = string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Addendum 2026-09-14 §3's fill order, step two: a mission with an open reinforcement request
+    /// the released reserve platoons could not satisfy takes platoons that are Holding other
+    /// forward bases' posts — most rear point first (leaving the point nearest the enemy is the
+    /// last thing a commander does), never a platoon already attacking, and only as many as the
+    /// request itself asks for.
+    /// </summary>
+    private static void FillReinforcementsFromPosts(FactionHQ hq, OperationsState state)
+    {
+        for (int m = 0; m < state.Missions.Count; m++)
+        {
+            CommanderOperationsMission mission = state.Missions[m];
+            if (mission.ReinforcePlatoons <= 0
+                || (mission.Kind == CommanderMissionKind.ForwardBase && mission.Point == null))
+            {
+                continue;
+            }
+
+            int want = Mathf.Min(mission.WantedPlatoons - mission.Assigned.Count, mission.ReinforcePlatoons);
+            while (want > 0)
+            {
+                CommanderPlatoon? donor = TakeRearmostHoldingPlatoon(state, mission);
+                if (donor == null)
+                {
+                    break;
+                }
+
+                if (mission.Kind == CommanderMissionKind.Attack)
+                {
+                    AttachPlatoon(hq, donor, mission, CommanderPlatoonState.Attacking);
+                }
+                else
+                {
+                    donor.Objective = mission.Point!.Position;
+                    AttachPlatoon(hq, donor, mission, CommanderPlatoonState.Moving);
+                }
+
+                want--;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The donor the strip step takes next: the first <see cref="CommanderPlatoonState.Holding"/>
+    /// platoon of the forward base whose point sits FURTHEST from the enemy — "rear points first"
+    /// (addendum 2026-09-14 §3). Platoons hold only front points or the reserve ring, so "rear" is
+    /// read as the most rear of the held front points, measured by the ranked point's own distance
+    /// to the enemy. Detached from its mission on the way out; never an attacking platoon, an
+    /// attack mission's platoons are not even considered.
+    /// </summary>
+    private static CommanderPlatoon? TakeRearmostHoldingPlatoon(OperationsState state, CommanderOperationsMission forMission)
+    {
+        CommanderPlatoon? best = null;
+        float bestDistance = -1f;
+        for (int m = 0; m < state.Missions.Count; m++)
+        {
+            CommanderOperationsMission donor = state.Missions[m];
+            if (donor.Kind != CommanderMissionKind.ForwardBase
+                || ReferenceEquals(donor, forMission)
+                || donor.Point == null
+                // A base answering a request of its own is never a donor: two open requests
+                // stripping each other's platoons would swap posts every review.
+                || donor.ReinforcePlatoons > 0)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < donor.Assigned.Count; i++)
+            {
+                CommanderPlatoon platoon = donor.Assigned[i];
+                if (platoon.State != CommanderPlatoonState.Holding)
+                {
+                    continue;
+                }
+
+                // Furthest from the enemy wins; a point that left the ranked list (the least
+                // knowable position) is stripped last.
+                float distance = TryGetRanked(state, donor.Point, out CommanderRankedPoint ranked)
+                    ? ranked.DistanceToEnemyMeters
+                    : float.MaxValue;
+                if (distance > bestDistance)
+                {
+                    bestDistance = distance;
+                    best = platoon;
+                }
+
+                // One candidate per donor base: the first platoon holding its posts.
                 break;
             }
         }
+
+        if (best != null)
+        {
+            ReleaseFromMission(best);
+        }
+
+        return best;
     }
 
     /// <summary>Ceiling on platoons formed in one review, so a reload's 60-vehicle pool is back
     /// under orders inside two reviews while a runaway fill loop can never spin.</summary>
     private const int MaxPlatoonsFormedPerReview = 6;
 
-    /// <summary>At most this share of a commander's platoons sit in forward bases (design SS2); at
-    /// least one always holds, so a commander with a single platoon still holds its best point.
-    /// Pure, for the self-check.</summary>
-    internal static int MaxForwardBases(int platoonCount, float fobShare)
+    /// <summary>
+    /// Forward bases the commander wants on its best front points whatever its roster looks like.
+    /// Two, because one forward base is a single post the enemy walks around, and because a
+    /// commander down to one platoon has to have somewhere to send the next two it builds — with a
+    /// floor of one, a single platoon filled the only allowed base, the board showed one purpose,
+    /// and one purpose never justified a second platoon. Planner-chosen.
+    /// </summary>
+    internal const int MinForwardBases = 2;
+
+    /// <summary>
+    /// How many forward bases may stand at once. DEMAND comes first and demand does not depend on
+    /// how many platoons exist (fix, 2026-09-14): every front point the enemy is actually at wants
+    /// its own forward base, and <see cref="MinForwardBases"/> more stand on the best-ranked front
+    /// points regardless of the roster. The forward-base share (design SS2) survives only as an
+    /// ASSIGNMENT limiter for a commander rich in platoons — it can raise the allowance above the
+    /// demand floor, never cut below it.
+    /// <para>The rule this replaced was <c>max(1, platoons x share)</c>, which made the demand a
+    /// function of the platoon count: one platoon allowed one forward base, one forward base was
+    /// one purpose, and the purpose count never rose above the platoon count, so the force could
+    /// not grow however hard the enemy pressed. The 2026-09-14 match sat at one platoon and sixteen
+    /// pickets for the whole match on exactly that loop.</para>
+    /// Pure, for the self-check.
+    /// </summary>
+    internal static int MaxForwardBases(int platoonCount, float fobShare, int threatenedFrontPoints)
     {
-        return Mathf.Max(1, Mathf.FloorToInt(platoonCount * Mathf.Clamp01(fobShare)));
+        int demand = MinForwardBases + Mathf.Max(0, threatenedFrontPoints);
+        int share = Mathf.FloorToInt(Mathf.Max(0, platoonCount) * Mathf.Clamp01(fobShare));
+        return Mathf.Max(demand, share);
+    }
+
+    /// <summary>
+    /// A front point the enemy is actually at: a threat mark inside its ring, or a contact stamp
+    /// still running (a tracked hostile near it, or a vehicle lost on it — the same clock the
+    /// contact-priority air demand reads). This is the test that makes forward-base demand
+    /// independent of the platoon count, and the one the pool order and the order book both read,
+    /// so all three can never disagree about which point is "facing the enemy" (Reuse rule 4).
+    /// </summary>
+    private static bool IsThreatenedFrontPoint(OperationsState state, CommanderOperationsMission mission)
+    {
+        if (mission.Point == null)
+        {
+            return false;
+        }
+
+        if (Time.time < mission.ContactUntil)
+        {
+            return true;
+        }
+
+        return TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) && ranked.IsFront && ranked.HasThreatMark;
+    }
+
+    /// <summary>Front points the enemy is at this review — what <see cref="MaxForwardBases"/> turns
+    /// into forward-base demand. A point in contact whose threat mark has already timed out counts
+    /// too: the contact stamp outlives the mark, and a point the enemy hit minutes ago is not a
+    /// quiet point.</summary>
+    private static int CountThreatenedFrontPoints(OperationsState state)
+    {
+        int count = 0;
+        for (int i = 0; i < state.RankedPoints.Count; i++)
+        {
+            CommanderRankedPoint ranked = state.RankedPoints[i];
+            if (ranked.IsFront && ranked.HasThreatMark)
+            {
+                count++;
+            }
+        }
+
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.ForwardBase
+                && mission.Point != null
+                && Time.time < mission.ContactUntil
+                && TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked)
+                && ranked.IsFront
+                && !ranked.HasThreatMark)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Platoons the purposes FACING THE ENEMY are still short of: a forward base on a front point
+    /// the enemy is at, and every attack. Zero means nothing is threatened, which is when the
+    /// pickets keep first call on the pool (the user's doctrine); anything above zero is what the
+    /// pool, the formation step and the order book all yield to.
+    /// </summary>
+    private static int CountOpenThreatenedPlatoons(OperationsState state)
+    {
+        int open = 0;
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.Attack
+                || (mission.Kind == CommanderMissionKind.ForwardBase && IsThreatenedFrontPoint(state, mission)))
+            {
+                open += Mathf.Max(0, mission.WantedPlatoons - mission.Assigned.Count);
+            }
+        }
+
+        return open;
     }
 
     private static bool TryGetRanked(OperationsState state, CommanderStrategicPoint? point, out CommanderRankedPoint ranked)
@@ -948,6 +1371,32 @@ internal sealed partial class CommanderOperationsService
         return false;
     }
 
+    /// <summary>
+    /// Returns every live member of <paramref name="platoon"/> to the free pool and takes the
+    /// platoon off the board — the dissolve <see cref="DemoteForwardBaseToPicket"/> has always done
+    /// inline, lifted out so the surplus-platoon step can use the same one (Reuse rule 5). Goes out
+    /// through <see cref="ReleaseFromMission"/>, so the mission bookkeeping, any reinforcement
+    /// answer and the ground posture all clear at the one choke point they already clear at. Dead
+    /// members are dropped rather than pooled; the pool sweep dropped them on the next review
+    /// anyway, and a platoon's formation slots go with it.
+    /// </summary>
+    private static void DissolveToPool(OperationsState state, CommanderPlatoon platoon)
+    {
+        for (int i = 0; i < platoon.Members.Count; i++)
+        {
+            Unit member = platoon.Members[i];
+            if (member != null && !member.disabled)
+            {
+                state.Pool.Add(member);
+            }
+        }
+
+        platoon.Members.Clear();
+        platoon.Issued.Clear();
+        ReleaseFromMission(platoon);
+        state.Platoons.Remove(platoon);
+    }
+
     /// <summary>Disbands a forward base's platoon(s) back into the free pool and turns the mission
     /// into a picket (design SS2: "a FOB whose point turns rear thins to a picket, releasing the
     /// surplus members back to the pool"). The now-picket mission claims two of those members back
@@ -957,11 +1406,7 @@ internal sealed partial class CommanderOperationsService
     {
         for (int i = mission.Assigned.Count - 1; i >= 0; i--)
         {
-            CommanderPlatoon platoon = mission.Assigned[i];
-            state.Pool.AddRange(platoon.Members);
-            platoon.Members.Clear();
-            platoon.Mission = null;
-            state.Platoons.Remove(platoon);
+            DissolveToPool(state, mission.Assigned[i]);
         }
 
         mission.Assigned.Clear();
@@ -974,6 +1419,10 @@ internal sealed partial class CommanderOperationsService
         mission.NoTruckLogged = false;
         mission.Kind = CommanderMissionKind.Picket;
         mission.WantedPlatoons = 0;
+        // A demoted base asks for no reinforcements (addendum 2026-09-14 §3): the request review
+        // skips pickets, so a lingering request would never close and the marker flag never clear.
+        mission.ReinforcePlatoons = 0;
+        mission.ReinforceBelowSince = -1f;
     }
 
     /// <summary>
@@ -989,6 +1438,13 @@ internal sealed partial class CommanderOperationsService
         {
             if (state.Missions[i].Kind == CommanderMissionKind.Picket)
             {
+                // The picket mirror of the platoon loss stamp in SweepPool, for the same reason
+                // (addendum 2026-09-14 §2): a picket that lost a vehicle is under attack.
+                if (HasCombatLoss(hq, state.Missions[i].PicketMembers))
+                {
+                    state.Missions[i].LastLossAt = Time.time;
+                }
+
                 state.Missions[i].PicketMembers.RemoveAll(unit => IsStalePoolUnit(hq, unit));
             }
         }
@@ -1010,22 +1466,30 @@ internal sealed partial class CommanderOperationsService
             });
         }
 
-        int cap = MaxForwardBases(Mathf.Max(1, state.Platoons.Count), CommanderSettings.OperationsFobShare);
-        int forwardBaseCount = 0;
-        for (int i = 0; i < state.Missions.Count; i++)
+        int allowance = MaxForwardBases(
+            state.Platoons.Count, CommanderSettings.OperationsFobShare, CountThreatenedFrontPoints(state));
+        OrderForwardBasesByRank(state);
+        int kept = 0;
+        for (int i = 0; i < forwardBasesByRank.Count; i++)
         {
-            CommanderOperationsMission mission = state.Missions[i];
-            if (mission.Kind != CommanderMissionKind.ForwardBase)
+            CommanderOperationsMission mission = forwardBasesByRank[i];
+            bool stillFront = !TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront;
+            if (!stillFront)
             {
+                DemoteForwardBaseToPicket(state, mission);
                 continue;
             }
 
-            forwardBaseCount++;
-            bool stillFront = !TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront;
-            if (forwardBaseCount > cap || !stillFront)
+            // A front point the enemy is standing on keeps its forward base whatever the allowance
+            // says — that is the whole of "demand does not depend on the platoon count". Everything
+            // else competes for the allowance in ranked order.
+            if (IsThreatenedFrontPoint(state, mission) || kept < allowance)
             {
-                DemoteForwardBaseToPicket(state, mission);
+                kept++;
+                continue;
             }
+
+            DemoteForwardBaseToPicket(state, mission);
         }
 
         for (int i = 0; i < state.Missions.Count; i++)
@@ -1040,38 +1504,149 @@ internal sealed partial class CommanderOperationsService
             }
         }
 
-        FillPickets(state);
+        // Order (a) before (b): the platoons a threatened purpose is waiting on are left vehicles in
+        // the pool before any picket is topped up. With nothing threatened the hold-back is zero and
+        // the pickets have the pool to themselves, exactly as the pickets-first doctrine says.
+        // Attacks opened by THIS review's PlanOffensive are not on the board yet (it runs after this
+        // step); one opened on any earlier review is, which is every attack that has actually
+        // started forming.
+        FillPickets(
+            hq,
+            state,
+            PoolHeldForThreatenedPurposes(
+                CountOpenThreatenedPlatoons(state),
+                CommanderSettings.OperationsPlatoonSize,
+                MaxPlatoonsFormedPerReview));
     }
 
-    /// <summary>Tops up every picket to <c>PointsMinGarrison</c> with the cheapest free-pool
-    /// vehicles by <c>definition.value</c>, then drives them to the point's hold posts.</summary>
+    /// <summary>Scratch for the demotion walk's ranked order, reused across reviews rather than
+    /// allocated each time (the hold-post scratch convention).</summary>
+    private readonly List<CommanderOperationsMission> forwardBasesByRank = new();
+
     /// <summary>
-    /// True while the pool's vehicles are spoken for by platoons: a platoon is still short of its
-    /// recipe, or the commander has fewer platoons than its standing reserve. Pickets take from the
-    /// pool only when this is false — otherwise every bought vehicle went to hold a rear crossroads
-    /// two at a time and the first platoon sat at 3/6 forever. Pure, for the self-check.
+    /// Fills <see cref="forwardBasesByRank"/> with every forward-base mission in RANKED order, not
+    /// mission-creation order: the bases that keep their platoons are the best-ranked ones, and a
+    /// base opened ten reviews ago on a point that has since fallen down the ranking has no claim
+    /// over one opened this review on a better point. A base whose point has left the ranked list
+    /// goes last — the least knowable position, so the first to thin, which is the tie-break
+    /// <see cref="TakeRearmostHoldingPlatoon"/> already uses.
     /// </summary>
-    internal static bool PlatoonsNeedThePool(int platoonCount, int reservePlatoons, bool anyPlatoonUnderStrength)
+    private void OrderForwardBasesByRank(OperationsState state)
     {
-        return anyPlatoonUnderStrength || platoonCount < reservePlatoons;
-    }
-
-    private void FillPickets(OperationsState state)
-    {
-        bool underStrength = false;
-        for (int i = 0; i < state.Platoons.Count; i++)
+        forwardBasesByRank.Clear();
+        for (int r = 0; r < state.RankedPoints.Count; r++)
         {
-            CommanderPlatoon platoon = state.Platoons[i];
-            if (platoon.Members.Count < platoon.Establishment)
+            for (int m = 0; m < state.Missions.Count; m++)
             {
-                underStrength = true;
-                break;
+                CommanderOperationsMission mission = state.Missions[m];
+                if (mission.Kind == CommanderMissionKind.ForwardBase
+                    && ReferenceEquals(mission.Point, state.RankedPoints[r].Point))
+                {
+                    forwardBasesByRank.Add(mission);
+                }
             }
         }
 
-        bool poolReserved = PlatoonsNeedThePool(
-            state.Platoons.Count, CommanderSettings.OperationsReservePlatoons, underStrength);
+        for (int m = 0; m < state.Missions.Count; m++)
+        {
+            CommanderOperationsMission mission = state.Missions[m];
+            if (mission.Kind == CommanderMissionKind.ForwardBase && !forwardBasesByRank.Contains(mission))
+            {
+                forwardBasesByRank.Add(mission);
+            }
+        }
+    }
 
+    /// <summary>
+    /// True while a picket on a point away from the front is still short of its two vehicles, which
+    /// is when the pool belongs to the pickets and NOT to a new platoon (DECISION-013: "pickets
+    /// should be the primary capture mechanic, rather than spamming large platoons all over the
+    /// map"). Pure, for the self-check.
+    /// <para>This is the old <c>PlatoonsNeedThePool</c> guard pointed the other way. That one
+    /// withheld the pool from pickets while any platoon was short of its recipe or the reserve was
+    /// under strength — and since the buyer kept the book open forever, it was true almost always,
+    /// so a rear crossroads never got its two vehicles while 27 platoons formed behind it.</para>
+    /// <para>Amended 2026-09-14: the pickets keep first call only while NOTHING faces the enemy.
+    /// The moment a forward base on a threatened front point or an attack is short of a platoon,
+    /// the pool belongs to that platoon. Without this the guard was unconditional, so a commander in
+    /// contact went on feeding quiet rear pickets and never fielded the platoon the contact was
+    /// asking for — the deadlock the 2026-09-14 match sat in with one platoon and sixteen full
+    /// pickets, review after review.</para>
+    /// </summary>
+    internal static bool PicketsNeedThePool(int shortPicketMissions, int openThreatenedPlatoons)
+    {
+        return shortPicketMissions > 0 && openThreatenedPlatoons <= 0;
+    }
+
+    /// <summary>
+    /// How many platoons may form this review out of a pool the pickets are still short of: none
+    /// while nothing faces the enemy, and otherwise exactly what the threatened purposes ask for.
+    /// Never more, so the standing reserve — the last claim on the pool — stays behind the pickets
+    /// rather than dressing itself up as a reason to raid them. Pure, for the self-check.
+    /// </summary>
+    internal static int PlatoonsAheadOfPickets(int shortPicketMissions, int openThreatenedPlatoons, int maxPerReview)
+    {
+        int ceiling = Mathf.Max(0, maxPerReview);
+        return shortPicketMissions <= 0 ? ceiling : Mathf.Clamp(openThreatenedPlatoons, 0, ceiling);
+    }
+
+    /// <summary>
+    /// Vehicles the pickets leave in the pool for the platoons a threatened purpose is waiting on —
+    /// one platoon's worth each, bounded by what the formation step could actually build this
+    /// review, since holding back more than that only idles vehicles nobody will use. Pure, for the
+    /// self-check.
+    /// </summary>
+    internal static int PoolHeldForThreatenedPurposes(int openThreatenedPlatoons, int platoonSize, int maxPerReview)
+    {
+        int platoons = Mathf.Clamp(openThreatenedPlatoons, 0, Mathf.Max(0, maxPerReview));
+        return platoons * Mathf.Max(1, platoonSize);
+    }
+
+    /// <summary>How far past the front line a rear point still counts as "next to the fight": one
+    /// more front range, so a point the enemy could reach in the same push as the front line is
+    /// filled before one deep in the commander's own territory. Planner-chosen.</summary>
+    private const float PicketFrontAdjacentMultiplier = 2f;
+
+    /// <summary>A rear point this close to the enemy is the next one they reach, so its picket takes
+    /// pool vehicles before a quiet one deep in the rear (pool order (b) before (c)). Pure, for the
+    /// self-check.</summary>
+    internal static bool IsFrontAdjacentPicket(float distanceToEnemyMeters, float frontRangeMeters)
+    {
+        return distanceToEnemyMeters <= Mathf.Max(1f, frontRangeMeters) * PicketFrontAdjacentMultiplier;
+    }
+
+    /// <summary>
+    /// Tops up every picket to <c>PointsMinGarrison</c> with the cheapest free-pool vehicles by
+    /// <c>definition.value</c>, then drives them to the point's hold posts, and records how many
+    /// pickets away from the front are still short for <see cref="PicketsNeedThePool"/>.
+    /// <para>The fill runs in the pool's priority order (fix, 2026-09-14): pickets on front-adjacent
+    /// points first, ranked by value, then the quiet rear, then any picket whose point has left the
+    /// ranked list. <paramref name="heldForPlatoons"/> is the floor the pool is never taken below —
+    /// what the platoons a threatened purpose is waiting on have first claim to.</para>
+    /// </summary>
+    private void FillPickets(FactionHQ hq, OperationsState state, int heldForPlatoons)
+    {
+        float frontRange = CommanderSettings.OperationsFrontRangeMeters;
+        for (int pass = 0; pass < 2; pass++)
+        {
+            bool nearPass = pass == 0;
+            for (int r = 0; r < state.RankedPoints.Count; r++)
+            {
+                CommanderRankedPoint ranked = state.RankedPoints[r];
+                if (IsFrontAdjacentPicket(ranked.DistanceToEnemyMeters, frontRange) != nearPass)
+                {
+                    continue;
+                }
+
+                CommanderOperationsMission? mission = FindPicketMission(state, ranked.Point);
+                if (mission != null)
+                {
+                    FillOnePicket(state, mission, heldForPlatoons);
+                }
+            }
+        }
+
+        int shortMissions = 0;
         for (int i = 0; i < state.Missions.Count; i++)
         {
             CommanderOperationsMission mission = state.Missions[i];
@@ -1080,50 +1655,170 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
-            int wanted = CommanderSettings.PointsMinGarrison;
-            while (!poolReserved && mission.PicketMembers.Count < wanted && state.Pool.Count > 0)
+            // A picket whose point is not in the ranked list at all gets its fill here, last of
+            // everything: an unranked point is the least knowable one on the board.
+            if (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked))
             {
-                Unit? cheapest = null;
-                float cheapestValue = float.MaxValue;
-                for (int p = 0; p < state.Pool.Count; p++)
-                {
-                    Unit candidate = state.Pool[p];
-                    float value = candidate.definition is VehicleDefinition definition ? definition.value : float.MaxValue;
-                    if (value < cheapestValue)
-                    {
-                        cheapestValue = value;
-                        cheapest = candidate;
-                    }
-                }
-
-                if (cheapest == null)
-                {
-                    break;
-                }
-
-                mission.PicketMembers.Add(cheapest);
-                state.Pool.Remove(cheapest);
+                FillOnePicket(state, mission, heldForPlatoons);
             }
 
-            DriveToHoldPosts(mission.Point, mission.PicketMembers);
+            // Only a picket AWAY from the front withholds the pool from platoon formation. A picket
+            // on a front point is a forward base the share cap demoted; the platoon that would form
+            // instead is the better answer there, and holding the pool for it would deadlock the two
+            // against each other.
+            if (mission.PicketMembers.Count < CommanderSettings.PointsMinGarrison && !ranked.IsFront)
+            {
+                shortMissions++;
+            }
+
+            DriveToHoldPosts(hq, mission.Point, mission.PicketMembers);
+        }
+
+        state.ShortPicketMissions = shortMissions;
+    }
+
+    /// <summary>The picket mission standing on <paramref name="point"/>, or null when no picket is
+    /// planned there this review.</summary>
+    private static CommanderOperationsMission? FindPicketMission(OperationsState state, CommanderStrategicPoint point)
+    {
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.Picket && ReferenceEquals(mission.Point, point))
+            {
+                return mission;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>One picket's top-up out of the pool's cheapest vehicles, never taking the pool below
+    /// <paramref name="heldForPlatoons"/>.</summary>
+    private static void FillOnePicket(OperationsState state, CommanderOperationsMission mission, int heldForPlatoons)
+    {
+        int wanted = CommanderSettings.PointsMinGarrison;
+        while (mission.PicketMembers.Count < wanted && state.Pool.Count > Mathf.Max(0, heldForPlatoons))
+        {
+            Unit? cheapest = null;
+            float cheapestValue = float.MaxValue;
+            for (int p = 0; p < state.Pool.Count; p++)
+            {
+                Unit candidate = state.Pool[p];
+                float value = candidate.definition is VehicleDefinition definition ? definition.value : float.MaxValue;
+                if (value < cheapestValue)
+                {
+                    cheapestValue = value;
+                    cheapest = candidate;
+                }
+            }
+
+            if (cheapest == null)
+            {
+                break;
+            }
+
+            mission.PicketMembers.Add(cheapest);
+            state.Pool.Remove(cheapest);
         }
     }
 
-    /// <summary>The forward-base share cap at its named boundaries (design SS2), and the picket
-    /// pool guard: platoons come before pickets until the reserve exists and every platoon is full.</summary>
+    /// <summary>The forward-base share cap at its named boundaries (design SS2), and the pool guard
+    /// the pickets-first doctrine turned around (DECISION-013): a short picket comes before a new
+    /// platoon, not the other way round.</summary>
     private static void CheckForwardBaseShare(List<string> failures)
     {
         Expect(failures, "a full platoon moves out at once", IsReadyToMoveOut(6, 6, 0f, 180f), true);
         Expect(failures, "a short platoon waits", IsReadyToMoveOut(4, 6, 60f, 180f), false);
         Expect(failures, "a short platoon moves out once it has waited long enough", IsReadyToMoveOut(4, 6, 180f, 180f), true);
-        Expect(failures, "pickets wait while a platoon is short", PlatoonsNeedThePool(3, 2, true), true);
-        Expect(failures, "pickets wait while the reserve is short", PlatoonsNeedThePool(1, 2, false), true);
-        Expect(failures, "pickets may fill once platoons are full and the reserve exists", PlatoonsNeedThePool(2, 2, false), false);
-        Expect(failures, "half of six platoons may sit in forward bases", MaxForwardBases(6, 0.5f), 3);
-        Expect(failures, "a commander with one platoon still holds its best point", MaxForwardBases(1, 0.5f), 1);
-        Expect(failures, "the floor holds even at a zero share", MaxForwardBases(6, 0f), 1);
-        Expect(failures, "a full share lets every platoon hold", MaxForwardBases(6, 1f), 6);
-        Expect(failures, "the share rounds down, so the reserve is never short", MaxForwardBases(7, 0.5f), 3);
+        Expect(failures, "one short picket withholds the pool from platoon formation", PicketsNeedThePool(1, 0), true);
+        Expect(failures, "several short pickets still withhold the pool", PicketsNeedThePool(4, 0), true);
+        Expect(failures, "no short picket releases the pool to platoon formation", PicketsNeedThePool(0, 0), false);
+        Expect(failures, "a count that never ran never withholds the pool", PicketsNeedThePool(-1, 0), false);
+        Expect(
+            failures,
+            "a threatened purpose takes the pool back off the pickets",
+            PicketsNeedThePool(4, 1),
+            false);
+        Expect(
+            failures,
+            "the pickets keep the pool while every purpose is quiet",
+            PicketsNeedThePool(4, 0),
+            true);
+        Expect(
+            failures,
+            "a quiet map lets the formation step run to its per-review ceiling",
+            PlatoonsAheadOfPickets(0, 0, MaxPlatoonsFormedPerReview),
+            MaxPlatoonsFormedPerReview);
+        Expect(
+            failures,
+            "short pickets and nothing threatened form no platoon at all",
+            PlatoonsAheadOfPickets(3, 0, MaxPlatoonsFormedPerReview),
+            0);
+        Expect(
+            failures,
+            "short pickets and two threatened platoons form exactly those two",
+            PlatoonsAheadOfPickets(3, 2, MaxPlatoonsFormedPerReview),
+            2);
+        Expect(
+            failures,
+            "a threatened purpose never breaks the per-review formation ceiling",
+            PlatoonsAheadOfPickets(3, 99, MaxPlatoonsFormedPerReview),
+            MaxPlatoonsFormedPerReview);
+        Expect(
+            failures,
+            "a quiet commander holds nothing back from its pickets",
+            PoolHeldForThreatenedPurposes(0, 6, MaxPlatoonsFormedPerReview),
+            0);
+        Expect(
+            failures,
+            "one threatened platoon holds one platoon's worth back from the pickets",
+            PoolHeldForThreatenedPurposes(1, 6, MaxPlatoonsFormedPerReview),
+            6);
+        Expect(
+            failures,
+            "the hold-back never exceeds what one review could build",
+            PoolHeldForThreatenedPurposes(99, 6, MaxPlatoonsFormedPerReview),
+            MaxPlatoonsFormedPerReview * 6);
+        Expect(
+            failures,
+            "a rear point one front range past the line is still front-adjacent",
+            IsFrontAdjacentPicket(30000f, 15000f),
+            true);
+        Expect(
+            failures,
+            "a point deep in the rear is filled after the front-adjacent ones",
+            IsFrontAdjacentPicket(30001f, 15000f),
+            false);
+        Expect(failures, "two forward bases, an attack and the reserve want four platoons", PlatoonPurposeCount(2, 1, 1), 4);
+        Expect(failures, "a quiet map still wants its standing reserve", PlatoonPurposeCount(0, 0, 1), 1);
+        Expect(failures, "no purpose anywhere and no reserve wants no platoon at all", PlatoonPurposeCount(0, 0, 0), 0);
+        Expect(failures, "a purpose count at the platoon count forms nothing", PlatoonPurposeCount(1, 0, 1) > 2, false);
+        Expect(failures, "a purpose count above the platoon count forms one", PlatoonPurposeCount(2, 0, 1) > 2, true);
+        Expect(failures, "a negative setting never subtracts from another purpose", PlatoonPurposeCount(2, -5, 1), 3);
+        Expect(failures, "half of six platoons may sit in forward bases", MaxForwardBases(6, 0.5f, 0), 3);
+        Expect(failures, "a commander with one platoon still wants its two best points", MaxForwardBases(1, 0.5f, 0), 2);
+        Expect(failures, "the demand floor holds even at a zero share", MaxForwardBases(6, 0f, 0), MinForwardBases);
+        Expect(failures, "a commander with no platoons at all still wants the floor", MaxForwardBases(0, 1f, 0), MinForwardBases);
+        Expect(failures, "a full share lets every platoon hold", MaxForwardBases(6, 1f, 0), 6);
+        Expect(failures, "the share rounds down, so the reserve is never short", MaxForwardBases(7, 0.5f, 0), 3);
+        Expect(failures, "every threatened front point adds a forward base to the floor", MaxForwardBases(1, 0.5f, 4), 6);
+        Expect(
+            failures,
+            "the share never cuts the allowance below the threatened demand",
+            MaxForwardBases(6, 0.5f, 4),
+            6);
+
+        // The deadlock this track's fix exists for: one platoon on the board and one front point the
+        // enemy is standing on must leave MORE purposes than platoons, or the force never grows.
+        int threatenedAllowance = MaxForwardBases(1, 0.5f, 1);
+        Expect(failures, "one platoon and one threatened front point still allow three forward bases", threatenedAllowance, 3);
+        // The threatened base wants two platoons (design SS2); the other two allowed bases want one each.
+        Expect(
+            failures,
+            "one platoon under threat has a purpose for at least three platoons",
+            PlatoonPurposeCount(2 + (threatenedAllowance - 1), 0, 1) >= 3,
+            true);
     }
 
     /// <summary>Withdraw and fail thresholds (design SS1/SS3), and the ladder guard: a failed

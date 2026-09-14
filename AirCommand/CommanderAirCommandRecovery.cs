@@ -270,8 +270,10 @@ internal sealed partial class CommanderAirCommandService
     }
 
     /// <summary>On the ground and either stopped or taxiing. The taxi-state check catches an
-    /// aircraft rolling faster than the speed threshold along a taxiway.</summary>
-    private static bool IsOnDeck(Aircraft aircraft)
+    /// aircraft rolling faster than the speed threshold along a taxiway. Internal (one-word
+    /// widening, Reuse rule 4): the air markers read the same answer, so "on the ground" means one
+    /// thing to the recovery and to the label above the aeroplane.</summary>
+    internal static bool IsOnDeck(Aircraft aircraft)
     {
         if (aircraft.radarAlt >= ParkedRadarAltMeters)
         {

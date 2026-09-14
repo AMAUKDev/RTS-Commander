@@ -90,6 +90,37 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
     }
 
     internal static CommanderSupplyHeliService? Instance { get; private set; }
+
+    /// <summary>
+    /// Whether this airframe is flying a cargo or insertion run for this service (user report
+    /// 2026-09-14: "haven't seen any successful transport picket insertions yet... are they getting
+    /// intercepted and retasked to land by the Air Commander?"). A supply run is flown by this
+    /// service's own mission record, NOT by an Air Command mission, so every test the air wing makes
+    /// with <c>IsOnAnyMission</c> reads false for one and the idle sweep sends it home halfway to its
+    /// landing zone. Internal (one-word widening, Reuse rule 4): the operations air step asks this
+    /// before it touches any airframe.
+    /// <para>
+    /// The pending half matters as much as the assigned half: the transport exists from the moment it
+    /// registers, and this service matches it to its run in the same registration postfix the air
+    /// wing's claim runs in. Whichever postfix runs first would otherwise win the aeroplane.
+    /// </para>
+    /// </summary>
+    internal static bool IsOnSupplyRun(Aircraft? aircraft)
+    {
+        CommanderSupplyHeliService? service = Instance;
+        if (aircraft == null || service == null)
+        {
+            return false;
+        }
+
+        if (service.assignedMissions.ContainsKey(aircraft))
+        {
+            return true;
+        }
+
+        return service.pendingAircraftSpawn != null
+            && ReferenceEquals(aircraft.definition, service.pendingAircraftSpawn.Definition);
+    }
     internal IReadOnlyList<CargoAircraftOption> AircraftOptions => aircraftOptions;
     internal IReadOnlyList<AirbaseOption> AirbaseOptions => airbaseOptions;
     internal bool AwaitingTargetSelection => pendingTargetSelection != null;

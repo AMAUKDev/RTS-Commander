@@ -220,10 +220,13 @@ internal sealed class CommanderAiLogUi
         y += 22f;
 
         string plan = CommanderEnemyCommanderService.Instance?.GetPlanLabel(hq) ?? "NONE";
-        string reserve = CommanderEconomyService.FundsLabel(CommanderEconomyService.GetEnemyBuildReserve(hq));
+        // The value is still GetEnemyBuildReserve — the one definition of what the commander builds
+        // next — but the ladder (2026-09-14) no longer holds it back from anything, so the old
+        // RESERVE TARGET label stopped being true. What rung 4 wants next is what it says.
+        string next = CommanderEconomyService.FundsLabel(CommanderEconomyService.GetEnemyBuildReserve(hq));
         GUI.Label(
             new Rect(10f, y, windowRect.width - 20f, 22f),
-            $"PLAN {plan}   RESERVE TARGET {reserve}",
+            $"PLAN {plan}   NEXT BUILD {next}",
             CommanderUiTheme.Label);
         y += 26f;
 
