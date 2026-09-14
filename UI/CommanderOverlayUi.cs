@@ -92,6 +92,10 @@ internal sealed partial class CommanderOverlayUi : ICommanderActivate, ICommande
     private int chipCount = -1;
     private readonly List<CommanderShortcutReference.Entry> shortcutEntries = new();
     private Vector2 shortcutScroll;
+
+    /// <summary>Scroll position for the POINTS tab (departure 7): the STRATEGIC POINTS box plus the
+    /// OPERATIONS box no longer both fit inside the window with the help overlay open.</summary>
+    private Vector2 pointsSettingsScroll;
     private Rect pinnedWindowRect;
     private Rect radarWindowRect;
     private Rect selectionHelpRect;

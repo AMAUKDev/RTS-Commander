@@ -40,6 +40,12 @@
       <HintPath>$(GameDir)\NuclearOption_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Shipped by the game itself; used for the hot-reload state snapshot (see
+         Core/CommanderStateStore.cs) rather than hand-rolling a JSON writer. -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(GameDir)\NuclearOption_Data\Managed\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Mirage">
       <HintPath>$(GameDir)\NuclearOption_Data\Managed\Mirage.dll</HintPath>
       <Private>false</Private>

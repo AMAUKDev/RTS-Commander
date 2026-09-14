@@ -14,6 +14,13 @@ internal static class CommanderSettings
     internal static float AutomaticUiScale { get; set; } = 1.5f;
     internal static float UiScale => CommanderUiScale.Resolve(UiScaleOverride, AutomaticUiScale);
     internal static bool ModEnabled { get => Get("General", "Enabled", true); set => Set("General", "Enabled", value); }
+    // Off by default: this writes a JSON file to disk on every mission tick and is only worth the
+    // cost while actively developing the mod, hot-reloading mid-match with build-dev.bat. See
+    // CommanderStateStore for the write/read cycle and the session guard that keeps a stale file
+    // from an earlier match from ever being replayed into a new one.
+    // Key renamed from PersistStateAcrossReload when the default flipped to on: BepInEx keeps the
+    // value already in the cfg, so a default change under the old key would never reach anyone.
+    internal static bool PersistStateAcrossReload { get => Get("Developer", "KeepStateAcrossHotReload", true); set => Set("Developer", "KeepStateAcrossHotReload", value); }
     internal static bool LimitToFactoryVehicles { get => Get("Gameplay", "LimitToFactoryVehicles", false); set => Set("Gameplay", "LimitToFactoryVehicles", value); }
     internal static bool ShowCommandButton { get => Get("UI", "ShowCommandButton", true); set => Set("UI", "ShowCommandButton", value); }
     internal static bool ShowFactionMoney { get => Get("UI", "ShowFactionMoney", true); set => Set("UI", "ShowFactionMoney", value); }
@@ -211,6 +218,71 @@ internal static class CommanderSettings
     // 1 km keeps the snap feeling local while still forgiving imprecise clicking near a site.
     internal static float PointsMineSnapMeters { get => Get("Points", "MineSnapMeters", 1000f); set => Set("Points", "MineSnapMeters", value); }
 
+    // Platoon recipe (config-file-only: a map-authoring / balance decision, not a player taste
+    // knob, so there is no slider — see Operations/CommanderPlatoon.cs "Which vehicle is which
+    // role"). The three slot counts must add up to PlatoonSize; the operations self-check says so
+    // at load if a hand edit breaks that.
+    // One BepInEx log line per commander per 30 s review describing the whole operations state
+    // (pool, every platoon and its state, every mission, front/rear counts, pressure, order book),
+    // plus a line per platoon state change and per depot claim. On while the doctrine is being
+    // tuned so a match can be debugged from LogOutput.log alone; the COMMANDER LOG window shows
+    // decisions, not this machinery.
+    internal static bool OperationsDebugLog { get => Get("Operations", "DebugLog", true); set => Set("Operations", "DebugLog", value); }
+    // Full platoons a commander keeps wanting with no job assigned. This is what keeps the order
+    // book open (and the buyer forming platoons) before the first mission exists; two is one to
+    // hold the base and one spare to start an attack with.
+    internal static int OperationsReservePlatoons { get => Get("Operations", "ReservePlatoons", 2); set => Set("Operations", "ReservePlatoons", value); }
+    internal static int OperationsMaxPlatoons { get => Get("Operations", "MaxPlatoons", 8); set => Set("Operations", "MaxPlatoons", value); }
+    internal static int OperationsPlatoonSize { get => Get("Operations", "PlatoonSize", 6); set => Set("Operations", "PlatoonSize", value); }
+    internal static int OperationsRecipeArmour { get => Get("Operations", "RecipeArmour", 3); set => Set("Operations", "RecipeArmour", value); }
+    internal static int OperationsRecipeCarrier { get => Get("Operations", "RecipeCarrier", 1); set => Set("Operations", "RecipeCarrier", value); }
+    internal static int OperationsRecipeAirDefence { get => Get("Operations", "RecipeAirDefence", 2); set => Set("Operations", "RecipeAirDefence", value); }
+
+    // Front line, forward bases and the pressure clock (POINTS tab, OPERATIONS box).
+    // A point within this of the nearest enemy-held point or base is front line; equal to the home
+    // guard's ThreatRadiusMeters on purpose (Ai/CommanderEnemyCommanderDefence.cs:60) — the same
+    // "it can see it" range.
+    internal static float OperationsFrontRangeMeters { get => Get("Operations", "FrontRangeMeters", 15000f); set => Set("Operations", "FrontRangeMeters", value); }
+    // At most this share of a commander's platoons sit in forward bases; the rest are reserve or
+    // offensive. Guards against a commander that only ever garrisons.
+    internal static float OperationsFobShare { get => Get("Operations", "FobShare", 0.5f); set => Set("Operations", "FobShare", value); }
+    // Minutes of pressure before the commander attacks with whatever it has. Guards against a
+    // commander that never attacks.
+    internal static float OperationsPressureIntervalMinutes { get => Get("Operations", "PressureIntervalMinutes", 12f); set => Set("Operations", "PressureIntervalMinutes", value); }
+    // Share of the pot the buy review spends while an attack requisition is open, in place of the
+    // 0.25 / 0.45 tempo knob the buyer normally uses.
+    internal static float OperationsOffensiveSpendFraction { get => Get("Operations", "OffensiveSpendFraction", 0.5f); set => Set("Operations", "OffensiveSpendFraction", value); }
+    // Minutes after losing an airframe over an objective before the commander buys another for that
+    // same objective (doubled while the objective's ring shows at least two tracked hostile
+    // air-defence units). Stops the commander feeding CAS one airframe at a time into a SAM line.
+    internal static float CasLossCooldownMinutes { get => Get("Operations", "CasLossCooldownMinutes", 2f); set => Set("Operations", "CasLossCooldownMinutes", value); }
+    // Aircraft a commander's faction may have in the world at once, on every mission: the bought
+    // wing (CAP and CAS), the wing's transports, the picket-insertion helicopters and anything the
+    // player or a stock mission put up — it counts every faction aircraft, so insertion flights and
+    // the player's own AIR-window launches eat into it too. Was the duel-only DuelAirborneLimit
+    // (8); raised to 12 on 2026-09-13 because 8 was the binding limiter in play (the commander sat
+    // at it with money in hand), and a CAP-first wing — one fighter per active objective plus CAS —
+    // does not fit under eight once three objectives are live.
+    // 20 (user decision 2026-09-13): a safety stop, not the limiter — the air fund, hull prices and
+    // rearm cycles are what should size the wing. Counts every live aircraft of the faction.
+    internal static int AirborneCeiling { get => Get("Operations", "AirborneCeiling", 20); set => Set("Operations", "AirborneCeiling", value); }
+
+    // Picket insertion by transport helicopter (design.md, heli-picket-insertion_20260913).
+    // Master toggle: visible AI spend, killable like every doctrine feature.
+    internal static bool OperationsHeliInsertionEnabled { get => Get("Operations", "HeliInsertionEnabled", true); set => Set("Operations", "HeliInsertionEnabled", value); }
+    // A picket point farther than this from the nearest road is flown in rather than driven (the
+    // user's gate, 2026-09-13). Within it the drive is a short cross-country hop; beyond it the
+    // crawl into the ring costs the point minutes of income. POINTS tab, OPERATIONS box.
+    internal static float OperationsHeliInsertionOffRoadMeters { get => Get("Operations", "HeliInsertionOffRoadMeters", 2000f); set => Set("Operations", "HeliInsertionOffRoadMeters", value); }
+    // Insertion flights airborne per HQ at once (config-only: a balance knob in the recipe's
+    // company). Transports deliver, they do not win fights — the same reasoning as the enemy
+    // commander's TransportLimit.
+    internal static int OperationsHeliInsertionLimit { get => Get("Operations", "HeliInsertionLimit", 1); set => Set("Operations", "HeliInsertionLimit", value); }
+    // Minutes after losing an insertion flight before the same point asks again (config-only;
+    // confirmed by the user, 2026-09-13). An identical loss on retry a minute later is a waste;
+    // an hour is cowardice.
+    internal static float OperationsHeliInsertionCooldownMinutes { get => Get("Operations", "HeliInsertionCooldownMinutes", 10f); set => Set("Operations", "HeliInsertionCooldownMinutes", value); }
+
     internal static KeyboardShortcut PrimaryAction { get => GetShortcut("PrimaryAction", KeyCode.Mouse0, "Select units and place world targets."); set => Set("Keybinds", "PrimaryAction", value); }
     internal static KeyboardShortcut SecondaryAction { get => GetShortcut("SecondaryAction", KeyCode.Mouse1, "Issue move orders."); set => Set("Keybinds", "SecondaryAction", value); }
     internal static KeyboardShortcut AddToSelection { get => GetShortcut("AddToSelection", KeyCode.LeftShift, "Hold while selecting to add units."); set => Set("Keybinds", "AddToSelection", value); }
@@ -258,6 +330,7 @@ internal static class CommanderSettings
     {
         config = configFile;
         _ = ModEnabled;
+        _ = PersistStateAcrossReload;
         _ = LimitToFactoryVehicles;
         _ = ShowCommandButton;
         _ = PrimaryAction;
@@ -360,6 +433,23 @@ internal static class CommanderSettings
         _ = PointsCrossroadsIncomePerMinute;
         _ = PointsRoadsideIncomePerMinute;
         _ = PointsMineSnapMeters;
+        _ = OperationsPlatoonSize;
+        _ = OperationsDebugLog;
+        _ = OperationsReservePlatoons;
+        _ = OperationsMaxPlatoons;
+        _ = OperationsRecipeArmour;
+        _ = OperationsRecipeCarrier;
+        _ = OperationsRecipeAirDefence;
+        _ = OperationsFrontRangeMeters;
+        _ = OperationsFobShare;
+        _ = OperationsPressureIntervalMinutes;
+        _ = OperationsOffensiveSpendFraction;
+        _ = CasLossCooldownMinutes;
+        _ = AirborneCeiling;
+        _ = OperationsHeliInsertionEnabled;
+        _ = OperationsHeliInsertionOffRoadMeters;
+        _ = OperationsHeliInsertionLimit;
+        _ = OperationsHeliInsertionCooldownMinutes;
         _ = AirCommandMode;
         _ = AwacsRadiusKm;
         _ = CasRadiusKm;

@@ -33,8 +33,17 @@ internal enum CommanderWaypointAction
 /// </summary>
 internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommanderResetSession
 {
-    private const float GroundFormationSpacingMeters = 25f;
+    /// <summary>Ground formation slot spacing. <c>internal</c> (not <c>private</c>) so
+    /// <see cref="IssuePlatoonMove"/> spaces a platoon's members exactly the way the player's own
+    /// ground orders do — one definition, two callers.</summary>
+    internal const float GroundFormationSpacingMeters = 25f;
     private const float ShipFormationSpacingMeters = 80f;
+
+    /// <summary>A destination that moved less than this since the last issue is not worth a
+    /// networked RPC (see <see cref="Issue"/>'s own comment). <c>internal</c> so
+    /// <see cref="IssuePlatoonMove"/> shares the same re-issue tolerance rather than inventing its
+    /// own.</summary>
+    internal const float ReissueToleranceMeters = 40f;
     private const float RouteTickIntervalSeconds = 0.25f;
     private const float StuckTimeoutSeconds = 60f;
     private const float GuardArrivalMeters = 120f;
@@ -445,7 +454,17 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
             return 0f;
         }
 
-        Vector3 travel = destination - centre / count;
+        // Moved into HeadingDegrees (T5, ledger row 9): IssuePlatoonMove needs the same "direction
+        // of travel from an averaged centre" maths and this was the only definition of it.
+        return HeadingDegrees(centre / count, destination);
+    }
+
+    /// <summary>Direction of travel from <paramref name="centre"/> (already averaged) to
+    /// <paramref name="destination"/>, in degrees. Extracted out of <see cref="ResolveHeading"/>
+    /// (Reuse rule 5, behaviour-neutral): <see cref="IssuePlatoonMove"/> is the second caller.</summary>
+    internal static float HeadingDegrees(Vector3 centre, Vector3 destination)
+    {
+        Vector3 travel = destination - centre;
         travel.y = 0f;
         return travel.sqrMagnitude < 1f ? 0f : Quaternion.LookRotation(travel).eulerAngles.y;
     }
@@ -943,7 +962,7 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         // Re-issuing every tick would spam the networked command RPC, so only send when the
         // wanted destination actually moved (route advance, or a target that is driving away).
         if (order.HasIssuedDestination
-            && CommanderGameAccess.ApproximatelyEqual(order.IssuedDestination, destination, 40f))
+            && CommanderGameAccess.ApproximatelyEqual(order.IssuedDestination, destination, ReissueToleranceMeters))
         {
             return;
         }
@@ -951,6 +970,70 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         order.IssuedDestination = destination;
         order.HasIssuedDestination = true;
         CommanderGameAccess.GetUnitCommand(unit)?.SetDestination(destination, true);
+    }
+
+    /// <summary>
+    /// Issues every platoon member its formation-slot destination directly — never through
+    /// <see cref="ApplyOrder"/> (departure 1, <c>Operations/CommanderOperationsService.cs</c>):
+    /// <c>ApplyOrder</c> only touches units passing <c>ShouldAllowCommanderMove</c> (local-HQ-only,
+    /// so an enemy commander's platoon would be filtered out entirely), it calls
+    /// <c>MarkPlayerOrdered</c> (which would make every AI recruiter in the mod, including the
+    /// operations service's own, treat the platoon as player-ordered and disown it), and its units
+    /// are driven by <see cref="AdvanceRoutes"/>'s retreat/opportunity-engagement/guard branches,
+    /// which would fight the platoon state machine for the same vehicle. Writes nothing into
+    /// <c>orders</c>, <c>stoppedUnits</c> or <c>playerOrderedAt</c>. The caller owns
+    /// <paramref name="issued"/> (one dictionary per platoon) across calls, so a member already on
+    /// its slot is not re-issued every movement tick.
+    /// </summary>
+    internal static void IssuePlatoonMove(
+        IReadOnlyList<Unit> members,
+        GlobalPosition destination,
+        CommanderFormationShape shape,
+        Dictionary<Unit, GlobalPosition> issued,
+        float? facingDegrees = null)
+    {
+        if (members.Count == 0)
+        {
+            return;
+        }
+
+        Vector3 centroid = Vector3.zero;
+        int liveCount = 0;
+        for (int i = 0; i < members.Count; i++)
+        {
+            Unit member = members[i];
+            if (member != null && !member.disabled)
+            {
+                centroid += member.transform.position;
+                liveCount++;
+            }
+        }
+
+        // A platoon deploying where it stands has no travel direction; the caller says which way
+        // it faces (the contact drill: towards the enemy) instead of the centroid-to-destination
+        // heading, which would be meaningless at zero distance.
+        float heading = facingDegrees
+            ?? (liveCount == 0 ? 0f : HeadingDegrees(centroid / liveCount, destination.ToLocalPosition()));
+
+        for (int i = 0; i < members.Count; i++)
+        {
+            Unit unit = members[i];
+            if (unit == null || unit.disabled)
+            {
+                continue;
+            }
+
+            GlobalPosition slot = CommanderDestinationFormation.ApplyOffset(
+                destination, i, GroundFormationSpacingMeters, shape, heading);
+            if (issued.TryGetValue(unit, out GlobalPosition last)
+                && CommanderGameAccess.ApproximatelyEqual(last, slot, ReissueToleranceMeters))
+            {
+                continue;
+            }
+
+            CommanderGameAccess.TrySetDestination(unit, slot);
+            issued[unit] = slot;
+        }
     }
 
     /// <summary>
@@ -1410,7 +1493,26 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         RefreshOrderFlags();
     }
 
+    /// <summary>Hands a rearm vehicle back to the Basegame's own rearm AI, restocking it first if it
+    /// is running low. The only caller: <see cref="ResumeAiForSelectedUnits"/>.</summary>
     private static bool TryReturnToBasegameLogistics(Unit unit)
+    {
+        return TryDetachFromRearmLogistics(unit, allowRestock: true);
+    }
+
+    /// <summary>
+    /// Detaches a rearm vehicle from whatever mission the Basegame's <c>RearmMissionController</c>
+    /// or <c>RearmVehicleAI</c> currently has it on. <paramref name="allowRestock"/> is the whole
+    /// reason this exists as its own method rather than being inlined at both call sites: the
+    /// player's own "resume AI" order should let a low vehicle drive off to restock
+    /// (<c>TryReturnToBasegameLogistics</c>, <c>allowRestock: true</c>), but a claimed munitions
+    /// truck parked at a forward base must never do that — <c>allowRestock: false</c> forces the
+    /// <c>Wait</c> branch however low its capacity is, and additionally clears
+    /// <c>Rearmer.AvailableForMission</c> so the rearm controller cannot hand it a new mission while
+    /// it sits in the ring. Two callers: the basegame return path above, and the operations claim
+    /// (<c>Operations/CommanderOperationsRequisitions.cs</c>).
+    /// </summary>
+    internal static bool TryDetachFromRearmLogistics(Unit unit, bool allowRestock)
     {
         if (!unit.TryGetComponent(out RearmVehicleAI rearmAi)
             || !unit.TryGetComponent(out Rearmer rearmer))
@@ -1432,7 +1534,8 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         }
 
         rearmAi.AssignMission(null!);
-        bool needsRestock = rearmer.GetMaxCapacity() > 0f
+        bool needsRestock = allowRestock
+            && rearmer.GetMaxCapacity() > 0f
             && rearmer.Capacity < rearmer.GetMaxCapacity() * 0.5f;
         MethodInfo? stateMethod = needsRestock ? RearmVehicleRestockMethod : RearmVehicleWaitMethod;
         try
@@ -1441,13 +1544,20 @@ internal sealed class CommanderMoveService : ICommanderTickPersistent, ICommande
         }
         catch (System.Exception exception)
         {
-            CommanderPlugin.Log.LogWarning($"Failed to return {unit.unitName} to Basegame rearm AI: {exception.Message}");
+            CommanderPlugin.Log.LogWarning($"Failed to detach {unit.unitName} from rearm logistics: {exception.Message}");
             if (unit is GroundVehicle vehicle)
             {
                 vehicle.StopImmediately();
             }
             rearmer.AvailableForMission = !needsRestock;
         }
+
+        if (!allowRestock)
+        {
+            // Parked at a forward base: never let the rearm controller re-task this truck.
+            rearmer.AvailableForMission = false;
+        }
+
         return true;
     }
 

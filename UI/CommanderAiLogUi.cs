@@ -33,7 +33,15 @@ internal sealed class CommanderAiLogUi
     /// views read at the same density.</summary>
     private const float RowHeight = 26f;
 
+    /// <summary>Mission lines shown in the header before the rest fold into a "+n more" tail — the
+    /// 520 px line budget this window's own note already flags (see the class remarks on
+    /// <c>DrawHeader</c>'s width). Planner-chosen.</summary>
+    private const int MissionLinesInHeader = 3;
+
     private readonly List<FactionHQ> tabs = new();
+
+    /// <summary>Scratch for <see cref="DrawHeader"/>'s OPERATIONS block, reused every draw.</summary>
+    private readonly List<string> operationsLines = new();
 
     private Rect windowRect;
     private Vector2 scroll;
@@ -218,6 +226,30 @@ internal sealed class CommanderAiLogUi
             $"PLAN {plan}   RESERVE TARGET {reserve}",
             CommanderUiTheme.Label);
         y += 26f;
+
+        operationsLines.Clear();
+        CommanderOperationsService.Instance?.DescribeOperations(hq, operationsLines);
+        if (operationsLines.Count > 0)
+        {
+            GUI.Label(new Rect(10f, y, windowRect.width - 20f, 22f), operationsLines[0], CommanderUiTheme.Label);
+            y += 26f;
+
+            int missionLines = Mathf.Min(operationsLines.Count - 1, MissionLinesInHeader);
+            for (int i = 0; i < missionLines; i++)
+            {
+                GUI.Label(new Rect(10f, y, windowRect.width - 20f, 22f), operationsLines[i + 1], CommanderUiTheme.Label);
+                y += 26f;
+            }
+
+            int more = operationsLines.Count - 1 - missionLines;
+            if (more > 0)
+            {
+                GUI.Label(
+                    new Rect(10f, y, windowRect.width - 20f, 22f), $"+{more} more", CommanderUiTheme.MutedLabel);
+                y += 26f;
+            }
+        }
+
         return y;
     }
 

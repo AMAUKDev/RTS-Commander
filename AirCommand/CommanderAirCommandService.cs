@@ -7,9 +7,13 @@ using UnityEngine;
 
 namespace GroundControlRts;
 
-internal sealed partial class CommanderAirCommandService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderTickPersistent, ICommanderResetSession
+internal sealed partial class CommanderAirCommandService : ICommanderActivate, ICommanderDeactivate, ICommanderTickActive, ICommanderTickPersistent, ICommanderResetSession, ICommanderPersistState
 {
-    private const float PendingSpawnTimeoutSeconds = 45f;
+    /// <summary>How long a launch may wait for its aircraft to register before the bookkeeping
+    /// gives up. Internal (one-word widening): the operations air step's claim window uses the
+    /// same number for its own pending launch, the same reason (ledger addendum alongside
+    /// ThreatMemorySeconds).</summary>
+    internal const float PendingSpawnTimeoutSeconds = 45f;
     private const float StatusDurationSeconds = 6f;
     private const float MissionPruneIntervalSeconds = 2f;
     private const float AircraftWaypointRadiusMeters = 1500f;
@@ -499,7 +503,9 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         }
     }
 
-    private static bool IsRotaryPilot(Pilot pilot)
+    /// <summary>Internal (one-word widening): the operations air step reads it for the rotary leg
+    /// of its transit estimate. One definition of "flies like a helicopter", two callers.</summary>
+    internal static bool IsRotaryPilot(Pilot pilot)
     {
         return pilot.pilotType == Pilot.PilotType.Helo || pilot.pilotType == Pilot.PilotType.Tiltwing;
     }

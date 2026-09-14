@@ -337,24 +337,37 @@ internal sealed class CommanderBuildPreview
 
     internal static bool IsInsideBuildRadius(FactionHQ hq, GlobalPosition target, float radiusKm)
     {
+        return TryGetBuildBase(hq, target, radiusKm, out _);
+    }
+
+    /// <summary>
+    /// The held airbase whose build ring a site sits in, nearest first. "May I build here" and
+    /// "which base does this new building belong to" are the same measurement, so both ask this
+    /// walk instead of keeping two copies of the distance rule.
+    /// </summary>
+    internal static bool TryGetBuildBase(
+        FactionHQ hq, GlobalPosition target, float radiusKm, out Airbase? airbase)
+    {
+        airbase = null;
         float radius = Mathf.Max(radiusKm, 0.1f) * 1000f;
-        float radiusSquared = radius * radius;
-        foreach (Airbase airbase in hq.GetAirbases())
+        float bestSquared = radius * radius;
+        foreach (Airbase candidate in hq.GetAirbases())
         {
-            if (airbase == null || airbase.disabled || airbase.center == null)
+            if (candidate == null || candidate.disabled || candidate.center == null)
             {
                 continue;
             }
 
-            Vector3 offset = airbase.center.position - target.ToLocalPosition();
+            Vector3 offset = candidate.center.position - target.ToLocalPosition();
             offset.y = 0f;
-            if (offset.sqrMagnitude <= radiusSquared)
+            if (offset.sqrMagnitude <= bestSquared)
             {
-                return true;
+                bestSquared = offset.sqrMagnitude;
+                airbase = candidate;
             }
         }
 
-        return false;
+        return airbase != null;
     }
 
     /// <summary>

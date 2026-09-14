@@ -34,7 +34,7 @@ internal enum CommanderBuildKind
 /// Persisting them would mean writing our own state into the mission save.
 /// </remarks>
 internal sealed partial class CommanderEconomyService
-    : ICommanderTickActive, ICommanderTickPersistent, ICommanderDeactivate, ICommanderResetSession
+    : ICommanderTickActive, ICommanderTickPersistent, ICommanderDeactivate, ICommanderResetSession, ICommanderPersistState
 {
     internal const int MaxLevel = 3;
 
@@ -983,9 +983,123 @@ internal sealed partial class CommanderEconomyService
         {
             spawned.NetworkunitName = displayName;
             builtUnits.Add(spawned);
+            // A hangar-type building the base has never heard of is a pad that launches nothing,
+            // so every spawn is introduced to the base whose ring it went down in.
+            LinkSpawnedBuilding(hq, spawned, position, displayName);
         }
 
         return spawned;
+    }
+
+    /// <summary>
+    /// The approach cone a linked pad offers, in degrees. Matches what the game's own loader hands
+    /// a saved pad (<c>Airbase.VerticalLandingPoint.FromSaved</c>): any side may be approached.
+    /// </summary>
+    private const float PadApproachAngleDegrees = 180f;
+
+    /// <summary>
+    /// A linked pad's usable size in metres, matching <c>Airbase.VerticalLandingPoint.FromSaved</c>:
+    /// comfortably larger than any rotary airframe's <c>maxRadius</c> landing query, so a bought
+    /// pad answers the same query a mission-authored one does.
+    /// </summary>
+    private const float PadSizeMeters = 40f;
+
+    /// <summary>
+    /// Registers a freshly built hangar-type building with the airbase whose build ring it went
+    /// down in. The game only knows a helipad belongs to a base because the mission loader said so
+    /// at load — <c>Spawner.SpawnBuilding</c> calls <see cref="Building.SetAirbase"/> from the
+    /// pad's saved <c>AirbaseRef</c> — while <c>Spawner.SpawnFromUnitDefinitionInEditor</c>, the
+    /// one spawn path this mod uses, always passes <c>airbase: null</c>. A pad with no airbase is
+    /// invisible to the base's roster (<c>Airbase.GetAvailableAircraft</c>) and to its hangar
+    /// spawn loop (<c>Airbase.TrySpawnAircraft</c>), which is exactly "bought helipads are never
+    /// used for spawning". <see cref="Building.SetAirbase"/> is the game's own registration call,
+    /// so the pad joins <c>airbase.hangars</c> on the host and on every client. Every build path —
+    /// the player's BUILD window and the enemy commander both — lands here, so both commanders'
+    /// pads get linked by the one definition.
+    /// </summary>
+    /// <remarks>
+    /// Vertical landing is a second, older system: <c>AIHeloLandingState</c> homes on
+    /// <c>airbase.verticalLandingPoints</c>, an array the mission loader authors on the base at
+    /// load, and the game ships no runtime registration call for it. A rotary-capable pad is
+    /// appended there by hand the way <c>Airbase.SetupCustomAirbase</c> would have done: a point
+    /// parented to the base at the pad's spawn spot, then the crossing-runway pass
+    /// <c>Airbase.OnStartServer</c> runs for authored points. The point outlives the building on
+    /// purpose — mission-authored pads keep their landing spots after the pad building dies too.
+    /// </remarks>
+    private static void LinkSpawnedBuilding(
+        FactionHQ hq, Unit unit, GlobalPosition position, string displayName)
+    {
+        if (!unit.TryGetComponent(out Building building) || !building.TryGetComponent(out Hangar hangar))
+        {
+            return;
+        }
+
+        if (!CommanderBuildPreview.TryGetBuildBase(hq, position, CommanderSettings.BuildRadiusKm, out Airbase? airbase)
+            || airbase == null)
+        {
+            CommanderPlugin.Log.LogInfo(
+                $"{displayName} could not be linked to an airbase: none held within "
+                    + $"{CommanderSettings.BuildRadiusKm:0.#} km of the site.");
+            return;
+        }
+
+        building.SetAirbase(airbase);
+
+        // No registration call exists for landing points (see the remarks above), so this rebuilds
+        // the load-time behaviour at runtime. A fixed-wing shelter gets none: its spawn spot is
+        // inside the shelter, and a helicopter homing on it would descend onto the roof.
+        if (CanHostRotaryAircraft(hangar))
+        {
+            Transform spawnSpot = hangar.GetSpawnTransform();
+            Transform pad = new GameObject($"CommanderPad {displayName}").transform;
+            pad.SetParent(airbase.transform);
+            pad.SetPositionAndRotation(spawnSpot.position, spawnSpot.rotation);
+            Airbase.VerticalLandingPoint landingPoint = new()
+            {
+                point = pad,
+                approachAngleRange = PadApproachAngleDegrees,
+                size = PadSizeMeters,
+            };
+            landingPoint.FindCrossingRunways(airbase);
+            Airbase.VerticalLandingPoint[] grown = new Airbase.VerticalLandingPoint[
+                (airbase.verticalLandingPoints?.Length ?? 0) + 1];
+            if (airbase.verticalLandingPoints != null)
+            {
+                airbase.verticalLandingPoints.CopyTo(grown, 0);
+            }
+
+            grown[grown.Length - 1] = landingPoint;
+            airbase.verticalLandingPoints = grown;
+        }
+
+        CommanderPlugin.Log.LogInfo(
+            $"Linked {displayName} to {CommanderCaptureService.GetAirbaseLabel(airbase)} "
+                + $"({airbase.verticalLandingPoints?.Length ?? 0} pads).");
+    }
+
+    /// <summary>True when the hangar's roster holds an airframe the rotary flight model can fly.</summary>
+    private static bool CanHostRotaryAircraft(Hangar hangar)
+    {
+        AircraftDefinition[] roster = hangar.GetAvailableAircraft();
+        for (int i = 0; i < roster.Length; i++)
+        {
+            AircraftDefinition? definition = roster[i];
+            Aircraft? prefab = definition?.unitPrefab != null
+                ? definition.unitPrefab.GetComponent<Aircraft>()
+                : null;
+            Pilot[]? pilots = prefab?.pilots;
+            for (int p = 0; pilots != null && p < pilots.Length; p++)
+            {
+                if (pilots[p] != null
+                    && (pilots[p].pilotType == Pilot.PilotType.Helo
+                        || pilots[p].pilotType == Pilot.PilotType.Tiltwing))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

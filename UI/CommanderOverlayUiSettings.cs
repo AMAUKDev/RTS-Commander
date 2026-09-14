@@ -388,55 +388,135 @@ internal sealed partial class CommanderOverlayUi
     /// <remarks>
     /// Arithmetic (help closed): box top at <c>y</c>, header 10 + 32, nine 38 px slider rows (three
     /// more since the outpost/crossroads/roadside incomes joined base/village/hilltop/gold mine), a
-    /// 30 px footnote — 10 + 32 + 9*38 + 30 = 414 px tall, and <c>y</c> itself never exceeds 162, so
-    /// the box bottom never passes 576 of a 790 px window.
+    /// 30 px footnote — 10 + 32 + 9*38 + 30 = 414 px tall.
+    /// <para>
+    /// Departure 7: a second OPERATIONS box joins it below an 8 px gap — 414 + 8 + 300 = 722 px of
+    /// content (the box grew one row for the insertion off-road gate, 10 + 32 + 6*38 + 30) — which
+    /// no longer fits inside the window at every help state, so the tab's content now lives inside
+    /// a scroll view (the <c>DrawShortcutList</c> shape), and only scrolls when it has to.
+    /// </para>
     /// </remarks>
     private void DrawPointsSettings(float y)
     {
-        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 414f), string.Empty, CommanderUiTheme.Panel);
-        GUI.Label(new Rect(24f, y + 10f, settingsWindowRect.width - 48f, 22f), "STRATEGIC POINTS", CommanderUiTheme.Header);
+        const float pointsBoxHeight = 414f;
+        const float operationsBoxHeight = 300f;
+        const float gap = 8f;
+        float contentHeight = pointsBoxHeight + gap + operationsBoxHeight;
+
+        float width = settingsWindowRect.width - 24f;
+        float height = settingsWindowRect.height - y - 16f;
+        GUI.Box(new Rect(12f, y, width, height), string.Empty, CommanderUiTheme.Panel);
+
+        Rect view = new(16f, y + 8f, width - 8f, height - 16f);
+        Rect inner = new(0f, 0f, view.width - 20f, Mathf.Max(view.height, contentHeight + 4f));
+        pointsSettingsScroll = GUI.BeginScrollView(view, pointsSettingsScroll, inner);
+
+        DrawStrategicPointsBox(0f, inner.width);
+        DrawOperationsBox(pointsBoxHeight + gap, inner.width);
+
+        GUI.EndScrollView();
+    }
+
+    private void DrawStrategicPointsBox(float y, float width)
+    {
+        GUI.Box(new Rect(4f, y, width - 8f, 414f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(16f, y + 10f, width - 32f, 22f), "STRATEGIC POINTS", CommanderUiTheme.Header);
 
         float rowY = y + 42f;
-        CommanderSettings.PointsMinGarrison = Mathf.RoundToInt(DrawCameraSlider(
-            rowY, "Minimum garrison", CommanderSettings.PointsMinGarrison, 1f, 6f, "0", " vehicles"));
+        CommanderSettings.PointsMinGarrison = Mathf.RoundToInt(DrawPointsSlider(
+            rowY, width, "Minimum garrison", CommanderSettings.PointsMinGarrison, 1f, 6f, "0", " vehicles"));
         rowY += 38f;
 
-        CommanderSettings.PointsHoldSeconds = Mathf.Round(DrawCameraSlider(
-            rowY, "Hold seconds", CommanderSettings.PointsHoldSeconds, 15f, 300f, "0", " s") / 5f) * 5f;
+        CommanderSettings.PointsHoldSeconds = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Hold seconds", CommanderSettings.PointsHoldSeconds, 15f, 300f, "0", " s") / 5f) * 5f;
         rowY += 38f;
 
-        CommanderSettings.PointsBaseIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Base income", CommanderSettings.PointsBaseIncomePerMinute, 0f, 100f, "0", " /min"));
+        CommanderSettings.PointsBaseIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Base income", CommanderSettings.PointsBaseIncomePerMinute, 0f, 100f, "0", " /min"));
         rowY += 38f;
 
-        CommanderSettings.PointsVillageIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Village income", CommanderSettings.PointsVillageIncomePerMinute, 0f, 50f, "0", " /min"));
+        CommanderSettings.PointsVillageIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Village income", CommanderSettings.PointsVillageIncomePerMinute, 0f, 50f, "0", " /min"));
         rowY += 38f;
 
-        CommanderSettings.PointsHilltopIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Hilltop income", CommanderSettings.PointsHilltopIncomePerMinute, 0f, 50f, "0", " /min"));
+        CommanderSettings.PointsHilltopIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Hilltop income", CommanderSettings.PointsHilltopIncomePerMinute, 0f, 50f, "0", " /min"));
         rowY += 38f;
 
-        CommanderSettings.PointsOutpostIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Outpost income", CommanderSettings.PointsOutpostIncomePerMinute, 0f, 50f, "0", " /min"));
+        CommanderSettings.PointsOutpostIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Outpost income", CommanderSettings.PointsOutpostIncomePerMinute, 0f, 50f, "0", " /min"));
         rowY += 38f;
 
-        CommanderSettings.PointsCrossroadsIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Crossroads income", CommanderSettings.PointsCrossroadsIncomePerMinute, 0f, 50f, "0", " /min"));
+        CommanderSettings.PointsCrossroadsIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Crossroads income", CommanderSettings.PointsCrossroadsIncomePerMinute, 0f, 50f, "0", " /min"));
         rowY += 38f;
 
-        CommanderSettings.PointsRoadsideIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Roadside income", CommanderSettings.PointsRoadsideIncomePerMinute, 0f, 50f, "0", " /min"));
+        CommanderSettings.PointsRoadsideIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Roadside income", CommanderSettings.PointsRoadsideIncomePerMinute, 0f, 50f, "0", " /min"));
         rowY += 38f;
 
-        CommanderSettings.GoldMineIncomePerMinute = Mathf.Round(DrawCameraSlider(
-            rowY, "Gold mine income", CommanderSettings.GoldMineIncomePerMinute, 0f, 100f, "0", " /min"));
+        CommanderSettings.GoldMineIncomePerMinute = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Gold mine income", CommanderSettings.GoldMineIncomePerMinute, 0f, 100f, "0", " /min"));
         rowY += 38f;
 
         GUI.Label(
-            new Rect(24f, rowY + 4f, settingsWindowRect.width - 48f, 22f),
+            new Rect(16f, rowY + 4f, width - 32f, 22f),
             "Discovery spacing lives in the config file, Points section.",
             CommanderUiTheme.MutedLabel);
+    }
+
+    /// <summary>
+    /// Departure 7: platoon size, FOB share, front range, pressure interval and offensive spend,
+    /// plus the insertion off-road gate. Platoon recipe (armour/carrier/air-defence slot counts) and
+    /// the insertion limit/cooldown stay config-file-only, as the footnote here says — they are
+    /// balance decisions, not taste knobs (see <c>Core/CommanderSettings.cs</c>'s own comment on
+    /// the section).
+    /// </summary>
+    private void DrawOperationsBox(float y, float width)
+    {
+        GUI.Box(new Rect(4f, y, width - 8f, 300f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(16f, y + 10f, width - 32f, 22f), "OPERATIONS", CommanderUiTheme.Header);
+
+        float rowY = y + 42f;
+        CommanderSettings.OperationsPlatoonSize = Mathf.RoundToInt(DrawPointsSlider(
+            rowY, width, "Platoon size", CommanderSettings.OperationsPlatoonSize, 2f, 10f, "0", " vehicles"));
+        rowY += 38f;
+
+        CommanderSettings.OperationsFobShare = DrawPointsSlider(
+            rowY, width, "Forward-base share", CommanderSettings.OperationsFobShare, 0f, 1f, "0.00", string.Empty);
+        rowY += 38f;
+
+        CommanderSettings.OperationsFrontRangeMeters = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Front range", CommanderSettings.OperationsFrontRangeMeters / 1000f, 5f, 40f, "0", " km") * 1000f);
+        rowY += 38f;
+
+        CommanderSettings.OperationsPressureIntervalMinutes = DrawPointsSlider(
+            rowY, width, "Pressure interval", CommanderSettings.OperationsPressureIntervalMinutes, 4f, 30f, "0", " min");
+        rowY += 38f;
+
+        CommanderSettings.OperationsOffensiveSpendFraction = DrawPointsSlider(
+            rowY, width, "Offensive spend", CommanderSettings.OperationsOffensiveSpendFraction, 0.1f, 1f, "0.00", string.Empty);
+        rowY += 38f;
+
+        CommanderSettings.OperationsHeliInsertionOffRoadMeters = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Insertion off-road", CommanderSettings.OperationsHeliInsertionOffRoadMeters / 1000f, 0f, 10f, "0", " km") * 1000f);
+        rowY += 38f;
+
+        GUI.Label(
+            new Rect(16f, rowY + 4f, width - 32f, 22f),
+            "Platoon recipe, insertion limit and cooldown live in the config file, Operations section.",
+            CommanderUiTheme.MutedLabel);
+    }
+
+    /// <summary>A labelled slider inside the POINTS tab's scroll view — <see cref="DrawCameraSlider"/>'s
+    /// shape, but positioned against a caller-supplied width instead of the settings window's own,
+    /// since it draws inside scrolled content rather than directly in the window.</summary>
+    private static float DrawPointsSlider(
+        float y, float width, string label, float value, float min, float max, string format, string suffix)
+    {
+        GUI.Label(new Rect(16f, y, 230f, 24f), $"{label}   {value.ToString(format)}{suffix}", CommanderUiTheme.Label);
+        float slid = GUI.HorizontalSlider(new Rect(252f, y + 6f, width - 276f, 20f), value, min, max);
+        return Mathf.Clamp(slid, min, max);
     }
 
     private void DrawUiSettings(float y)

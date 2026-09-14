@@ -97,6 +97,10 @@ internal static class CommanderAirCommandPatches
     private static void RegisterFactionUnitPostfix(FactionHQ __instance, Unit unit)
     {
         CommanderAirCommandService.NotifyFactionUnitRegistered(__instance, unit);
+        // A second postfix on the same method is already established (Supply/CommanderSupplyHeliPatches.cs):
+        // the operations pool claim is a third and the air-support claim a fourth, not a new patch class.
+        CommanderOperationsService.NotifyFactionUnitRegistered(__instance, unit);
+        CommanderOperationsService.NotifyAircraftRegistered(__instance, unit);
     }
 
     [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.ReturnToInventory))]

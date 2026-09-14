@@ -30,6 +30,11 @@ internal sealed class CommanderModeController : MonoBehaviour
     private CommanderBoxSelectService? boxSelectService;
     private CommanderOverlayUi? overlayUi;
 
+    // Not a per-frame service like the rest: it owns the hot-reload snapshot file and needs a
+    // direct call from OnDestroy, which a plain Register entry cannot give it. See its own doc
+    // comment for why it is still registered for TickPersistent/ResetSession.
+    private CommanderStateStore? stateStore;
+
     // Draw-only and input-only surfaces: no lifecycle of their own.
     private CommanderPovCrewUi? povCrewUi;
     private CommanderAlertUi? alertUi;
@@ -76,6 +81,10 @@ internal sealed class CommanderModeController : MonoBehaviour
         // After the SAM analyzer, whose strategic height map discovery waits on; before the
         // economy, so the hold state is fresh by the time PayIncome reads it.
         services.Register(new CommanderStrategicPointService(), CommanderTier.Advanced);
+        // After the point service, whose list is the operations service's objective list; before
+        // the enemy commander (below) so the buyer reads this review's order book, not last
+        // review's.
+        services.Register(new CommanderOperationsService(), CommanderTier.Advanced);
         CommanderFactionVehicleService factionVehicleService = services.Register(new CommanderFactionVehicleService());
         CommanderSpawnService spawnService = services.Register(
             new CommanderSpawnService(selectionService, factionVehicleService, tacticalMapService),
@@ -88,6 +97,10 @@ internal sealed class CommanderModeController : MonoBehaviour
         services.Register(new CommanderPlayerCommanderService(), CommanderTier.Advanced);
         // Core tier: the round has to be able to end whether or not RTS mode is open.
         services.Register(new CommanderVictoryService());
+        // Core tier and unconditional on purpose: the toggle inside CommanderStateStore itself is
+        // what gates all of this off by default, not the feature gate — a developer hot-reloading
+        // on an unsupported mission still gets nothing written because there is nothing to write.
+        stateStore = services.Register(new CommanderStateStore(services));
 
         CommanderRepairService repairService = services.Register(new CommanderRepairService());
         // Routes tick last so orders act on this frame's spawns and kills.
@@ -239,6 +252,11 @@ internal sealed class CommanderModeController : MonoBehaviour
 
     private void OnDestroy()
     {
+        // BepInEx ScriptEngine destroys this component along with the rest of the outgoing plugin
+        // before installing the reloaded assembly (CommanderModeController already relied on this
+        // same OnDestroy for its own camera/cursor teardown, long before this track existed), so
+        // this is the shutdown snapshot's one chance to run.
+        stateStore?.WriteSnapshotOnDestroy();
         SceneManager.activeSceneChanged -= OnActiveSceneChanged;
         Deactivate(restorePreviousCamera: false);
     }

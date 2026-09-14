@@ -344,6 +344,41 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
     }
 
     /// <summary>
+    /// Horizontal distance from <paramref name="position"/> to the nearest segment of any of
+    /// <paramref name="roads"/>' polylines — the picket-insertion road gate's measure (design.md,
+    /// heli-picket-insertion_20260913, Decision 7). <c>float.MaxValue</c> when the map kept no
+    /// roads, which the gate reads as off-road, so a roadless map flies every picket. Pure, for the
+    /// self-check; the shared <see cref="SegmentDistanceSquared"/> (discovery's own) is the
+    /// segment measure.
+    /// </summary>
+    internal static float NearestRoadDistanceMeters(
+        IReadOnlyList<List<GlobalPosition>> roads, GlobalPosition position)
+    {
+        float bestSquared = float.MaxValue;
+        for (int r = 0; r < roads.Count; r++)
+        {
+            List<GlobalPosition> points = roads[r];
+            for (int i = 1; i < points.Count; i++)
+            {
+                float segment = SegmentDistanceSquared(position, points[i - 1], points[i]);
+                if (segment < bestSquared)
+                {
+                    bestSquared = segment;
+                }
+            }
+        }
+
+        return bestSquared == float.MaxValue ? float.MaxValue : Mathf.Sqrt(bestSquared);
+    }
+
+    /// <summary>The live wrapper the insertion gate reads: the road polylines discovery retained
+    /// (<c>roadPointLists</c>, built in <c>Points/CommanderStrategicPointDiscovery.cs</c>).</summary>
+    internal float NearestRoadDistanceMeters(GlobalPosition position)
+    {
+        return NearestRoadDistanceMeters(roadPointLists, position);
+    }
+
+    /// <summary>
     /// The take-and-hold state machine, pure and driven once per <see cref="HoldCheckSeconds"/>
     /// tick. Order of the rules matters: contested freezes everything first; then neutral or below
     /// minimum resets to neutral; then the current owner staying qualified resets any stray
@@ -399,7 +434,8 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
     /// <summary>
     /// The mine-snap rule, pure: the nearest free entry within <paramref name="snapMeters"/>, or -1.
     /// A distance exactly at <paramref name="snapMeters"/> counts as inside — the boundary is
-    /// inclusive, the same convention <c>SelectGarrisonTargets</c> (T9) uses for its own reach test.
+    /// inclusive, the convention every reach test in the mod uses (also
+    /// <c>Operations.CommanderOperationsService.IsFrontPoint</c>'s front-range test).
     /// One definition; <see cref="TrySnapMineSite"/> is its only caller. Pure, for the self-check.
     /// </summary>
     internal static int NearestFreeSiteIndex(IReadOnlyList<float> distances, IReadOnlyList<bool> free, float snapMeters)
@@ -471,6 +507,46 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Reattaches a mine whose <c>Unit</c> reference survived a hot reload (see
+    /// <see cref="CommanderEconomyService"/>'s persistence) to the nearest free resource site
+    /// within <paramref name="maxDistanceMeters"/> of it, so the site reads as taken again instead
+    /// of free — design §Section 3. Unlike <see cref="AttachMine"/> (called once, right at the
+    /// exact site position <c>SpawnBuilding</c> just placed the mine at) this searches by the
+    /// mine's own current position, since a restored mine's exact placement offset is not saved.
+    /// Returns false when no site is within range, which the caller logs as a drop rather than a
+    /// hard failure — the mine level itself is still restored either way.
+    /// </summary>
+    internal bool AttachNearestMine(Unit mine, float maxDistanceMeters)
+    {
+        GlobalPosition minePosition = mine.GlobalPosition();
+        CommanderStrategicPoint? nearest = null;
+        float nearestDistance = maxDistanceMeters;
+        for (int i = 0; i < points.Count; i++)
+        {
+            CommanderStrategicPoint point = points[i];
+            if (point.Kind != StrategicPointKind.Site || (point.Mine != null && !point.Mine.disabled))
+            {
+                continue;
+            }
+
+            float distance = HorizontalDistance(point.Position, minePosition);
+            if (distance <= nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = point;
+            }
+        }
+
+        if (nearest == null)
+        {
+            return false;
+        }
+
+        AttachMine(nearest.Position, mine);
+        return true;
     }
 
     /// <summary>True when a control point <paramref name="hq"/> currently holds is within
@@ -702,10 +778,10 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
         CheckHoldStateMachine(failures);
         CheckIncome(failures);
         CheckMineSnap(failures);
-        CheckGarrisonTargets(failures);
         CheckControlPointKinds(failures);
         CheckRoadJunctions(failures);
         CheckRoadsideEmission(failures);
+        CheckNearestRoadDistance(failures);
 
         if (failures.Count == 0)
         {
@@ -1033,28 +1109,28 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
     }
 
     /// <summary>
-    /// <see cref="CommanderEnemyCommanderGarrison"/>'s reach test and cap
-    /// (<c>CommanderEnemyCommanderService.SelectGarrisonTargets</c>): five candidates with two out
-    /// of reach, six candidates all in reach capped to three, a candidate exactly on the reach
-    /// boundary, and no candidate in reach at all.
+    /// The insertion road gate's measure over one synthetic road, at the default
+    /// <c>OperationsHeliInsertionOffRoadMeters</c> (the boundary itself lives in
+    /// <see cref="CommanderOperationsService"/>'s own self-check; here the measure is what is
+    /// proven): a point off the road's end, a point beside its middle, and the no-road case.
     /// </summary>
-    private static void CheckGarrisonTargets(List<string> failures)
+    private static void CheckNearestRoadDistance(List<string> failures)
     {
-        List<int> result = new();
+        // One straight 10 km road along Z, so the nearest-segment measure is plain coordinate maths.
+        List<GlobalPosition> road = new()
+        {
+            new GlobalPosition(0f, 0f, 0f),
+            new GlobalPosition(0f, 0f, 10000f),
+        };
+        List<List<GlobalPosition>> roads = new() { road };
 
-        CommanderEnemyCommanderService.SelectGarrisonTargets(
-            new[] { 5000f, 20000f, 8000f, 15000f, 3000f }, 12000f, 3, result);
-        ExpectSequence(failures, "five candidates, three inside reach, nearest first", result, 4, 0, 2);
-
-        CommanderEnemyCommanderService.SelectGarrisonTargets(
-            new[] { 1000f, 2000f, 3000f, 4000f, 5000f, 6000f }, 12000f, 3, result);
-        ExpectSequence(failures, "six inside reach, cap holds to the three nearest", result, 0, 1, 2);
-
-        CommanderEnemyCommanderService.SelectGarrisonTargets(new[] { 12000f }, 12000f, 1, result);
-        ExpectSequence(failures, "candidate exactly at reachMeters is included", result, 0);
-
-        CommanderEnemyCommanderService.SelectGarrisonTargets(new[] { 20000f, 30000f }, 12000f, 3, result);
-        ExpectSequence(failures, "no candidate in reach", result);
+        Expect(failures, "a roadless map reports no distance at all",
+            NearestRoadDistanceMeters(new List<List<GlobalPosition>>(), new GlobalPosition(500f, 0f, 500f)),
+            float.MaxValue);
+        Expect(failures, "a point 2500 m beside a road reads 2500",
+            NearestRoadDistanceMeters(roads, new GlobalPosition(2500f, 0f, 5000f)), 2500f);
+        Expect(failures, "a point 3000 m past a road's end measures to the endpoint, not the line",
+            NearestRoadDistanceMeters(roads, new GlobalPosition(0f, 0f, 13000f)), 3000f);
     }
 
     private static void ExpectSequence(List<string> failures, string name, List<int> actual, params int[] expected)

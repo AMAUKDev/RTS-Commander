@@ -685,6 +685,24 @@ internal static class CommanderGameAccess
         return definition.unitPrefab.GetComponent<GroundVehicle>() != null;
     }
 
+    /// <summary>
+    /// True when <paramref name="definition"/>'s prefab carries both a <c>RearmVehicleAI</c> and a
+    /// <c>Rearmer</c> — the same pair <see cref="CommanderMoveService.TryDetachFromRearmLogistics"/>
+    /// already treats as "this is a rearm vehicle". Departure 3: <c>VehicleType.TRUCK</c> is too
+    /// broad (every truck, rearm or not) and there is no vehicle-definition-level rearm flag
+    /// anywhere in the mod, so a munitions truck is identified by what its prefab carries instead.
+    /// </summary>
+    internal static bool IsMunitionsTruckDefinition(VehicleDefinition? definition)
+    {
+        if (definition?.unitPrefab == null)
+        {
+            return false;
+        }
+
+        return definition.unitPrefab.GetComponentInChildren<RearmVehicleAI>(true) != null
+            && definition.unitPrefab.GetComponentInChildren<Rearmer>(true) != null;
+    }
+
     internal static bool TryGetLocalVehicleDefinitions(List<VehicleDefinition> buffer)
     {
         if (buffer == null)

@@ -196,7 +196,9 @@ internal sealed partial class CommanderEnemyCommanderService
             return 0f;
         }
 
-        float taken = AccrueFund(ref state.NavalFund, share);
+        // The naval fund keeps the plain reviews-of-saving ceiling; the air fund's floor (enough
+        // for MaxAirBuysPerReview of the dearest fighter) is an air-wing rule, 2026-09-13.
+        float taken = AccrueFund(ref state.NavalFund, share, share * FundSaveReviews);
         RefreshShipCatalog();
         ShipDefinition? choice = null;
         for (int i = 0; i < shipCatalog.Count; i++)

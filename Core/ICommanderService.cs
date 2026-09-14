@@ -37,3 +37,20 @@ internal interface ICommanderResetSession
 {
     void ResetSession();
 }
+
+/// <summary>
+/// Opt-in hook for a service that has state worth carrying across a BepInEx ScriptEngine hot
+/// reload (developer quality-of-life only; see <see cref="CommanderStateStore"/>). Fanned out the
+/// same way as the phases above, but on its own schedule: <see cref="Snapshot"/> runs while a
+/// mission is live and on shutdown, <see cref="Restore"/> runs at most once, only on the run that
+/// loaded from a hot reload and only after the session guard in <see cref="CommanderStateStore"/>
+/// has already accepted the file. A service that has nothing worth saving does not implement this.
+/// </summary>
+internal interface ICommanderPersistState
+{
+    /// <summary>Write this service's state into the shared snapshot.</summary>
+    void Snapshot(CommanderStateWriter w);
+
+    /// <summary>Restore this service's state from an already-guard-checked snapshot.</summary>
+    void Restore(CommanderStateReader r);
+}

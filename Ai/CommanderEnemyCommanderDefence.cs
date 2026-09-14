@@ -59,8 +59,11 @@ internal sealed partial class CommanderEnemyCommanderService
     /// </summary>
     private const float ThreatRadiusMeters = 15000f;
 
-    /// <summary>A contact older than this is a memory, not a threat.</summary>
-    private const float ThreatMemorySeconds = 45f;
+    /// <summary>A contact older than this is a memory, not a threat. <c>internal</c> (not
+    /// <c>private</c>, ledger addendum alongside T6): the operations service's own field threat
+    /// mark and attack sizing need exactly this number too, and reuse it rather than redeclaring it
+    /// (Reuse rule 4).</summary>
+    internal const float ThreatMemorySeconds = 45f;
 
     /// <summary>The posture holds this long past the last contact, so an attacker who drops out of
     /// radar cover for a few seconds does not stand the guard down mid-attack.</summary>
@@ -154,6 +157,21 @@ internal sealed partial class CommanderEnemyCommanderService
             CommanderAiLog.Note(hq, defending
                 ? $"goes to DEFENCE posture: hostiles inside {ThreatRadiusMeters / 1000f:0.#} km of its bases."
                 : "stands down from DEFENCE posture.");
+        }
+
+        // The operations service owns this HQ's ground force (departure 8): the base's reserve
+        // platoon is the guard now, so recruiting stops here — but the posture above still runs,
+        // because it feeds the HUD status line and the buyer's own read of WantsDefenceUnit is
+        // still meaningful right up until this point, just never true for a managed HQ.
+        if (CommanderOperationsService.OwnsGroundForce(hq))
+        {
+            if (state.Defenders.Count > 0)
+            {
+                ReleaseSurplusDefenders(state, 0);
+            }
+
+            state.WantsDefenceUnit = false;
+            return;
         }
 
         EnsureDefencePosts(hq, state);
@@ -369,9 +387,9 @@ internal sealed partial class CommanderEnemyCommanderService
                 && unit.definition is VehicleDefinition definition
                 && IsCombatVehicle(definition)
                 && !state.Defenders.ContainsKey(unit)
-                // A vehicle already standing on a control point garrison is spoken for the same
-                // way a defender is - see CommanderEnemyCommanderGarrison.
-                && !IsGarrisonUnit(unit)
+                // A vehicle the operations service has claimed into a platoon pool is spoken for
+                // the same way a defender is - see CommanderOperationsService.
+                && !CommanderOperationsService.IsPlatoonUnit(unit)
                 // Co-command: a vehicle the player has given an order to is theirs until it gets
                 // there. Pinning it to the ring would fight their own click.
                 && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true)

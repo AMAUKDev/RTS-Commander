@@ -75,8 +75,16 @@ internal sealed partial class CommanderAirCommandService
     /// a freshly launched AI aircraft home after 15 ticks with nothing found, which is exactly why
     /// an enemy that was buying aircraft was never seen making an attack run.
     /// </para>
+    /// <para>
+    /// <paramref name="retaskExisting"/> (the operations air step passes true) updates an existing
+    /// mission's mode and area in place — the same three writes <see cref="TryAdoptAircraft"/>'s
+    /// update branch performs — so a bound airframe follows its objective without being dropped and
+    /// re-adopted. The default refuses a missioned airframe, which is what keeps the posture and the
+    /// claim off anything already spoken for.
+    /// </para>
     /// </summary>
-    internal bool TryTaskAiAircraft(Aircraft? aircraft, AirCommandMode mode, GlobalPosition center, float radius)
+    internal bool TryTaskAiAircraft(
+        Aircraft? aircraft, AirCommandMode mode, GlobalPosition center, float radius, bool retaskExisting = false)
     {
         FactionHQ? hq = aircraft?.NetworkHQ;
         if (aircraft == null
@@ -85,15 +93,36 @@ internal sealed partial class CommanderAirCommandService
             || aircraft.Player != null
             || aircraft.pilots == null
             || aircraft.pilots.Length == 0
-            || !HasPlanePilot(aircraft)
-            || missions.ContainsKey(aircraft))
+            || !HasPlanePilot(aircraft))
         {
             return false;
+        }
+
+        if (missions.TryGetValue(aircraft, out AirMission? existing))
+        {
+            if (!retaskExisting)
+            {
+                return false;
+            }
+
+            existing.Mode = mode;
+            existing.AreaCenter = center;
+            existing.Radius = radius;
+            return true;
         }
 
         missions[aircraft] = new AirMission(hq, mode, center, radius, 0f, false, false, false, 0f);
         return true;
     }
+
+    /// <summary>True while this aircraft carries an Air Command mission of any kind — the player's
+    /// or a commander's. What separates an unbound airframe from one already spoken for; the
+    /// operations claim tests it so it can never take an airframe somebody else launched.</summary>
+    internal bool IsOnAnyMission(Aircraft aircraft) => missions.ContainsKey(aircraft);
+
+    /// <summary>The live mission record for an airframe, or null. The operations air step reads
+    /// <see cref="AirMission.Returning"/> and the tasking drift through it.</summary>
+    internal AirMission? TryGetMission(Aircraft aircraft) => missions.TryGetValue(aircraft, out AirMission mission) ? mission : null;
 
     private bool TryAdoptAircraft(Aircraft aircraft, AirCommandMode mode, GlobalPosition center, float radius)
     {

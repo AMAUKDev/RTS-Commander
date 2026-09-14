@@ -530,6 +530,13 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
     /// capture-capable units it owns, and keep pointing them at the ring until the base changes
     /// hands or the squad is gone. Re-issuing every review is cheap — three destinations every
     /// twenty seconds — and it is what recovers the drive when a unit is killed on the way.
+    /// <para>
+    /// Stands down entirely once the operations service owns this HQ's ground force (departure 6):
+    /// with every vehicle claimed into a platoon pool, this drive would fight the offensive for the
+    /// same units. Gated off rather than removed, because the same service also serves the
+    /// player's own capture clicks (<c>RefreshTargets</c>, <c>TryResolveCaptureOrder</c>,
+    /// <c>AnnounceCaptureOrder</c>), which stay untouched.
+    /// </para>
     /// </summary>
     private void ReviewEnemy(FactionHQ hq)
     {
@@ -537,6 +544,13 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
         {
             drive = new EnemyDrive();
             drives[hq] = drive;
+        }
+
+        if (CommanderOperationsService.OwnsGroundForce(hq))
+        {
+            drive.Target = null;
+            drive.WantsCaptureUnit = false;
+            return;
         }
 
         if (!IsTakeable(drive.Target, hq))
@@ -681,19 +695,29 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
 
             // A vehicle standing on the commander's own base ring is spoken for: the home guard
             // pins it with a player command and this would order it away again every review. A
-            // vehicle the player has ordered somewhere is spoken for the same way — this re-issues
-            // a destination to every capture-capable unit it owns every review, so without the
-            // second test the AI would drive a troop carrier off the player's own order.
+            // vehicle the operations service has claimed into a platoon pool is spoken for the same
+            // way — it answers to the platoon state machine now, not to this drive. A vehicle the
+            // player has ordered somewhere is spoken for the same way again — this re-issues a
+            // destination to every capture-capable unit it owns every review, so without the third
+            // test the AI would drive a troop carrier off the player's own order.
             if (id.TryGetUnit(out Unit unit)
                 && CanCapture(unit)
                 && !CommanderEnemyCommanderService.IsDefendingUnit(unit)
-                && !CommanderEnemyCommanderService.IsGarrisonUnit(unit)
+                && !CommanderOperationsService.IsPlatoonUnit(unit)
                 && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true)
             {
                 squad.Add(unit);
             }
         }
     }
+
+    /// <summary>
+    /// Public wrapper around <see cref="GetHoldPoint"/> for the offensive assault (T14): the
+    /// attacking groups need the same "stand somewhere that actually captures, not on a building"
+    /// probe the expansion drive already uses, and this is one line rather than copying the probe.
+    /// Ledger addition beside row 21.
+    /// </summary>
+    internal static GlobalPosition GetHoldPointFor(Airbase airbase) => GetHoldPoint(airbase);
 
     /// <summary>
     /// Where a capture squad is sent to stand. Deliberately not the airbase centre transform: on a

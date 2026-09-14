@@ -57,6 +57,11 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
     private readonly List<CargoAircraftOption> aircraftOptions = new();
     private readonly List<AirbaseOption> airbaseOptions = new();
     private readonly Queue<QueuedCargoSpawn> queuedCargoSpawns = new();
+
+    /// <summary>Factions whose insertion cargo roster has been logged once this mission — the
+    /// <c>LogAirRosterOnce</c> convention: the roster is asset data, so the log line is the
+    /// answer.</summary>
+    private readonly HashSet<FactionHQ> loggedInsertionRoster = new();
     private readonly Dictionary<Aircraft, CargoMission> assignedMissions = new();
     private readonly Dictionary<Autopilot, float> terrainClearanceAutopilots = new();
     private readonly Dictionary<Autopilot, Aircraft> assignedAutopilotAircraft = new();
@@ -211,6 +216,23 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
         if (pendingAircraftSpawn != null && Time.unscaledTime > pendingAircraftSpawn.ExpiresAt)
         {
             CommanderPlugin.Log.LogWarning($"Supply cargo run assignment timed out: aircraft={pendingAircraftSpawn.Definition.name}");
+            if (pendingAircraftSpawn.InsertionPoint != null)
+            {
+                // The transport was bought but never matched at registration, so nobody flies it
+                // for the picket: give the vehicle charge back and say so. The hull is a loss
+                // until the Basegame's own AI lands that airframe somewhere; the operations
+                // record's stale valve closes the request out within its window.
+                if (pendingAircraftSpawn.InsertionCargoValue > 0f)
+                {
+                    pendingAircraftSpawn.Hq.AddFunds(pendingAircraftSpawn.InsertionCargoValue);
+                }
+
+                CommanderAiLog.Note(
+                    pendingAircraftSpawn.Hq,
+                    $"the insertion flight to {pendingAircraftSpawn.InsertionPoint.Label} was never matched at registration; "
+                        + $"the vehicle charge ({pendingAircraftSpawn.InsertionCargoValue:0}) is refunded.");
+            }
+
             NotifySamMissionFailed(pendingAircraftSpawn.SupportSummary);
             pendingAircraftSpawn = null;
         }
@@ -243,6 +265,7 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
         assignedAutopilotAircraft.Clear();
         pendingTerrainAutopilotBindings.Clear();
         pendingSamCargoDeposits.Clear();
+        loggedInsertionRoster.Clear();
         pendingTargetSelection = null;
         pendingAircraftSpawn = null;
         uiVisible = false;
@@ -552,6 +575,67 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
             supportSummary,
             useOtherAirfields);
         SetStatus(pendingTargetSelection.GetTargetPrompt());
+    }
+
+    /// <summary>
+    /// Names, once per mission per faction, every cargo aircraft and the ground vehicles its cargo
+    /// mounts can carry — the asset data a decompile cannot answer (design "What the game allows",
+    /// Assumed), and the one way to tell a faction that fields no mountable combat vehicle from a
+    /// selection bug. The <c>LogAirRosterOnce</c> convention.
+    /// </summary>
+    internal void LogInsertionRosterOnce(FactionHQ hq)
+    {
+        if (hq.faction == null || !loggedInsertionRoster.Add(hq))
+        {
+            return;
+        }
+
+        if (aircraftOptions.Count == 0)
+        {
+            RefreshOptions();
+        }
+
+        bool any = false;
+        Dictionary<string, float> depotPrices = CollectInsertionDepotPrices(hq);
+        for (int i = 0; i < aircraftOptions.Count; i++)
+        {
+            CargoAircraftOption aircraft = aircraftOptions[i];
+            List<string> vehicles = new();
+            for (int s = 0; s < aircraft.CargoSlots.Count; s++)
+            {
+                CargoSlotOption slot = aircraft.CargoSlots[s];
+                for (int m = 0; m < slot.Mounts.Count; m++)
+                {
+                    WeaponMount mount = slot.Mounts[m];
+                    if (WeaponChecker.MountAllowedHQ(mount, hq)
+                        && TryGetVehicleCargo(mount, depotPrices, out List<InsertionVehicle> cargo))
+                    {
+                        for (int v = 0; v < cargo.Count; v++)
+                        {
+                            // Name, platoon role, and the price an insertion would actually be
+                            // charged — the depot price when the faction's own ground catalog lists
+                            // the same vehicle by name (cargo variants often carry a placeholder
+                            // price), the cargo's own value otherwise. One line, once per mission.
+                            vehicles.Add(
+                                $"{cargo[v].Name} ({cargo[v].Role} {cargo[v].Value:0}{(cargo[v].FromDepot ? ", depot price" : string.Empty)})");
+                        }
+                    }
+                }
+            }
+
+            if (vehicles.Count > 0)
+            {
+                any = true;
+                CommanderPlugin.Log.LogInfo(
+                    $"Insertion cargo roster ({hq.faction.name}): {aircraft.Label} carries {string.Join(", ", vehicles)}.");
+            }
+        }
+
+        if (!any)
+        {
+            CommanderPlugin.Log.LogInfo(
+                $"Insertion cargo roster ({hq.faction.name}): no transport fields a mountable ground vehicle; pickets drive.");
+        }
     }
 
     internal bool RequestAutomaticCargoRun(GlobalPosition target)

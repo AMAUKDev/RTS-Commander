@@ -180,7 +180,9 @@ internal sealed partial class CommanderAirCommandService
         internal float ExpiresAt { get; }
     }
 
-    private sealed class AirMission
+    /// <summary>Internal (one-word widening): the operations air step reads <see cref="Returning"/>
+    /// through <see cref="TryGetMission"/> to tell a rearm cycle from a loss.</summary>
+    internal sealed class AirMission
     {
         internal AirMission(FactionHQ hq, AirCommandMode mode, GlobalPosition areaCenter, float radius, float targetAltitude, bool targetOrdnance, bool saturationAttack, bool purchasedWithFunds, float purchaseCost, AirMissionRecipe? recipe = null, bool autoRecreate = false)
         {

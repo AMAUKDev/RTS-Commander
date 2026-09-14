@@ -3,8 +3,9 @@
 **Last Updated**: 2026-09-13
 
 ## Current Focus
-- platoon-operations_20260913 (designed, awaiting plan)
-- Backlog (not yet designed): conductor/backlog/ — truck logistics, air/naval support
+- platoon-operations_20260913 (implemented, pending game verification)
+- truck-logistics_20260913 (designed, awaiting plan)
+- Backlog (not yet designed): conductor/backlog/ — air/naval support
 - ui-scale-slider_20260913 (new)
 - player-ai-commander_20260913 (new)
 - strategic-points_20260913 (new, designed, awaiting plan)

@@ -700,6 +700,57 @@ where you expect them, check that the BepInEx console is enabled
 (`BepInEx/config/BepInEx.cfg`, `[Logging.Console]` → `Enabled = true`) — this is a one-time
 developer setting, not something the mod's own settings window controls.
 
+## Platoon operations
+
+Replaces "the AI buys a vehicle, the game's convoy brain drives it at the nearest enemy" with a
+front line the AI commanders form, hold and push. Host-only, like every AI feature; nothing here is
+saved across a mission reload.
+
+### What a platoon is
+
+Every ground vehicle an AI-commanded HQ owns is claimed into that commander's pool the moment it
+registers, and platoons are formed from the pool by recipe: 3 armour (MBT/AFV), 1 carrier or light
+vehicle (APC/LCV, preferring one that can actually take a point), 2 air defence, size 6 by default.
+An unfillable slot takes any combat vehicle rather than waiting. A platoon is named (`1ST
+PLATOON`…) and always has exactly one objective and one state: Forming, Moving, Holding, Attacking
+or Withdrawing. Under half strength it withdraws to the nearest friendly forward base or held base
+and requisitions replacements; at zero it is dissolved and its mission reopens.
+
+### The front line
+
+Every held or reachable control point is ranked by distance to the nearest enemy-held point or base
+and by income: a point within the front range (15 km by default) of the enemy is front line,
+everything else is rear. Front points get a platoon as a forward base — two if the point has seen a
+recent hostile contact — with a munitions truck parked in the ring where it is covered. Rear points
+get a two-vehicle picket instead, cheap enough that it never competes with the platoons for the
+forward-base share (half of all platoons by default); surplus front points beyond that share picket
+instead of holding, and a picketed point that comes under threat promotes back to a forward base.
+
+### Offensives
+
+The commander picks a target — the nearest adjacent enemy-held point, or an enemy base whose
+observed defence (its own tracking database, not the true count) it can beat — and sizes the attack
+to 1.5x what it can see, floored at one platoon for a point or two for a base and capped at six.
+Two or three axes are chosen from the commander's forward bases and held bases so they arrive at
+roughly the same time from different directions; with only one candidate a second group forms off
+to one side. Each group stops five kilometres short on its own side and waits for the others (four
+minutes at most, then it goes without them), flipping through any point it passes close to on the
+way. A beaten attack (under 40% strength) withdraws and the next attempt on the same target sizes
+itself larger; a taken target becomes a new forward base. A pressure clock builds every review and
+forces the commander's best available attack with at least two platoons every 12 minutes,
+whatever it can see — the guard against a commander that never attacks at all.
+
+### What you can watch
+
+Platoon markers (`2ND PLATOON 5/6 HOLDING`) at each platoon's leader, an `FOB` tag on a forward
+base's point label, and small crosses at your own live attacks' release points. The COMMANDER LOG's
+OPERATIONS block shows pressure, platoon and FOB counts, open requisitions, and one line per live
+mission. Five sliders on the POINTS tab (platoon size, forward-base share, front range, pressure
+interval, offensive spend); the recipe itself is a config-file setting. The player's own AI
+commander runs the same doctrine once its switch is on, and an order given by hand to one of its
+platoon's vehicles is respected — it drops out of the platoon and is not re-recruited until the
+hands-off window expires.
+
 ## Unit systems
 
 - Toggle compatible radar systems on or off, and show radar coverage on the map at an

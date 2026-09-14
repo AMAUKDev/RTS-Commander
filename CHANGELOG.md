@@ -219,14 +219,113 @@ driving a camera over a battlefield instead of flying an unwilling aeroplane.
 
 - **The enemy commander never flew an airstrike.** Even when it did buy an aircraft, nothing told
   the aircraft what to do — and the game's own pilot AI lands after fifteen ticks with no target
-  found, which is most of the way to the player's base. Every airframe the enemy owns on the duel
-  now gets a real Air Command mission out of the same machinery your own aircraft use: a strategic
-  strike box over your territory, with one in three flying air superiority instead once you have
-  aircraft of your own up. This is duel-only. Every other mission launches its own AI aircraft and
-  may script what they do, and overriding that is not a bug fix.
+  found, which is most of the way to the player's base. Every airframe the enemy owns now gets a
+  real Air Command mission out of the same machinery your own aircraft use. What that mission is
+  changed later in this same release — the wing's strike aircraft now fly the CAS sorties the
+  ground plan asks for (see the air support entry under Added) — and what used to be duel-only
+  now runs on every mission, leaving a stock mission's own authored aircraft strictly alone.
 
 ### Added
 
+- **Pickets now fly to the points roads cannot reach.** A rear control point farther than 2 km
+  from any road no longer waits for its two-vehicle picket to drive there: the commander buys a
+  transport helicopter, buys the picket's vehicles as its cargo (one air-defence vehicle plus the
+  cheapest other — doctrine over bargains, since the insertion is a purchase), and the flight
+  lands at the point's own hold posts, unrolls both vehicles onto them, and returns to base for
+  recovery — the hull is refunded when it lands, so a successful insertion costs only the two
+  vehicles. It rides the machinery the SAM-site supply runs already proved in play, generalised
+  from "the player's faction" to every commanded HQ, and the money comes from the ground pot,
+  never the air wing's fund — the two features buy and fly separate aircraft. A shot-down
+  transport loses the hull and the vehicles aboard, and the point waits out a 10-minute cooldown
+  before asking again, driving in the meantime; a flight whose point falls or turns front while
+  it is out is recalled, or delivers its vehicles into the pool. A load that includes an
+  air-defence vehicle always beats a cheaper load without one — the doctrine holds even when a
+  cheaper all-other transport exists — and the vehicles are charged what they cost at the depot:
+  cargo variants in the game's files carry placeholder prices (the first play test saw 0, 1 and
+  2), so the charge resolves against the faction's own ground catalog, and the roster line names
+  every mountable vehicle with the price it will actually pay. Exactly one outcome line is
+  written per launch — the flight bound at registration, each drop, its loss, its recall, or its
+  request going stale — and the transport is claimed by its own registration, so an air-wing
+  transport buy in the same window can never be mistaken for the picket's flight or leave it
+  orphaned. Every request, lift-off, drop,
+  recovery and loss writes a line to the COMMANDER LOG, an insertion count (`heli=`) rides the
+  `Ops … review:` diagnostics line, and once per match each faction's mountable-vehicle roster is
+  written to the BepInEx log — the asset data that decides whether a faction can insert at all,
+  which a decompile cannot answer. New Operations settings: the off-road gate (2 km, a slider on
+  the POINTS tab's OPERATIONS box) plus config-file entries for the airborne insertion limit (1
+  per commander) and the loss cooldown (10 min).
+- **The commanders now fly their air force over the ground plan.** CAS sorties are tasked from the
+  same mission list the platoons read: an attack whose groups have reached their release points, a
+  platoon in contact, and a forward base under a threat mark each call for close air support sized
+  to what the commander has actually tracked there — one airframe for a pair of vehicles, up to
+  four for a major concentration — and a CAP escort joins whenever hostile aircraft are tracked
+  near the objective. The escort is bought before the CAS it covers, and the pair fly to the
+  objective together; an attack waits at its release point, up to its existing form-up patience,
+  for its CAS to be overhead before going in, and a platoon in contact gets its CAS tasked at
+  once. Lost airframes are replaced only while the objective is still contested, and never faster
+  than the loss cooldown allows — 2 minutes, doubled while the objective's ring shows at least two
+  tracked hostile air-defence units — so a commander no longer feeds aircraft one at a time into a
+  SAM line. This is also the end of the duel-only air commander: on stock missions the enemy now
+  accrues its air fund and fields a bought wing, while mission-authored free aircraft and the
+  player's own Air Command missions are never touched — and the player's own AI commander, like
+  the enemy, only ever flies aircraft it bought itself. The wing's standing task is air defence
+  over home territory (the old fixed strike target, the opponent's frozen opening airbase, is
+  gone); every tasking, escort join, release and loss writes a line to the COMMANDER LOG, and the
+  sortie summary rides the `Ops … review:` diagnostics line. Two config-file settings joined the
+  Operations section: the loss cooldown and the airborne ceiling (8, formerly the duel's own
+  limit — raised to 12 later in this same release, and the CAP-first entries below change what the
+  wing buys and how fast).
+- **The wing now takes the sky before the mud: CAP first.** The first playtest showed a rich enemy
+  buying one fighter all match — air defence over an objective only existed as a single escort, and
+  only once hostile aircraft had already been *tracked* there, so a commander with money and five
+  open sorties logged "bought no aircraft" over and over while its ground war waited for air support
+  that had nothing to fly it in. Every active objective — an attack whose groups have reached their
+  release points, a platoon in contact, a forward base under a threat mark — is now owed a combat
+  air patrol before it is owed anything else: one fighter as a standing baseline, one more per
+  hostile aircraft actually tracked in the objective's ring, up to three, and only then does close
+  air support scale to what the commander has tracked on the ground. When the fund covers one
+  airframe and both are wanted, the fighter wins; a sortie's first CAP fighter is the escort its CAS
+  still waits for, and an attack still holds at its release point for that package, exactly as
+  before.
+- **Air now goes up before the shooting starts, not after.** Every reason the wing had to fly began
+  with something already going wrong: an attack whose groups had reached their release points, a
+  platoon already being shot at, a forward base already under a threat mark — and close air support
+  was sized to what the commander had seen, which over empty-looking ground is nothing, so it sent
+  nothing. A platoon could march the length of the map into enemy territory with an empty sky above
+  it and only get air once the first round landed. Any platoon under way — moving, or attacking —
+  that comes within 8 km of an enemy-held point, an enemy airbase or a tracked hostile vehicle now
+  opens its own sortie, as an escorting fighter and a strike aircraft over the platoon itself even
+  with nothing yet observed. The sortie follows the platoon as it moves, grows on the existing
+  ladders the moment anything is actually spotted, becomes the platoon's contact sortie without
+  losing the aircraft it already had when the fight starts, and stands down a minute after the
+  platoon leaves the area or the moment it stops marching. These sorties queue behind attacks and
+  platoons in contact and ahead of threatened forward bases, so a real fight still gets the wing
+  first, and the per-objective and whole-wing limits are unchanged. The COMMANDER LOG names them:
+  `tasks <aircraft> with CAS over 3RD PLATOON (pre-emptive, enemy 6.2 km)`, and the review line's
+  air summary marks them `pre`.
+- **The wing also buys like a wing now, not one aeroplane a minute.** The buy loop used to launch at
+  most one airframe per 30-second review, and the transport top-up sat ahead of live sortie demand,
+  so a five-sortie shortfal could take ten minutes and a stream of re-bought transport helicopters
+  to clear. The loop now launches up to three airframes a review while the air fund covers the next
+  one and the ceiling allows; the fund may now save up to three of the dearest fighter on the roster
+  (its old cap could sit below one fighter's price for a commander with a small pot), and the
+  airborne ceiling rose from 8 to 12 — 8 was the first playtest's binding limiter, and it counts
+  every faction aircraft: the bought wing, its transports, the picket-insertion helicopters and the
+  player's own AIR-window launches alike. Each review now also writes one `air demand: CAP n/m,
+  CAS n/m, ceiling k/K, fund f` line to the BepInEx log when Operations debug logging is on, while
+  the once-per-reason "bought no aircraft" lines stay so the log always names the limiter that bit.
+- **The AI no longer trickles vehicles down one road.** Every vehicle an AI commander buys now
+  joins a named six-vehicle platoon (3 armour, 1 carrier, 2 air defence by default) with its own
+  objective. Platoons hold the control points nearest the enemy as forward bases with a munitions
+  truck, picket the quiet points behind them so they keep paying, and go forward as a two- or
+  three-axis offensive sized to what the commander has actually tracked — never "everything at
+  once". A pressure clock forces an attack with whatever is available at least every 12 minutes, so
+  a commander that cannot see a good target still eventually pushes. Forward bases, platoons and
+  live release points show up on the map, and the COMMANDER LOG gets an OPERATIONS block (pressure,
+  platoon states, open requisitions, one line per live mission). Five new sliders on the POINTS tab
+  (platoon size, forward-base share, front range, pressure interval, offensive spend); the recipe
+  itself is a config-file setting. The player's own AI commander runs the same doctrine. Nothing
+  here is saved across a mission reload.
 - **The map now has things worth holding beyond your own base.** Discovery finds resource sites,
   villages and hilltops once per mission and marks each with a coloured dot and a label on the
   tactical map and in the world, coloured by owner and striped when contested. **Gold mines can
@@ -700,6 +799,18 @@ No gameplay changes in any of the above.
 - The BepInEx plugin id changed to `com.groundcontrol.rts`, so settings start from defaults.
   Old settings are still in `BepInEx/config/com.nuclearoption.commander.cfg` if you want to
   copy keybinds across by hand.
+
+### Added
+
+- **Air Command missions and economy upgrade levels can now survive a hot reload**, for anyone
+  developing the mod with `build-dev.bat`. On by default; `KeepStateAcrossHotReload = false`
+  under `[Developer]` in `BepInEx\config\com.groundcontrol.rts.cfg` turns it off. A reload keeps every Air Command mission you launched (AUTO
+  flag and queued relaunches included) and every gold mine, factory and naval dock upgrade level,
+  with a restored mine reattached to its resource site. It reads only on the reload that actually
+  loaded from `scripts\`, never on a normal launch, and only for the mission run that wrote it —
+  a leftover file from an earlier match on the same map is rejected and deleted rather than
+  replayed. Point ownership, platoons and the enemy commander's plan still reset as before. See
+  `BUILD.md` → "Keeping Air Command missions and economy levels across a reload".
 
 ## 0.4.0.0 — Real orders, and someone to use them against
 

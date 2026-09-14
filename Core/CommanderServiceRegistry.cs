@@ -28,6 +28,7 @@ internal sealed class CommanderServiceRegistry
     private readonly List<Gated<ICommanderTickActive>> tickActive = new();
     private readonly List<Gated<ICommanderTickPersistent>> tickPersistent = new();
     private readonly List<ICommanderResetSession> resetSession = new();
+    private readonly List<ICommanderPersistState> persistState = new();
 
     /// <summary>
     /// Registers a service under a tier and returns it, so construction and registration stay
@@ -57,6 +58,10 @@ internal sealed class CommanderServiceRegistry
         if (service is ICommanderResetSession r)
         {
             resetSession.Add(r);
+        }
+        if (service is ICommanderPersistState ps)
+        {
+            persistState.Add(ps);
         }
         return service;
     }
@@ -127,6 +132,28 @@ internal sealed class CommanderServiceRegistry
         for (int i = 0; i < resetSession.Count; i++)
         {
             resetSession[i].ResetSession();
+        }
+    }
+
+    /// <summary>Fans a hot-reload snapshot write out to every service that has state worth saving.
+    /// Not tier-gated: an Advanced-tier service still exists (just untouched) on an unsupported
+    /// mission, and writing its (empty) state then is harmless.</summary>
+    internal void SnapshotState(CommanderStateWriter w)
+    {
+        for (int i = 0; i < persistState.Count; i++)
+        {
+            persistState[i].Snapshot(w);
+        }
+    }
+
+    /// <summary>Fans a hot-reload snapshot restore out to every service that opted in. Called at
+    /// most once per mission run, only after <see cref="CommanderStateStore"/> has already checked
+    /// the session guard.</summary>
+    internal void RestoreState(CommanderStateReader r)
+    {
+        for (int i = 0; i < persistState.Count; i++)
+        {
+            persistState[i].Restore(r);
         }
     }
 

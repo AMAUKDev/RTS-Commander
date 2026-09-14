@@ -896,10 +896,12 @@ internal sealed partial class CommanderStrategicPointService
 
     /// <summary>Horizontal distance squared from a point to a segment — the same measure
     /// <c>CommanderBuildPreview.SegmentDistanceSquared</c> uses for its own road/runway clearance
-    /// checks. That one is private to its class, so this is a second, identical definition rather
+    /// checks. That one is private to its class, so this was a second, identical definition rather
     /// than a shared one (reuse rule 4 would otherwise ask for one); noted here so the duplication
-    /// is a deliberate one, not a miss.</summary>
-    private static float SegmentDistanceSquared(GlobalPosition point, GlobalPosition a, GlobalPosition b)
+    /// was a deliberate one, not a miss. <c>internal</c> (T14, ledger row 14 addendum): the
+    /// offensive assault's en-route flip test is a third caller, so this one is now shared rather
+    /// than tripled.</summary>
+    internal static float SegmentDistanceSquared(GlobalPosition point, GlobalPosition a, GlobalPosition b)
     {
         float abX = b.x - a.x;
         float abZ = b.z - a.z;
@@ -1026,7 +1028,11 @@ internal sealed partial class CommanderStrategicPointService
         outpostCandidates.Clear();
         crossroadsCandidates.Clear();
         roadsideCandidates.Clear();
-        roadPointLists.Clear();
+        // roadPointLists is the one candidate cache that is KEPT past discovery: the picket-insertion
+        // track's road-distance gate (design.md, heli-picket-insertion_20260913, Decision 7) measures
+        // a control point's distance to the nearest road through it. The real resets still clear it —
+        // RestartDiscovery (the retry path) and ResetSession (a mission reload), after which discovery
+        // rebuilds it — so retention needs no lifecycle of its own.
         junctionNodes.Clear();
         siteCandidates.Clear();
         discovery = DiscoveryState.Done;
@@ -1064,13 +1070,20 @@ internal sealed partial class CommanderStrategicPointService
             }
         }
 
+        int retainedRoadPoints = 0;
+        for (int i = 0; i < roadPointLists.Count; i++)
+        {
+            retainedRoadPoints += roadPointLists[i].Count;
+        }
+
         CommanderPlugin.Log.LogInfo(
             $"Strategic points discovered: {sites} sites, {villages} villages, {hilltops} hilltops, "
                 + $"{outposts} outposts, {crossroads} crossroads, {roadside} road points, {bases} bases "
                 + $"in {duration:0.0}s (attempt {discoveryAttempts}, map {mapSize.x:0}x{mapSize.y:0} m, "
                 + $"fill grid {fillColumns}x{fillRows}; before spacing/caps: {candidateVillages} villages, "
                 + $"{candidateHilltops} hilltops, {candidateOutposts} outposts, {candidateCrossroads} crossroads, "
-                + $"{candidateRoadside} road points, {civilianBuildingCount} civilian buildings).");
+                + $"{candidateRoadside} road points, {civilianBuildingCount} civilian buildings; "
+                + $"roads retained: {roadPointLists.Count} roads, {retainedRoadPoints} points).");
 
         for (int i = 0; i < droppedSiteBuildingLabels.Count; i++)
         {

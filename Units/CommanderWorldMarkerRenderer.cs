@@ -61,6 +61,7 @@ internal sealed class CommanderWorldMarkerRenderer
         CommanderOrderPing.Draw(camera);
         DrawCaptureTargets(camera);
         CommanderStrategicPointService.Instance?.DrawMarkers(camera);
+        CommanderOperationsService.Instance?.DrawMarkers(camera);
 
         for (int i = 0; i < selectionService.SelectedUnits.Count; i++)
         {

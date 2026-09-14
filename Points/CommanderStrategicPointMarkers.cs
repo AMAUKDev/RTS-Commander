@@ -85,6 +85,13 @@ internal sealed partial class CommanderStrategicPointService
         // the one number that says what to do about it. The label carries the kind; the dot only
         // says where and whose.
         string readout = BuildReadout(point, localHq, owner, out Color labelColor, shapeColor);
+        // A forward-base mission on this point gets an FOB tag on top of the ordinary readout
+        // (ledger row 27 addendum, Operations/CommanderOperationsMarkers.cs).
+        if (CommanderOperationsService.Instance?.IsForwardBase(point, localHq) == true)
+        {
+            readout += "  FOB";
+        }
+
         CommanderUiTheme.DrawWorldLabel(
             new Vector2(center.x, center.y - size * 0.5f - 2f),
             $"{point.Label.ToUpperInvariant()}  {readout.ToUpperInvariant()}",

@@ -968,6 +968,16 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
                 continue;
             }
 
+            // A vehicle the player-side commander has claimed into a platoon belongs to the platoon.
+            // This loop re-sends a pending vehicle to the depot rally point whenever its command
+            // changes, and the platoon's form-up order is exactly such a change — so the two fought
+            // over one vehicle and the platoon leader kept driving back toward the depot.
+            if (CommanderOperationsService.IsPlatoonUnit(unit))
+            {
+                queue.PendingRallyUnits.RemoveAt(i);
+                continue;
+            }
+
             bool hasCurrentCommand = CommanderGameAccess.TryGetCurrentCommandPosition(unit, out GlobalPosition currentCommand);
             if (!pendingUnit.ExitCommandLocked)
             {

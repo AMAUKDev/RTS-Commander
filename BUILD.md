@@ -117,11 +117,35 @@ game. From then on, with the game running:
 Watch the BepInEx console for `Unloading old plugin instances` then the mod's own
 `Ground Control (RTS) ... loaded` line. The mission you are in stays loaded.
 
-What a reload resets: everything the mod holds in memory — mine/factory/dock upgrade levels,
-control groups, camera bookmarks, the enemy commander's plan state. Faction funds, units and
-buildings are game state and survive. Settings are in the config file and survive.
+What a reload resets: everything the mod holds in memory — control groups, camera bookmarks, the
+enemy commander's plan state. Faction funds, units and buildings are game state and survive.
+Settings are in the config file and survive.
 
 What does not need a reload at all: anything in CMD → Settings. Those are live.
+
+### Keeping Air Command missions and economy levels across a reload
+
+On by default. While a mission runs the mod writes a small JSON snapshot every 20 s (and once more
+as the old assembly unloads); a hot reload reads it once and deletes it, a normal launch never reads
+it. To turn it off, set `KeepStateAcrossHotReload = false` under `[Developer]` in
+`BepInEx\config\com.groundcontrol.rts.cfg` with the game closed (there is no in-game toggle).
+
+A `build-dev.bat` reload keeps:
+
+- Every Air Command mission you launched from the AIR window, including its AUTO flag and (if
+  AUTO was on and the aircraft was lost since the last save) a queued relaunch. An aircraft you
+  adopted with SELECT rather than launching yourself is not kept — re-adopt it after the reload.
+- Gold mine, factory and naval dock upgrade levels, with a restored mine reattached to its
+  resource site so the site still reads as taken.
+
+It does **not** keep: point (village/hilltop/base) ownership, platoon composition or the enemy
+commander's plan — those still reset like everything else above. A mission that was never
+launched with the toggle on has nothing to restore, so it behaves exactly as before.
+
+Watch `BepInEx\LogOutput.log` for `Snapshot written: N missions, M levels` (every ~20 s and right
+before the reload) and, after the reload, `Air Command restored N missions, M relaunches queued, K
+dropped` and `Economy restored N mine levels (M reattached to a resource site), N factory levels,
+N dock levels`.
 
 Back to the normal layout (the shipped mission JSON is only installed from `plugins\`):
 

@@ -128,3 +128,24 @@ In game (host, Ground Control Duel): within 10 min FOBs form at front points wit
 shows a first attack forming on two axes; groups wait at release points then go in together; a
 failed attack's successor asks for more; the enemy no longer arrives as one convoy; pickets hold
 rear points and they keep paying.
+
+## Departures recorded during planning
+
+1. The platoon move seam is a new `CommanderMoveService.IssuePlatoonMove`, not `ApplyOrder` —
+   `ApplyOrder` is local-HQ-only, marks a unit player-ordered, and drives it through the player
+   order state machine, any one of which would break an AI platoon.
+2. The design's three point kinds (village/hilltop/base) are the shipped seven; everywhere the
+   design says "control point" this plan uses `StrategicPointKinds.IsControlPoint`.
+3. A munitions truck is identified by what its prefab carries (`RearmVehicleAI` + `Rearmer`), not by
+   `VehicleType.TRUCK`, which is too broad and has no vehicle-definition-level rearm flag.
+4. A release point snaps to the nearest discovered Crossroads/Roadside point within 3 km, not to a
+   live re-read of the road network, which discovery's own caches do not survive past discovery.
+5. No A* route for a ground platoon: the terrain flight planner is airborne-only; a release point is
+   one height-map query for flat ground, not a search.
+6. The enemy expansion drive (`CommanderCaptureService.ReviewEnemy`) stands down per HQ once
+   operations owns that HQ's ground force, rather than being deleted, since the same service also
+   serves the player's own capture clicks.
+7. The OPERATIONS sliders need the POINTS tab to scroll: the existing 414 px box plus a 262 px
+   OPERATIONS box no longer fit inside the settings window at every help state.
+8. The home guard is suspended per HQ (its posture keeps running; only recruiting stops), not
+   removed, so a mission where point discovery never completes still gets the old base ring.

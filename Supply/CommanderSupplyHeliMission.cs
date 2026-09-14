@@ -100,7 +100,11 @@ internal sealed partial class CommanderSupplyHeliService
         while (attempts-- > 0)
         {
             QueuedCargoSpawn request = queuedCargoSpawns.Dequeue();
-            if (!IsCompatibleAirbase(request.RequestedAirbase, hq!, request.Aircraft.Definition)
+            // The spawn is bought for the request's own faction — null means the local HQ, which
+            // is every request the UI or the SAM site service makes. The insertion entry is the
+            // first to carry another commanded HQ.
+            FactionHQ spawnHq = request.Hq ?? hq!;
+            if (!IsCompatibleAirbase(request.RequestedAirbase, spawnHq, request.Aircraft.Definition)
                 && !request.UseOtherAirfields)
             {
                 SetStatus("A queued supply run was cancelled because its airbase is no longer friendly or compatible.");
@@ -113,14 +117,14 @@ internal sealed partial class CommanderSupplyHeliService
                 continue;
             }
 
-            Airbase? spawnAirbase = ResolveSpawnAirbase(request, hq!);
+            Airbase? spawnAirbase = ResolveSpawnAirbase(request, spawnHq);
             if (spawnAirbase == null)
             {
                 queuedCargoSpawns.Enqueue(request);
                 continue;
             }
 
-            TrySpawnCargoRunAtAirbase(request, spawnAirbase, hq!);
+            TrySpawnCargoRunAtAirbase(request, spawnAirbase, spawnHq);
             return;
         }
     }
@@ -263,7 +267,44 @@ internal sealed partial class CommanderSupplyHeliService
         }
     }
 
-    private void TrySpawnCargoRunAtAirbase(QueuedCargoSpawn request, Airbase airbase, FactionHQ hq)
+    /// <summary>
+    /// A delivered insertion's flight home: the rotary landing state — every cargo aircraft the
+    /// catalog offers has a helo or tiltwing pilot (<see cref="HasHeloPilot"/>) — with the existing
+    /// return-airbase override pinning the origin airbase. <see cref="IssueSupplyReturnToBase"/>'s
+    /// fixed-wing state is its own callers' business; for a helicopter's routine recovery it would
+    /// fly an aeroplane approach, so the insertion gets the rotary-correct sibling (one caller;
+    /// the same reasoning <c>CommanderAirCommandService.IssueReturnToBase</c> records for its own
+    /// split).
+    /// </summary>
+    private static void IssueInsertionReturnToBase(Aircraft? aircraft, CargoMission mission)
+    {
+        if (aircraft == null || aircraft.disabled || aircraft.pilots == null)
+        {
+            return;
+        }
+
+        CloseCargoDoors(mission);
+        for (int i = 0; i < aircraft.pilots.Length; i++)
+        {
+            Pilot pilot = aircraft.pilots[i];
+            if (pilot == null)
+            {
+                continue;
+            }
+
+            pilot.AIHeloLandingState ??= new AIHeloLandingState();
+            pilot.SwitchState(pilot.AIHeloLandingState);
+            return;
+        }
+    }
+
+    /// <summary>
+    /// Buys and spawns one cargo run at <paramref name="airbase"/> for <paramref name="hq"/> — the
+    /// single place supply money meets a spawn, so the insertion's vehicle charge rides here rather
+    /// than in its own entry (a charge and a spawn must succeed or roll back together). Returns
+    /// false when nothing left the ground and nothing was kept.
+    /// </summary>
+    private bool TrySpawnCargoRunAtAirbase(QueuedCargoSpawn request, Airbase airbase, FactionHQ hq)
     {
         CargoAircraftOption aircraftOption = request.Aircraft;
 
@@ -274,12 +315,32 @@ internal sealed partial class CommanderSupplyHeliService
             if (hq.factionFunds < cost)
             {
                 SetStatus("The faction cannot afford this supply aircraft.");
-                return;
+                return false;
             }
 
             hq.AddFunds(-cost);
             hq.ModifyUnitSupply(aircraftOption.Definition, 1);
             purchased = true;
+        }
+
+        // An insertion's cargo vehicles are new units entering the world through the loadout;
+        // their price is charged once here and never refunded — the vehicles stay (design
+        // Decision 2/3). The hull above may still come free out of stock; the vehicles never do.
+        if (request.InsertionCargoValue > 0f)
+        {
+            if (hq.factionFunds < request.InsertionCargoValue)
+            {
+                if (purchased)
+                {
+                    hq.ModifyUnitSupply(aircraftOption.Definition, -1);
+                    hq.AddFunds(aircraftOption.Definition.value);
+                }
+
+                SetStatus("The faction cannot afford the insertion's cargo vehicles.");
+                return false;
+            }
+
+            hq.AddFunds(-request.InsertionCargoValue);
         }
 
         pendingAircraftSpawn = new PendingAircraftSpawn(
@@ -295,7 +356,9 @@ internal sealed partial class CommanderSupplyHeliService
             purchased,
             purchased ? aircraftOption.Definition.value : 0f,
             request.Targets,
-            Time.unscaledTime + PendingSpawnTimeoutSeconds);
+            Time.unscaledTime + PendingSpawnTimeoutSeconds,
+            insertionPoint: request.InsertionPoint,
+            insertionCargoValue: request.InsertionCargoValue);
 
         AircraftDefinition definition = aircraftOption.Definition;
         int liveryIndex = definition.aircraftParameters.GetRandomLiveryForFaction(hq.faction);
@@ -317,12 +380,434 @@ internal sealed partial class CommanderSupplyHeliService
                 hq.AddFunds(definition.value);
             }
 
+            if (request.InsertionCargoValue > 0f)
+            {
+                hq.AddFunds(request.InsertionCargoValue);
+            }
+
             SetStatus("The airbase rejected the supply aircraft spawn.");
-            return;
+            return false;
         }
 
         string purchaseLabel = purchased ? " Purchased from faction funds." : string.Empty;
         SetStatus($"Spawned {aircraftOption.Label} with {request.CargoLabel}.{purchaseLabel}");
+        return true;
+    }
+
+    /// <summary>
+    /// One vehicle an insertion can buy as cargo: its platoon role, the price that will actually be
+    /// charged, its display name, and where the price came from. Cargo variants in the game's
+    /// assets often carry a placeholder price or none at all (the first play test showed prices of
+    /// 0, 1, 2 and 20), so the charge resolves through
+    /// <see cref="CommanderOperationsService.ResolveInsertionVehiclePrice"/> against the faction's
+    /// own ground catalog — the depot price when that catalog lists the same vehicle by name, the
+    /// cargo's own value otherwise.
+    /// </summary>
+    private readonly struct InsertionVehicle
+    {
+        internal InsertionVehicle(CommanderPlatoonRole role, float value, string name, bool fromDepot)
+        {
+            Role = role;
+            Value = value;
+            Name = name;
+            FromDepot = fromDepot;
+        }
+
+        internal CommanderPlatoonRole Role { get; }
+        internal float Value { get; }
+        internal string Name { get; }
+        internal bool FromDepot { get; }
+    }
+
+    /// <summary>One placeable vehicle-carrying mount: its hardpoint slot, and the ground vehicles
+    /// it carries.</summary>
+    private readonly struct VehicleMountCandidate
+    {
+        internal VehicleMountCandidate(int slot, WeaponMount mount, List<InsertionVehicle> vehicles)
+        {
+            Slot = slot;
+            Mount = mount;
+            Vehicles = vehicles;
+        }
+
+        internal int Slot { get; }
+        internal WeaponMount Mount { get; }
+        internal List<InsertionVehicle> Vehicles { get; }
+    }
+
+    /// <summary>
+    /// A registering aircraft must still be this low to match an insertion pending: the insertion's
+    /// own transports are hangar spawns, which start on the deck, while the air wing launches its
+    /// buys into the air at <c>CommanderAirCommandMissions.LaunchAltitudeMeters</c> (1200 m) — so a
+    /// rotary airframe still that high up at registration is the wing's, not this flight's, and no
+    /// same-type wing buy can be mistaken for an insertion transport (or the other way round).
+    /// Only weakens if the hangar-launch Gameplay toggle puts the wing on the deck too; that toggle
+    /// exists to re-test the ejection problem, not for regular play.
+    /// </summary>
+    private const float InsertionDeckSpawnMaxMeters = 100f;
+
+    /// <summary>Scratch for the insertion selection, reused across every combination tried in one
+    /// <see cref="TryLaunchInsertionAircraft"/> call rather than allocated per pair.</summary>
+    private readonly List<VehicleMountCandidate> insertionCandidates = new();
+    private readonly List<CommanderPlatoonRole> insertionRoles = new();
+    private readonly List<float> insertionValues = new();
+    private readonly List<string> insertionNames = new();
+    private readonly List<WeaponMount> insertionMounts = new();
+    private readonly List<int> insertionSlots = new();
+    private readonly List<int> insertionPicks = new();
+    private readonly List<WeaponMount> insertionChosenMounts = new();
+
+    /// <summary>Scratch for the depot-price lookup, cleared by the collector itself
+    /// (<c>CollectFactionVehicleDefinitions</c> clears before filling).</summary>
+    private static readonly List<VehicleDefinition> insertionDepotScratch = new();
+
+    /// <summary>
+    /// The AI picket-insertion entry (design.md, heli-picket-insertion_20260913) — the second
+    /// programmatic caller after <c>RequestSamSiteFoundationDrop</c> (Reuse rule 5: parameterised
+    /// by HQ rather than forked), gated server-side instead of on <c>CanHostSpawn</c>'s local-HQ
+    /// test. Picks the best complete combination of transport, airbase and the two cargo vehicles
+    /// the operations side's chooser wants (one air-defence plus the cheapest other — a load with
+    /// an air-defence vehicle beats a cheaper load without one, design Decision 8), then hands the
+    /// flight to the same queue-and-spawn path the SAM runs ride. The hull is charged at spawn and
+    /// refunded on recovery by the existing chain; the vehicles are charged at spawn and never
+    /// refunded.
+    /// </summary>
+    internal bool TryLaunchInsertionAircraft(
+        FactionHQ hq, CommanderStrategicPoint point, GlobalPosition target, out string decline)
+    {
+        decline = string.Empty;
+        if (NetworkManagerNuclearOption.i == null
+            || !NetworkManagerNuclearOption.i.Server.Active
+            || hq == null
+            || !hq.IsServer)
+        {
+            decline = "no host to launch from";
+            return false;
+        }
+
+        if (aircraftOptions.Count == 0)
+        {
+            RefreshOptions();
+        }
+
+        // Vehicle prices resolve against the faction's own ground catalog (see
+        // InsertionVehicle), so the affordability gate and the charge mean real money.
+        Dictionary<string, float> depotPrices = CollectInsertionDepotPrices(hq);
+
+        CargoAircraftOption? bestAircraft = null;
+        Airbase? bestAirbase = null;
+        Loadout? bestLoadout = null;
+        string bestLabel = string.Empty;
+        float bestCargoValue = 0f;
+        float bestTotal = float.MaxValue;
+        bool bestHasAirDefence = false;
+        bool sawVehicleMount = false;
+
+        for (int aircraftIndex = 0; aircraftIndex < aircraftOptions.Count; aircraftIndex++)
+        {
+            CargoAircraftOption aircraft = aircraftOptions[aircraftIndex];
+            float hull = Mathf.Max(0f, aircraft.Definition.value);
+            // Worst case the hull comes out of funds as well — TrySpawnCargoRunAtAirbase may still
+            // find one free in stock, which only makes the real flight cheaper.
+            float budget = hq.factionFunds - hull;
+            foreach (Airbase airbase in hq.GetAirbases())
+            {
+                if (!IsAvailableAirbase(airbase, hq, aircraft.Definition))
+                {
+                    continue;
+                }
+
+                CollectVehicleMountCandidates(hq, airbase, aircraft, depotPrices, insertionCandidates);
+                if (insertionCandidates.Count == 0)
+                {
+                    continue;
+                }
+
+                sawVehicleMount = true;
+                for (int a = 0; a < insertionCandidates.Count; a++)
+                {
+                    TryInsertionCombination(
+                        aircraft, airbase, insertionCandidates[a], null,
+                        budget, ref bestAircraft, ref bestAirbase, ref bestLoadout, ref bestLabel, ref bestCargoValue, ref bestTotal, ref bestHasAirDefence);
+                    for (int b = a + 1; b < insertionCandidates.Count; b++)
+                    {
+                        // Two mounts load together only from different slots that do not preclude
+                        // each other — a combined cargo bay precludes everything, so a bay heli
+                        // carries one mount, which is fine when that mount carries both vehicles.
+                        if (insertionCandidates[a].Slot == insertionCandidates[b].Slot
+                            || SetsConflict(aircraft.HardpointSets, insertionCandidates[a].Slot, insertionCandidates[b].Slot))
+                        {
+                            continue;
+                        }
+
+                        TryInsertionCombination(
+                            aircraft, airbase, insertionCandidates[a], insertionCandidates[b],
+                            budget, ref bestAircraft, ref bestAirbase, ref bestLoadout, ref bestLabel, ref bestCargoValue, ref bestTotal, ref bestHasAirDefence);
+                    }
+                }
+            }
+        }
+
+        if (bestAircraft == null || bestAirbase == null || bestLoadout == null)
+        {
+            decline = sawVehicleMount
+                ? "cannot afford the picket's vehicles"
+                : "no transport fields mountable ground vehicles";
+            return false;
+        }
+
+        QueuedCargoSpawn request = new(
+            bestAircraft,
+            bestLoadout,
+            bestLabel,
+            bestAirbase,
+            true,
+            100f,
+            false,
+            "Picket insertion",
+            false,
+            new[] { target },
+            hq,
+            point,
+            bestCargoValue);
+        Airbase? spawnAirbase = ResolveSpawnAirbase(request, hq);
+        if (spawnAirbase == null || pendingAircraftSpawn != null || IsSamHelipadBusy(request))
+        {
+            // No free hangar this instant: queue behind the SAM runs and open the record anyway —
+            // the operations side's stale-request valve covers a queue that never drains.
+            queuedCargoSpawns.Enqueue(request);
+            return true;
+        }
+
+        return TrySpawnCargoRunAtAirbase(request, spawnAirbase, hq);
+    }
+
+    /// <summary>
+    /// Every vehicle cargo mount this heli, airbase and HQ combination accepts. Called per
+    /// (aircraft, airbase) pair in one selection, so the pair enumeration below never re-reads the
+    /// catalog inside its loops.
+    /// </summary>
+    private static void CollectVehicleMountCandidates(
+        FactionHQ hq,
+        Airbase airbase,
+        CargoAircraftOption aircraft,
+        IReadOnlyDictionary<string, float> depotPrices,
+        List<VehicleMountCandidate> candidates)
+    {
+        candidates.Clear();
+        for (int s = 0; s < aircraft.CargoSlots.Count; s++)
+        {
+            CargoSlotOption slot = aircraft.CargoSlots[s];
+            for (int m = 0; m < slot.Mounts.Count; m++)
+            {
+                WeaponMount mount = slot.Mounts[m];
+                if (!WeaponChecker.MountAllowedHQ(mount, hq)
+                    || !WeaponChecker.MountAllowedAirbase(mount, airbase)
+                    || !TryGetVehicleCargo(mount, depotPrices, out List<InsertionVehicle> vehicles))
+                {
+                    continue;
+                }
+
+                candidates.Add(new VehicleMountCandidate(slot.HardpointIndex, mount, vehicles));
+            }
+        }
+    }
+
+    /// <summary>The faction's own ground-catalog prices by vehicle name — the depot price ladder the
+    /// insertion charges read, so a cargo variant carrying a placeholder price still costs what the
+    /// same vehicle costs at the depot.</summary>
+    private static Dictionary<string, float> CollectInsertionDepotPrices(FactionHQ hq)
+    {
+        Dictionary<string, float> prices = new();
+        CommanderGameAccess.CollectFactionVehicleDefinitions(insertionDepotScratch, hq);
+        for (int i = 0; i < insertionDepotScratch.Count; i++)
+        {
+            VehicleDefinition definition = insertionDepotScratch[i];
+            if (definition != null && !string.IsNullOrEmpty(definition.unitName))
+            {
+                prices[definition.unitName] = definition.value;
+            }
+        }
+
+        insertionDepotScratch.Clear();
+        return prices;
+    }
+
+    /// <summary>
+    /// The ground vehicles a cargo mount carries, false when it carries none. Tightened after the
+    /// first play test (user, 2026-09-14): a vehicle is insertion cargo only when its
+    /// <c>MountedCargo.cargo</c> is a real <c>VehicleDefinition</c> whose prefab is a
+    /// <c>GroundVehicle</c> — supply crates and containers are not pickets, and a transport whose
+    /// cargo is not vehicles never becomes an insertion candidate at all — and munitions trucks
+    /// (<see cref="CommanderPlatoonRole.Truck"/>) are excluded, because a truck cannot hold a
+    /// point and the game's rearm brain would claim it anyway. Which vehicles are mountable is
+    /// asset data a decompile cannot answer, so this runtime read is the one both the insertion
+    /// chooser and the roster log go through.
+    /// </summary>
+    private static bool TryGetVehicleCargo(
+        WeaponMount mount, IReadOnlyDictionary<string, float> depotPrices, out List<InsertionVehicle> vehicles)
+    {
+        vehicles = new List<InsertionVehicle>();
+        if (!IsRuntimeCargoMount(mount) || mount.prefab == null)
+        {
+            return false;
+        }
+
+        MountedCargo[] cargoItems = mount.prefab.GetComponentsInChildren<MountedCargo>(true);
+        for (int i = 0; i < cargoItems.Length; i++)
+        {
+            if (cargoItems[i]?.cargo is not VehicleDefinition definition
+                || definition.unitPrefab == null
+                || definition.unitPrefab.GetComponent<Unit>() is not GroundVehicle)
+            {
+                continue;
+            }
+
+            CommanderPlatoonRole role = CommanderPlatoonRoles.Of(definition);
+            if (role == CommanderPlatoonRole.Truck)
+            {
+                continue;
+            }
+
+            bool fromDepot = depotPrices.TryGetValue(definition.unitName, out float depotValue);
+            float price = CommanderOperationsService.ResolveInsertionVehiclePrice(fromDepot, depotValue, definition.value);
+            vehicles.Add(new InsertionVehicle(role, price, definition.unitName, fromDepot));
+        }
+
+        return vehicles.Count > 0;
+    }
+
+    /// <summary>Runs the operations side's pure chooser over one mount (or one loadable pair), and
+    /// keeps the best complete combination it returns: a load with an air-defence vehicle beats one
+    /// without at any price, then the cheaper total wins
+    /// (<see cref="CommanderOperationsService.InsertionCombinationBeats"/>).</summary>
+    private void TryInsertionCombination(
+        CargoAircraftOption aircraft,
+        Airbase airbase,
+        VehicleMountCandidate first,
+        VehicleMountCandidate? second,
+        float budget,
+        ref CargoAircraftOption? bestAircraft,
+        ref Airbase? bestAirbase,
+        ref Loadout? bestLoadout,
+        ref string bestLabel,
+        ref float bestCargoValue,
+        ref float bestTotal,
+        ref bool bestHasAirDefence)
+    {
+        insertionRoles.Clear();
+        insertionValues.Clear();
+        insertionNames.Clear();
+        insertionMounts.Clear();
+        insertionSlots.Clear();
+        AppendVehicleCandidate(first);
+        if (second.HasValue)
+        {
+            AppendVehicleCandidate(second.Value);
+        }
+
+        CommanderOperationsService.PickInsertionCargo(insertionRoles, insertionValues, budget, insertionPicks);
+        if (insertionPicks.Count < 2)
+        {
+            return;
+        }
+
+        float cargoValue = insertionValues[insertionPicks[0]] + insertionValues[insertionPicks[1]];
+        float total = Mathf.Max(0f, aircraft.Definition.value) + cargoValue;
+        bool hasAirDefence = insertionRoles[insertionPicks[0]] == CommanderPlatoonRole.AirDefence
+            || insertionRoles[insertionPicks[1]] == CommanderPlatoonRole.AirDefence;
+        if (!CommanderOperationsService.InsertionCombinationBeats(hasAirDefence, total, bestHasAirDefence, bestTotal))
+        {
+            return;
+        }
+
+        insertionChosenMounts.Clear();
+        for (int i = 0; i < insertionPicks.Count; i++)
+        {
+            WeaponMount mount = insertionMounts[insertionPicks[i]];
+            if (!insertionChosenMounts.Contains(mount))
+            {
+                insertionChosenMounts.Add(mount);
+            }
+        }
+
+        Loadout loadout = CreateEmptyLoadout(aircraft.HardpointSets.Length);
+        for (int i = 0; i < insertionPicks.Count; i++)
+        {
+            PlaceCargoAndClearNonCargo(
+                loadout, aircraft.HardpointSets, insertionSlots[insertionPicks[i]], insertionMounts[insertionPicks[i]]);
+        }
+
+        string label = insertionNames[insertionPicks[0]] + " + " + insertionNames[insertionPicks[1]];
+
+        bestAircraft = aircraft;
+        bestAirbase = airbase;
+        bestLoadout = loadout;
+        bestLabel = label;
+        bestCargoValue = cargoValue;
+        bestTotal = total;
+        bestHasAirDefence = hasAirDefence;
+    }
+
+    private void AppendVehicleCandidate(VehicleMountCandidate candidate)
+    {
+        for (int i = 0; i < candidate.Vehicles.Count; i++)
+        {
+            InsertionVehicle vehicle = candidate.Vehicles[i];
+            insertionRoles.Add(vehicle.Role);
+            insertionValues.Add(vehicle.Value);
+            insertionNames.Add(vehicle.Name);
+            insertionMounts.Add(candidate.Mount);
+            insertionSlots.Add(candidate.Slot);
+        }
+    }
+
+    /// <summary>
+    /// Recalls an insertion flight whose point is no longer worth reinforcing — the
+    /// <c>CancelSamSiteMissions</c> shape: stop overriding the target, mark cancelled (a vehicle
+    /// that activates after this is destroyed), and fly home for the hull's refund. A
+    /// queued-but-unspawned request for the same point dies with the flight, so a hangar that
+    /// frees later cannot launch a transport nobody is waiting for.
+    /// </summary>
+    internal void CancelInsertion(FactionHQ hq, CommanderStrategicPoint point)
+    {
+        int queued = queuedCargoSpawns.Count;
+        for (int i = 0; i < queued; i++)
+        {
+            QueuedCargoSpawn request = queuedCargoSpawns.Dequeue();
+            if (request.InsertionPoint == null
+                || !ReferenceEquals(request.Hq, hq)
+                || !ReferenceEquals(request.InsertionPoint, point))
+            {
+                queuedCargoSpawns.Enqueue(request);
+            }
+        }
+
+        foreach (KeyValuePair<Aircraft, CargoMission> entry in assignedMissions)
+        {
+            CargoMission mission = entry.Value;
+            if (mission.InsertionPoint == null
+                || !ReferenceEquals(mission.Hq, hq)
+                || !ReferenceEquals(mission.InsertionPoint, point))
+            {
+                continue;
+            }
+
+            mission.TargetOverrideActive = false;
+            mission.Cancelled = true;
+            mission.CargoClearancePending = false;
+            IssueInsertionReturnToBase(entry.Key, mission);
+            if (entry.Key?.autopilot != null)
+            {
+                terrainClearanceAutopilots.Remove(entry.Key.autopilot);
+                assignedAutopilotAircraft.Remove(entry.Key.autopilot);
+            }
+
+            if (entry.Key != null)
+            {
+                pendingTerrainAutopilotBindings.Remove(entry.Key);
+            }
+        }
     }
 
     private void TryAssignPendingAircraft(FactionHQ hq, Unit unit)
@@ -333,6 +818,19 @@ internal sealed partial class CommanderSupplyHeliService
             || unit is not Aircraft aircraft
             || aircraft.Player != null
             || !ReferenceEquals(aircraft.definition, pending.Definition))
+        {
+            return;
+        }
+
+        // An insertion pending matches only the transport this request spawned: a hangar spawn
+        // still on the deck. The air wing launches its own buys into the air at
+        // LaunchAltitudeMeters, so a rotary airframe still that high up at registration is the
+        // wing's (it takes the wing slot and the next registration takes the insertion), and an
+        // airframe the wing has already claimed is never also an insertion transport — no
+        // double-binding, no orphan, whichever of the two registration notifies runs first.
+        if (pending.InsertionPoint != null
+            && (aircraft.radarAlt >= InsertionDeckSpawnMaxMeters
+                || CommanderOperationsService.IsWingAirframe(hq, aircraft)))
         {
             return;
         }
@@ -354,7 +852,8 @@ internal sealed partial class CommanderSupplyHeliService
             ParseFoundationSiteId(pending.SupportSummary),
             ParseJacknifeSiteId(pending.SupportSummary),
             pending.OriginAirbase,
-            pending.NavalTarget);
+            pending.NavalTarget,
+            pending.InsertionPoint);
         assignedMissions[aircraft] = mission;
         int cachedRouteSiteId = mission.DepositSiteId >= 0
             ? mission.DepositSiteId
@@ -383,8 +882,23 @@ internal sealed partial class CommanderSupplyHeliService
             ? "Naval Supply"
             : pending.Airdrop
                 ? $"Airdrop: {pending.CargoLabel}"
-                : $"Cargo Delivery: {pending.CargoLabel}";
-        CommanderSelectionService.PinMissionUnit(aircraft, "SUPPLY", missionLabel);
+                : pending.InsertionPoint != null
+                    ? $"Picket insertion: {pending.CargoLabel}"
+                    : $"Cargo Delivery: {pending.CargoLabel}";
+        // The pinned-units list is the local player's; an enemy commander's insertion transport is
+        // intel, not a mission to show.
+        if (ReferenceEquals(pending.Hq, CommanderGameAccess.GetLocalHq()))
+        {
+            CommanderSelectionService.PinMissionUnit(aircraft, "SUPPLY", missionLabel);
+        }
+
+        if (pending.InsertionPoint != null)
+        {
+            CommanderOperationsService.NotifyInsertionAircraft(pending.Hq, pending.InsertionPoint, aircraft);
+            CommanderAiLog.Note(
+                pending.Hq,
+                $"insertion flight {CommanderGameAccess.GetUnitLabel(aircraft)} bound for {pending.InsertionPoint.Label}, carrying {pending.CargoLabel}.");
+        }
         if (pending.HighTerrainClearance && !TryBindTerrainAutopilot(aircraft, mission))
         {
             pendingTerrainAutopilotBindings.Add(aircraft);
@@ -718,6 +1232,10 @@ internal sealed partial class CommanderSupplyHeliService
                 groundVehicle.SetHoldPosition(true);
                 groundVehicle.UnitCommand?.SetDestination(groundVehicle.GlobalPosition(), playerCommand: false);
                 NotifyFoundationCargoActivated(mission, cargoUnit);
+                if (mission.InsertionPoint != null)
+                {
+                    CommanderOperationsService.NotifyPicketVehicleDelivered(mission.Hq, mission.InsertionPoint, cargoUnit);
+                }
             }
         }
         else if (cargoStillOnAircraft
@@ -919,6 +1437,20 @@ internal sealed partial class CommanderSupplyHeliService
                 mission.DeliveryCompleted = mission.ActivatedCargoCount >= mission.ExpectedCargoLoads;
                 mission.VerticalDepartureActive = true;
             }
+            else if (!mission.Airdrop
+                && mission.InsertionPoint != null
+                && mission.DeliveryCompleted
+                && !mission.ReturnIssued)
+            {
+                // Both vehicles are out and the ramp is clear: the flight is over, and the
+                // transport goes home for recovery (and its hull refund) rather than orbiting the
+                // point in the combat state until the Basegame's own no-target logic remembers it
+                // has a base. DeliveryCompleted is what proves the ramp is clear — the hold
+                // below keeps the landing timer at zero until then.
+                mission.ReturnIssued = true;
+                IssueInsertionReturnToBase(aircraft, mission);
+            }
+
             return true;
         }
 
@@ -1006,6 +1538,12 @@ internal sealed partial class CommanderSupplyHeliService
             vehicle.SetHoldPosition(true);
             vehicle.UnitCommand?.SetDestination(vehicle.GlobalPosition(), playerCommand: false);
             NotifyFoundationCargoActivated(mission, vehicle);
+            if (mission.InsertionPoint != null)
+            {
+                // Same as the no-clearance branch in HoldDeployedCargo: once the vehicle has
+                // settled off the ramp, it belongs to the picket it was bought for.
+                CommanderOperationsService.NotifyPicketVehicleDelivered(mission.Hq, mission.InsertionPoint, vehicle);
+            }
         }
         mission.CargoClearancePending = false;
     }
@@ -1090,9 +1628,24 @@ internal sealed partial class CommanderSupplyHeliService
     private void HandleAircraftReturned(Aircraft aircraft)
     {
         if (!assignedMissions.TryGetValue(aircraft, out CargoMission mission)
-            || !mission.PurchasedWithFunds
             || mission.PurchaseRefunded
             || mission.Hq == null)
+        {
+            return;
+        }
+
+        if (mission.InsertionPoint != null)
+        {
+            // The insertion's own recovery line; the hull refund half only when a hull was
+            // actually charged (a transport taken out of stock costs nothing and refunds nothing).
+            CommanderAiLog.Note(
+                mission.Hq,
+                mission.PurchasedWithFunds
+                    ? "transport recovered, hull refunded."
+                    : "transport recovered.");
+        }
+
+        if (!mission.PurchasedWithFunds)
         {
             return;
         }
@@ -1106,7 +1659,10 @@ internal sealed partial class CommanderSupplyHeliService
     {
         return AircraftField?.GetValue(state) is Aircraft aircraft
             && assignedMissions.TryGetValue(aircraft, out CargoMission mission)
-            && IsSamLogisticsMission(mission)
+            // An insertion's landing zone is an ordinary control point 20+ km from any airbase, and
+            // the game's ejection check abandons a stationary transport beyond 200 m of its
+            // touchdown point — without this the crew would eject while the vehicles roll out.
+            && (IsSamLogisticsMission(mission) || mission.InsertionPoint != null)
             && !mission.Airdrop
             && !mission.RouteTransitActive
             && aircraft.radarAlt < 15f
@@ -1444,6 +2000,13 @@ internal sealed partial class CommanderSupplyHeliService
                     failedMission.FoundationSiteId,
                     failedMission.DepositSiteId,
                     failedMission.JacknifeSiteId);
+                if (failedMission.InsertionPoint != null)
+                {
+                    // The vehicles died with the hull (engine behaviour: cargo spawns disabled
+                    // when the carrying part detaches), so the point takes the loss cooldown and
+                    // falls back to driving.
+                    CommanderOperationsService.NoteInsertionLost(failedMission.Hq, failedMission.InsertionPoint);
+                }
             }
             assignedMissions.Remove(aircraft);
         }
@@ -1590,7 +2153,10 @@ internal sealed partial class CommanderSupplyHeliService
             bool airdrop,
             string supportSummary,
             bool useOtherAirfields,
-            IReadOnlyList<GlobalPosition> targets)
+            IReadOnlyList<GlobalPosition> targets,
+            FactionHQ? hq = null,
+            CommanderStrategicPoint? insertionPoint = null,
+            float insertionCargoValue = 0f)
         {
             Aircraft = aircraft;
             Loadout = loadout;
@@ -1602,6 +2168,9 @@ internal sealed partial class CommanderSupplyHeliService
             SupportSummary = supportSummary;
             UseOtherAirfields = useOtherAirfields;
             Targets = new List<GlobalPosition>(targets);
+            Hq = hq;
+            InsertionPoint = insertionPoint;
+            InsertionCargoValue = insertionCargoValue;
         }
 
         internal CargoAircraftOption Aircraft { get; }
@@ -1615,6 +2184,20 @@ internal sealed partial class CommanderSupplyHeliService
         internal bool UseOtherAirfields { get; }
         internal List<GlobalPosition> Targets { get; }
         internal GlobalPosition Target => Targets[0];
+
+        /// <summary>
+        /// The faction this spawn is bought for. Null means the local HQ — every existing caller —
+        /// so the queue stays backwards compatible; the picket-insertion entry is the first caller
+        /// that carries another commanded HQ (Reuse rule 5).
+        /// </summary>
+        internal FactionHQ? Hq { get; }
+
+        /// <summary>The control point an insertion delivers to, or null for every other cargo run.</summary>
+        internal CommanderStrategicPoint? InsertionPoint { get; }
+
+        /// <summary>The total price of the cargo vehicles an insertion is buying; charged at spawn
+        /// and never refunded — the vehicles stay in the world (design Decision 2/3).</summary>
+        internal float InsertionCargoValue { get; }
     }
 
     private sealed class PendingAircraftSpawn
@@ -1633,7 +2216,9 @@ internal sealed partial class CommanderSupplyHeliService
             float purchaseCost,
             IReadOnlyList<GlobalPosition> targets,
             float expiresAt,
-            Ship? navalTarget = null)
+            Ship? navalTarget = null,
+            CommanderStrategicPoint? insertionPoint = null,
+            float insertionCargoValue = 0f)
         {
             Hq = hq;
             Definition = definition;
@@ -1649,6 +2234,8 @@ internal sealed partial class CommanderSupplyHeliService
             Targets = new List<GlobalPosition>(targets);
             ExpiresAt = expiresAt;
             NavalTarget = navalTarget;
+            InsertionPoint = insertionPoint;
+            InsertionCargoValue = insertionCargoValue;
         }
 
         internal FactionHQ Hq { get; }
@@ -1665,6 +2252,13 @@ internal sealed partial class CommanderSupplyHeliService
         internal List<GlobalPosition> Targets { get; }
         internal float ExpiresAt { get; }
         internal Ship? NavalTarget { get; }
+
+        /// <summary>The control point an insertion delivers to, or null for every other cargo run.</summary>
+        internal CommanderStrategicPoint? InsertionPoint { get; }
+
+        /// <summary>The vehicle charge already taken for this insertion, carried so the timeout
+        /// path can hand it back if the transport never matches at registration.</summary>
+        internal float InsertionCargoValue { get; }
     }
 
     private sealed class CargoMission
@@ -1685,7 +2279,8 @@ internal sealed partial class CommanderSupplyHeliService
             int foundationSiteId,
             int jacknifeSiteId,
             Airbase originAirbase,
-            Ship? navalTarget = null)
+            Ship? navalTarget = null,
+            CommanderStrategicPoint? insertionPoint = null)
         {
             Hq = hq;
             DeliveryTargets = new List<GlobalPosition>(deliveryTargets);
@@ -1702,6 +2297,7 @@ internal sealed partial class CommanderSupplyHeliService
             JacknifeSiteId = jacknifeSiteId;
             OriginAirbase = originAirbase;
             NavalTarget = navalTarget;
+            InsertionPoint = insertionPoint;
         }
 
         internal FactionHQ Hq { get; }
@@ -1720,6 +2316,14 @@ internal sealed partial class CommanderSupplyHeliService
         internal int JacknifeSiteId { get; }
         internal Airbase OriginAirbase { get; }
         internal Ship? NavalTarget { get; }
+
+        /// <summary>
+        /// The control point this flight reinforces (picket insertion), or null for every other
+        /// cargo mission. Non-null is what the insertion branches key on: the LZ override needs no
+        /// SAM ids, the ejection suppression extends to it, and each activated cargo vehicle is
+        /// adopted into the point's picket.
+        /// </summary>
+        internal CommanderStrategicPoint? InsertionPoint { get; }
         internal bool PurchaseRefunded { get; set; }
         internal bool Initialized { get; set; }
         internal bool TargetOverrideActive { get; set; } = true;
@@ -1744,4 +2348,8 @@ internal sealed partial class CommanderSupplyHeliService
         internal readonly List<GlobalPosition> ApproachRoute = new();
         internal bool DeliveryCompleted { get; set; }
         internal readonly List<BayDoor> CargoDoors = new();
+
+        /// <summary>True once a delivered insertion's return flight has been issued, so the cargo
+        /// tick issues it exactly once.</summary>
+        internal bool ReturnIssued { get; set; }
     }}
