@@ -29,10 +29,15 @@ internal sealed partial class CommanderStrategicPointService
     private const int FillCellsPerFrame = 4;
 
     /// <summary>
-    /// A resource site has no garrison ring — this is only the footprint the marker and the
-    /// selection card measure against, so it does not need a config entry of its own.
+    /// A resource site's capture ring. Sites became held-by-presence control points on 2026-09-14
+    /// (two vehicles inside the ring for the hold time take them); at the old 50 m footprint a
+    /// second vehicle parked a few lengths from the first read as outside and the site sat at
+    /// "free 1/2" for good. Doubled to 500 m on 2026-09-14 (user: "we were running a fine line of
+    /// having units on the edge of the ring to allow room but if they're slightly over it, it won't
+    /// be captured"): the garrison now stands at SiteHoldRingFraction of this, well inside the ring
+    /// and well clear of the mine at the centre; mine siting itself uses the point position, not this.
     /// </summary>
-    private const float SiteRadiusMeters = 50f;
+    private const float SiteRadiusMeters = 500f;
 
     private Building[]? industryBuildings;
     private bool sitesExistingIndustryDone;
@@ -72,7 +77,208 @@ internal sealed partial class CommanderStrategicPointService
         mapSize = size;
         discoveryStartedAt = Time.realtimeSinceStartup;
         discoveryAttempts++;
+        levelledNudged = 0;
+        levelledDropped = 0;
+        droppedWooded = 0;
+        droppedOffRoad = 0;
         discovery = DiscoveryState.Sites;
+    }
+
+    /// <summary>
+    /// Compass probes (four cardinals plus four diagonals) the levelness test rings a candidate
+    /// with, the same eight <see cref="HilltopRingSamples"/> uses: a four-point cross lets a gully
+    /// or a spur running exactly between two probes escape the test entirely.
+    /// </summary>
+    private const int LevelnessRingSamples = 8;
+
+    /// <summary>
+    /// Step between rings of the level-ground search. 20 m is the strategic height map's own
+    /// resolution, so a finer step re-reads the same pixel and finds the same answer.
+    /// </summary>
+    private const float LevelSearchStepMeters = 20f;
+
+    /// <summary>
+    /// How far the level-ground search may move a point from where discovery put it. 150 m keeps
+    /// the point recognisably on the same village, summit or industrial site; past that it is a
+    /// different piece of ground and the honest answer is to drop the candidate.
+    /// </summary>
+    private const float LevelSearchMaxRadiusMeters = 150f;
+
+    /// <summary>Level-search offsets, centre first then outward by ring, built once from the
+    /// constants above (they are compile-time, so the list never needs rebuilding).</summary>
+    private static readonly List<Vector2> levelSearchOffsets = new();
+
+    /// <summary>Ring heights for one levelness probe, reused so the test allocates nothing.</summary>
+    private static readonly List<float> levelRingScratch = new();
+
+    /// <summary>Counts for the discovery log line: how many accepted points the level search had to
+    /// move, and how many candidate positions it rejected outright for want of level ground.</summary>
+    private int levelledNudged;
+    private int levelledDropped;
+
+    /// <summary>
+    /// The levelness rule, pure for the self-check. Ground is level enough for a point when the
+    /// whole probe (centre plus ring) spans no more than <paramref name="maxSpreadMeters"/> of
+    /// height AND the mean of the slopes from the centre out to each probe is no steeper than
+    /// <paramref name="maxSlopeDegrees"/>. Both boundaries count as passing. A probe that returned
+    /// no ring samples at all (off the height map) is not level ground: unproven is not level.
+    /// </summary>
+    internal static bool IsGroundLevelEnough(
+        float centreHeight,
+        IReadOnlyList<float> ringHeights,
+        float probeRadiusMeters,
+        float maxSpreadMeters,
+        float maxSlopeDegrees)
+    {
+        if (ringHeights.Count == 0)
+        {
+            return false;
+        }
+
+        float minimum = centreHeight;
+        float maximum = centreHeight;
+        float slopeSum = 0f;
+        float radius = Mathf.Max(probeRadiusMeters, 0.01f);
+        for (int i = 0; i < ringHeights.Count; i++)
+        {
+            float height = ringHeights[i];
+            if (height < minimum)
+            {
+                minimum = height;
+            }
+
+            if (height > maximum)
+            {
+                maximum = height;
+            }
+
+            slopeSum += Mathf.Atan(Mathf.Abs(height - centreHeight) / radius) * Mathf.Rad2Deg;
+        }
+
+        if (maximum - minimum > maxSpreadMeters)
+        {
+            return false;
+        }
+
+        return slopeSum / ringHeights.Count <= maxSlopeDegrees;
+    }
+
+    /// <summary>
+    /// Offsets the level search tries, in order: the candidate itself, then every compass point of
+    /// a ring <paramref name="stepMeters"/> out, then the next ring, out to
+    /// <paramref name="maxRadiusMeters"/>. Nearest-first, so the search always returns the level
+    /// spot closest to where discovery meant the point to be. Pure, for the self-check.
+    /// </summary>
+    internal static void EmitLevelSearchOffsets(float stepMeters, float maxRadiusMeters, List<Vector2> result)
+    {
+        result.Clear();
+        result.Add(Vector2.zero);
+        if (stepMeters <= 0f)
+        {
+            return;
+        }
+
+        for (float radius = stepMeters; radius <= maxRadiusMeters; radius += stepMeters)
+        {
+            for (int i = 0; i < LevelnessRingSamples; i++)
+            {
+                float angle = i * (Mathf.PI * 2f / LevelnessRingSamples);
+                result.Add(new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Walks <see cref="EmitLevelSearchOffsets"/> from a candidate position and returns the first
+    /// offset whose ground passes <see cref="IsGroundLevelEnough"/> and stands at least
+    /// <paramref name="minHeightMeters"/> high (the hilltop caller's way of saying "still the top of
+    /// this hill, not a level shelf part way down it"). Reads the strategic height map only — nine
+    /// samples per offset, no raycasts.
+    /// </summary>
+    private static bool TryFindLevelGround(
+        float x, float z, float minHeightMeters, out GlobalPosition levelled, out bool moved)
+    {
+        if (levelSearchOffsets.Count == 0)
+        {
+            EmitLevelSearchOffsets(LevelSearchStepMeters, LevelSearchMaxRadiusMeters, levelSearchOffsets);
+        }
+
+        float probeRadius = CommanderSettings.PointsLevelnessProbeRadiusMeters;
+        float maxSpread = CommanderSettings.PointsMaxPointHeightSpreadMeters;
+        float maxSlope = CommanderSettings.PointsMaxPointSlopeDegrees;
+        for (int i = 0; i < levelSearchOffsets.Count; i++)
+        {
+            Vector2 offset = levelSearchOffsets[i];
+            float probeX = x + offset.x;
+            float probeZ = z + offset.y;
+            if (!CommanderSamSiteAnalyzerService.TryGetStrategicTerrainHeight(probeX, probeZ, out float height)
+                || height < minHeightMeters)
+            {
+                continue;
+            }
+
+            levelRingScratch.Clear();
+            for (int s = 0; s < LevelnessRingSamples; s++)
+            {
+                float angle = s * (Mathf.PI * 2f / LevelnessRingSamples);
+                if (CommanderSamSiteAnalyzerService.TryGetStrategicTerrainHeight(
+                        probeX + Mathf.Cos(angle) * probeRadius,
+                        probeZ + Mathf.Sin(angle) * probeRadius,
+                        out float ringHeight))
+                {
+                    levelRingScratch.Add(ringHeight);
+                }
+            }
+
+            if (!IsGroundLevelEnough(height, levelRingScratch, probeRadius, maxSpread, maxSlope))
+            {
+                continue;
+            }
+
+            levelled = new GlobalPosition(probeX, height, probeZ);
+            moved = i > 0;
+            return true;
+        }
+
+        levelled = default;
+        moved = false;
+        return false;
+    }
+
+    /// <summary>
+    /// <see cref="TryFindLevelGround"/> for a caller outside discovery that wants somewhere level to
+    /// put a building rather than somewhere level to put a point — the FOB's three structures
+    /// (<c>Economy/CommanderFobBuilder.cs</c>, fob-construction_20260914). No minimum height, since
+    /// a depot is not a hilltop, and the "moved" flag is discovery's own bookkeeping and means
+    /// nothing here. Exists so there is ONE levelness rule in the mod (Reuse rule 3) rather than a
+    /// second probe loop written beside the buildings.
+    /// </summary>
+    internal static bool TryFindLevelBuildingSpot(GlobalPosition candidate, out GlobalPosition levelled)
+    {
+        return TryFindLevelGround(candidate.x, candidate.z, float.MinValue, out levelled, out _);
+    }
+
+    /// <summary>
+    /// <see cref="TryFindLevelGround"/> with the discovery log's counters attached. Every non-road
+    /// kind (site, village, hilltop, outpost) goes through this before it becomes a candidate;
+    /// crossroads and road points do not, because a road is level ground by definition of being a
+    /// road (user decision, 2026-09-14). Runs before <see cref="ApplySpacing"/> everywhere, so
+    /// spacing measures the positions the points actually end up at.
+    /// </summary>
+    private bool TryLevelPoint(GlobalPosition original, float minHeightMeters, out GlobalPosition levelled)
+    {
+        if (!TryFindLevelGround(original.x, original.z, minHeightMeters, out levelled, out bool moved))
+        {
+            levelledDropped++;
+            return false;
+        }
+
+        if (moved)
+        {
+            levelledNudged++;
+        }
+
+        return true;
     }
 
     /// <summary>Throws away a finished pass and queues another one. Everything the passes write
@@ -164,15 +370,51 @@ internal sealed partial class CommanderStrategicPointService
                 continue;
             }
 
-            if (TryFindSiteRing(economy, mineDefinition, building.transform.GlobalPosition(), out GlobalPosition site))
+            if (TryFindSiteRing(economy, mineDefinition, building.transform.GlobalPosition(), out GlobalPosition site)
+                && TryLevelSite(economy, mineDefinition, site, out GlobalPosition levelSite))
             {
-                siteCandidates.Add(new CommanderStrategicPoint(StrategicPointKind.Site, site, SiteRadiusMeters, string.Empty));
+                siteCandidates.Add(new CommanderStrategicPoint(StrategicPointKind.Site, levelSite, SiteRadiusMeters, string.Empty));
             }
             else
             {
                 droppedSiteBuildingLabels.Add(CommanderGameAccess.GetUnitLabel(building));
             }
         }
+    }
+
+    /// <summary>
+    /// Nudges a resource site onto level ground and re-proves the siting rule there. Moving a site
+    /// can walk it onto a road, a building or a runway, none of which <c>IsSiteAllowed</c> would
+    /// have passed at the original position, so a moved site is checked again; an unmoved one was
+    /// already checked by the caller and is taken as it stands.
+    /// </summary>
+    private bool TryLevelSite(
+        CommanderEconomyService economy,
+        BuildingDefinition mineDefinition,
+        GlobalPosition site,
+        out GlobalPosition levelSite)
+    {
+        if (!TryLevelPoint(site, float.MinValue, out GlobalPosition levelled))
+        {
+            levelSite = default;
+            return false;
+        }
+
+        if (HorizontalDistance(levelled, site) < 1f)
+        {
+            levelSite = site;
+            return true;
+        }
+
+        GlobalPosition snapped = CommanderGameAccess.SnapToTerrain(levelled);
+        if (!economy.IsSiteAllowed(mineDefinition, snapped, null, out _) || CommanderGameAccess.IsBelowSeaLevel(snapped))
+        {
+            levelSite = default;
+            return false;
+        }
+
+        levelSite = snapped;
+        return true;
     }
 
     /// <summary>
@@ -248,7 +490,14 @@ internal sealed partial class CommanderStrategicPointService
                 continue;
             }
 
-            GlobalPosition candidate = new(x, height, z);
+            // Level ground before the siting rule: nine height-map reads cost less than the physics
+            // overlap IsSiteAllowed runs, and a nudged site has to be proven allowed where it lands
+            // rather than where the random probe happened to fall.
+            if (!TryLevelPoint(new GlobalPosition(x, height, z), float.MinValue, out GlobalPosition candidate))
+            {
+                continue;
+            }
+
             if (!economy.IsSiteAllowed(mineDefinition, candidate, null, out _))
             {
                 continue;
@@ -375,7 +624,16 @@ internal sealed partial class CommanderStrategicPointService
             }
 
             GlobalPosition centroid = new(sumX / indices.Count, sumY / indices.Count, sumZ / indices.Count);
-            GlobalPosition snapped = CommanderGameAccess.SnapToTerrain(centroid);
+
+            // A cluster's centroid can land in the stream bed the hamlet was built either side of.
+            // Nudge it to level ground within 150 m; a cluster with no level ground that close is
+            // not somewhere a garrison can sit, so it becomes no point at all (2026-09-14).
+            if (!TryLevelPoint(centroid, float.MinValue, out GlobalPosition levelled))
+            {
+                continue;
+            }
+
+            GlobalPosition snapped = CommanderGameAccess.SnapToTerrain(levelled);
             if (QualifiesAsVillage(indices.Count, CommanderSettings.PointsVillageMinBuildings))
             {
                 villageCandidates.Add(new CommanderStrategicPoint(
@@ -483,7 +741,17 @@ internal sealed partial class CommanderStrategicPointService
         // the slope, in play.
         ClimbToPeak(ref x, ref z, ref height);
 
-        GlobalPosition candidate = new(x, height, z);
+        // The summit itself is often a knife edge. Search out from it for the nearest level patch
+        // that is still within the hill's own prominence of the peak — the level top of the hill,
+        // not a shelf half way down it — and drop the candidate if there is none (2026-09-14).
+        if (!TryLevelPoint(
+                new GlobalPosition(x, height, z),
+                height - CommanderSettings.PointsHilltopProminenceMeters,
+                out GlobalPosition candidate))
+        {
+            return;
+        }
+
         if (IsInsideAnyAirbase(candidate) || IsNearAnyVillage(candidate))
         {
             return;
@@ -920,7 +1188,10 @@ internal sealed partial class CommanderStrategicPointService
         foreach (KeyValuePair<string, Airbase> entry in FactionRegistry.airbaseLookup)
         {
             Airbase airbase = entry.Value;
-            if (airbase == null || airbase.center == null || airbase.SavedAirbase == null)
+            // A ship's deck (AttachedAirbase) is an airbase to the game but not a base point here:
+            // it moves, it stands in the sea, and nothing should picket it or defend it from the
+            // shore (user, 2026-09-14: "ground units being tasked with defending airbase ships").
+            if (airbase == null || airbase.center == null || airbase.SavedAirbase == null || CommanderGameAccess.IsShipAirbase(airbase))
             {
                 continue;
             }
@@ -944,6 +1215,18 @@ internal sealed partial class CommanderStrategicPointService
         candidateOutposts = outpostCandidates.Count;
         candidateCrossroads = crossroadsCandidates.Count;
         candidateRoadside = roadsideCandidates.Count;
+
+        // Validity BEFORE the caps (user decision 2026-09-14): a wooded or off-road candidate is
+        // thrown away here so the allowance below is spent only on points a platoon can actually
+        // reach. `points` holds nothing but the resource sites StepSites already accepted, so this
+        // is where a site is tested too — the site cap ran during the sites pass, before the road
+        // network existed, so a site is filtered after its own cap rather than before it.
+        DropInvalidCandidates(points);
+        DropInvalidCandidates(villageCandidates);
+        DropInvalidCandidates(outpostCandidates);
+        DropInvalidCandidates(crossroadsCandidates);
+        DropInvalidCandidates(hilltopCandidates);
+        DropInvalidCandidates(roadsideCandidates);
 
         List<GlobalPosition> airbaseCentres = CollectAirbaseCentres();
         int cap = CommanderSettings.PointsMaxNonBasePoints;
@@ -1038,6 +1321,93 @@ internal sealed partial class CommanderStrategicPointService
         discovery = DiscoveryState.Done;
     }
 
+    /// <summary>How many candidates the validity pass threw away, split by which rule refused them,
+    /// for the discovery log line. Reset with the levelness counters when a pass starts.</summary>
+    private int droppedWooded;
+    private int droppedOffRoad;
+
+    /// <summary>
+    /// Whether a discovered point is worth keeping, pure (user decision 2026-09-14: "make heavily
+    /// wooded control points invalid, limit to within some km of a road"). A point is kept when its
+    /// own footprint is not woodland AND the nearest road is no farther than
+    /// <paramref name="maxRoadMeters"/>. Both boundaries count as passing, the convention the rest
+    /// of discovery uses. A base is always kept — it is the map's own, not the mod's to drop.
+    /// </summary>
+    internal static bool PointIsValid(
+        StrategicPointKind kind, bool wooded, float roadDistanceMeters, float maxRoadMeters)
+    {
+        return kind == StrategicPointKind.Base || (!wooded && roadDistanceMeters <= maxRoadMeters);
+    }
+
+    /// <summary>
+    /// The two kinds discovery builds ON the road network itself: a crossroads is a junction of two
+    /// polylines and a roadside point is a position measured along one. Their distance to the
+    /// nearest road is zero by construction, so the validity pass below never measures it — which
+    /// also keeps the road walk (every retained polyline, per candidate) off the longest candidate
+    /// list discovery produces.
+    /// </summary>
+    private static bool IsRoadDerivedKind(StrategicPointKind kind)
+    {
+        return kind == StrategicPointKind.Crossroads || kind == StrategicPointKind.Roadside;
+    }
+
+    /// <summary>
+    /// Stamps woodland on every candidate in <paramref name="candidates"/> and throws away the ones
+    /// <see cref="PointIsValid"/> refuses, logging one line per drop.
+    /// <para>This is the woodland stamp that used to run at the END of discovery (MarkWoodedPoints,
+    /// removed 2026-09-14) moved to the front of the caps pass. It has to run before the caps
+    /// because the cap now chooses among VALID points: stamping afterwards let a wooded hilltop
+    /// spend one of the forty-eight slots and pushed a reachable one out of the list. A wooded point
+    /// used to be kept and merely flagged, so that the picket delivery rule would airdrop onto it
+    /// rather than try to land; the user's 2026-09-14 decision drops it instead, because a point a
+    /// transport cannot land on and a platoon cannot drive to is not worth a slot on the map.</para>
+    /// <para>Bases are never offered to this pass — <c>baseCandidates</c> joins the point list after
+    /// the caps — but the kind check is kept so the rule reads the same here as it does in the
+    /// self-check.</para>
+    /// </summary>
+    private void DropInvalidCandidates(List<CommanderStrategicPoint> candidates)
+    {
+        float maxRoad = CommanderSettings.PointsMaxRoadDistanceMeters;
+        for (int i = candidates.Count - 1; i >= 0; i--)
+        {
+            CommanderStrategicPoint point = candidates[i];
+            if (point.Kind == StrategicPointKind.Base)
+            {
+                continue;
+            }
+
+            point.Wooded = CommanderSupplyHeliService.IsWoodedFootprint(
+                point.Position, Mathf.Max(1f, point.Radius));
+            float roadDistance = IsRoadDerivedKind(point.Kind)
+                ? 0f
+                : NearestRoadDistanceMeters(point.Position);
+            if (PointIsValid(point.Kind, point.Wooded, roadDistance, maxRoad))
+            {
+                continue;
+            }
+
+            // Candidates are labelled only after the caps pass has chosen them, so a drop names the
+            // kind and the ground it stood on instead. A resource site is the one kind already
+            // carrying its label by this point, and keeps it.
+            string label = point.Label.Length > 0
+                ? point.Label
+                : $"{point.Kind} at ({point.Position.x:0},{point.Position.z:0})";
+            if (point.Wooded)
+            {
+                droppedWooded++;
+                CommanderPlugin.Log.LogInfo($"Strategic point dropped: {label}: wooded.");
+            }
+            else
+            {
+                droppedOffRoad++;
+                CommanderPlugin.Log.LogInfo(
+                    $"Strategic point dropped: {label}: {roadDistance:0} m from the nearest road.");
+            }
+
+            candidates.RemoveAt(i);
+        }
+    }
+
     private void LogDiscoveryResults()
     {
         float duration = Time.realtimeSinceStartup - discoveryStartedAt;
@@ -1083,6 +1453,8 @@ internal sealed partial class CommanderStrategicPointService
                 + $"fill grid {fillColumns}x{fillRows}; before spacing/caps: {candidateVillages} villages, "
                 + $"{candidateHilltops} hilltops, {candidateOutposts} outposts, {candidateCrossroads} crossroads, "
                 + $"{candidateRoadside} road points, {civilianBuildingCount} civilian buildings; "
+                + $"levelled: {levelledNudged} nudged, {levelledDropped} dropped; "
+                + $"dropped {droppedWooded} wooded, {droppedOffRoad} off-road; "
                 + $"roads retained: {roadPointLists.Count} roads, {retainedRoadPoints} points).");
 
         for (int i = 0; i < droppedSiteBuildingLabels.Count; i++)
@@ -1134,6 +1506,131 @@ internal sealed partial class CommanderStrategicPointService
     internal static bool QualifiesAsHilltop(
         float sampleHeight, float ringMeanHeight, float prominenceMeters, bool isHighestInRing)
         => isHighestInRing && sampleHeight - ringMeanHeight >= prominenceMeters;
+
+    /// <summary>
+    /// The levelness rule and the order the level search tries ground in. Both are pure, so this
+    /// runs at plugin load with no height map and no mission (added 2026-09-14 with the rule).
+    /// </summary>
+    /// <summary>
+    /// The validity rule at its named boundaries (user decision 2026-09-14). Every case is a point
+    /// the discovery pass would keep or throw away, so a retune of
+    /// <c>PointMaxRoadDistanceMeters</c> into nonsense says so at load.
+    /// </summary>
+    private static void CheckPointValidity(List<string> failures)
+    {
+        // Config guard (2026-09-14): the crossroads and road-point ceilings together must leave the
+        // hilltop stage at least a third of the cap, or a lower cap produces a map of roads only.
+        int cap = CommanderSettings.PointsMaxNonBasePoints;
+        int roadKinds = CommanderSettings.PointsMaxCrossroads + CommanderSettings.PointsMaxRoadPoints;
+        Expect(
+            failures,
+            "the crossroads and road-point ceilings leave hilltops a third of the control-point cap; check the Points section of the config",
+            roadKinds <= cap - cap / 3,
+            true);
+        Expect(failures, "a wooded hilltop is invalid", PointIsValid(StrategicPointKind.Hilltop, true, 100f, 2000f), false);
+        Expect(failures, "a hilltop's capture ring is 1.5 times its placement ring", CommanderStrategicPoint.CaptureRadiusFor(StrategicPointKind.Hilltop, 300f), 450f);
+        Expect(failures, "a site's capture ring is its own radius", CommanderStrategicPoint.CaptureRadiusFor(StrategicPointKind.Site, 500f), 500f);
+        Expect(
+            failures,
+            "an open hilltop 3 km from a road is invalid",
+            PointIsValid(StrategicPointKind.Hilltop, false, 3000f, 2000f),
+            false);
+        Expect(
+            failures,
+            "an open hilltop at the road limit is valid",
+            PointIsValid(StrategicPointKind.Hilltop, false, 2000f, 2000f),
+            true);
+        Expect(
+            failures,
+            "an open hilltop one metre past the road limit is invalid",
+            PointIsValid(StrategicPointKind.Hilltop, false, 2001f, 2000f),
+            false);
+        Expect(
+            failures,
+            "a wooded resource site is invalid too",
+            PointIsValid(StrategicPointKind.Site, true, 100f, 2000f),
+            false);
+        Expect(failures, "a base is never dropped", PointIsValid(StrategicPointKind.Base, true, 9000f, 2000f), true);
+        Expect(
+            failures,
+            "a point with no road on the map at all is invalid",
+            PointIsValid(StrategicPointKind.Village, false, float.MaxValue, 2000f),
+            false);
+    }
+
+    private static void CheckLevelness(List<string> failures)
+    {
+        // Spread rule, probed at the 60 m default where the spread is what binds: 60 m out, a 6 m
+        // step is only 5.7 degrees, well inside the 8 degree mean-slope limit.
+        List<float> flat = new() { 100f, 100f, 100f, 100f, 100f, 100f, 100f, 100f };
+        Expect(failures, "dead flat ground is level", IsGroundLevelEnough(100f, flat, 60f, 6f, 8f), true);
+
+        List<float> atSpread = new() { 106f, 100f, 100f, 100f, 100f, 100f, 100f, 100f };
+        Expect(
+            failures,
+            "a spread of exactly MaxPointHeightSpread is level",
+            IsGroundLevelEnough(100f, atSpread, 60f, 6f, 8f),
+            true);
+
+        List<float> overSpread = new() { 107f, 100f, 100f, 100f, 100f, 100f, 100f, 100f };
+        Expect(
+            failures,
+            "one metre over the spread is not level",
+            IsGroundLevelEnough(100f, overSpread, 60f, 6f, 8f),
+            false);
+
+        // Slope rule, probed at 20 m where the spread rule cannot bind: the mean slope crosses 8
+        // degrees at a 2.811 m step, so 2.7 m passes and 2.9 m fails while both stay well under the
+        // 6 m spread limit. This is the case that catches a uniform tilt the spread rule waves
+        // through on a narrow probe ring.
+        List<float> gentleTilt = new() { 97.3f, 97.3f, 97.3f, 97.3f, 97.3f, 97.3f, 97.3f, 97.3f };
+        Expect(
+            failures,
+            "a mean slope inside MaxPointSlopeDegrees is level",
+            IsGroundLevelEnough(100f, gentleTilt, 20f, 6f, 8f),
+            true);
+
+        List<float> steepTilt = new() { 97.1f, 97.1f, 97.1f, 97.1f, 97.1f, 97.1f, 97.1f, 97.1f };
+        Expect(
+            failures,
+            "a mean slope past MaxPointSlopeDegrees is not level",
+            IsGroundLevelEnough(100f, steepTilt, 20f, 6f, 8f),
+            false);
+
+        Expect(
+            failures,
+            "ground with no ring samples at all is not level",
+            IsGroundLevelEnough(100f, new List<float>(), 60f, 6f, 8f),
+            false);
+
+        // Search order: the candidate itself first, then whole rings outward, so the first level
+        // spot found is always the nearest one to where discovery put the point.
+        List<Vector2> offsets = new();
+        EmitLevelSearchOffsets(LevelSearchStepMeters, LevelSearchMaxRadiusMeters, offsets);
+        Expect(failures, "level search tries the centre then seven rings of eight", offsets.Count, 57);
+        Expect(failures, "level search tries the candidate itself first", offsets[0].sqrMagnitude, 0f);
+
+        bool outward = true;
+        for (int i = 2; i < offsets.Count; i++)
+        {
+            if (offsets[i].magnitude < offsets[i - 1].magnitude - 0.01f)
+            {
+                outward = false;
+            }
+        }
+
+        Expect(failures, "level search never steps back inward", outward, true);
+        Expect(
+            failures,
+            "the first ring sits one step out",
+            Mathf.Abs(offsets[1].magnitude - LevelSearchStepMeters) < 0.01f,
+            true);
+        Expect(
+            failures,
+            "the ninth offset starts the second ring",
+            Mathf.Abs(offsets[9].magnitude - (LevelSearchStepMeters * 2f)) < 0.01f,
+            true);
+    }
 
     private static float HorizontalDistance(GlobalPosition a, GlobalPosition b)
     {

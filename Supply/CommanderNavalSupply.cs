@@ -75,6 +75,9 @@ internal sealed partial class CommanderSupplyHeliService
 
         Loadout loadout = CreateEmptyLoadout(aircraft.HardpointSets.Length);
         PlaceCargoAndClearNonCargo(loadout, aircraft.HardpointSets, slot!.HardpointIndex, mount!);
+        // The cannon rule, applied to every commander spawn rather than only the ones that go
+        // through TryLaunchAiAircraft. Nothing to remove from a cargo-only loadout today.
+        loadout = CommanderAirCommandService.WithoutInternalCannons(loadout);
         pendingAircraftSpawn = new PendingAircraftSpawn(
             hq,
             aircraft.Definition,

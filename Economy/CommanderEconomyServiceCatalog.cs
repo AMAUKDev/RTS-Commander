@@ -85,6 +85,7 @@ internal sealed partial class CommanderEconomyService
 
         pendingStructure = definition;
         pendingBuild = CommanderBuildKind.Structure;
+        preview.ResetRotation();
         StatusText = $"Select the {GetStructureLabel(definition)} site in the 3D world.";
     }
 
@@ -138,9 +139,15 @@ internal sealed partial class CommanderEconomyService
     /// is wired up like a bought factory rather than left inert, because an idle factory building is
     /// exactly the kind of silent dud that reads as a broken mod.
     /// </summary>
-    private bool PlaceStructure(FactionHQ hq, GlobalPosition position, BuildingDefinition definition, float cost)
+    private bool PlaceStructure(
+        FactionHQ hq,
+        GlobalPosition position,
+        BuildingDefinition definition,
+        float cost,
+        Quaternion? rotation = null)
     {
-        Unit? unit = SpawnBuilding(hq, position, definition, GetStructureLabel(definition));
+        Unit? unit = SpawnBuilding(
+            hq, position, definition, GetStructureLabel(definition), rotation: rotation);
         if (unit == null)
         {
             StatusText = $"{GetStructureLabel(definition)} could not be built.";

@@ -19,6 +19,7 @@ internal static class CommanderMissionInstaller
     private static readonly string[] ShippedMissions =
     {
         "Ground Control Duel",
+        "Ground Control Duel Far",
     };
 
     internal static void InstallShippedMissions()

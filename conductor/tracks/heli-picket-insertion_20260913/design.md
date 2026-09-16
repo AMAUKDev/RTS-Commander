@@ -260,3 +260,105 @@ returns.
 ## Open questions
 
 None — all three were answered by the user on 2026-09-13 and are recorded as Decisions 7–10.
+## Section 5 — Reinforcing a picket that has lost a vehicle (user, 2026-09-14)
+
+The gate was built for FIRST delivery. It also has to cover TOP-UP: a picket standing on an
+air-delivered point that loses one of its two vehicles must get a flight carrying only the
+replacement.
+
+**Decision.**
+
+- The structural gate is unchanged and needs no change — `QualifiesForInsertion` asks whether the
+  picket is short, never why. A point whose picket has been shot down to one vehicle is short, and
+  the surrounding machinery already leaves it short: `MarkAirDeliveredPickets` reserves any rear
+  off-road picket point (it does not look at the garrison count), `FillPickets` skips a reserved
+  point, and `PostPicketRequisitions` posts nothing for one. So the shortfall survives to
+  `PlanInsertions` exactly as a first delivery does. Verified from code, 2026-09-14.
+- What changes is the CARGO. `PickInsertionCargo` takes a `wanted` count, clamped to
+  `[1, MaxInsertionCargoVehicles]` (2). One short flies one vehicle, and it is the air-defence one
+  — a rear point's threat is aircraft, whether the point is being garrisoned for the first time or
+  topped up. Fewer affordable vehicles than were asked for is no load at all, and the caller
+  declines: a load that cannot fill the request is the wrong flight, not a cheaper one.
+- `CommanderInsertion.ExpectedLoads` is now what the flight CARRIES, not `PointsMinGarrison`, so
+  the delivered/expected bookkeeping closes when the last vehicle rolls off.
+- The per-point loss cooldown and the commander-wide loss pause bind exactly as before. A picket
+  short of a vehicle beside a road still drives; only a point past `HeliInsertionOffRoadMeters`
+  flies.
+- The log line distinguishes the two: a point with nothing on it keeps
+  `PICKET <label>: requesting air insertion (<n> m from the nearest road)`; a point with a
+  surviving picket reads `PICKET <label>: requesting air reinforcement (1 vehicle short)`.
+
+**Limits.** `Operations/HeliInsertionFlightsMax` default 6 (renamed from
+`Operations/HeliInsertionFlights`, which was 3 — BepInEx keeps a player's existing value under the
+old key, so a rename is how a raised default actually reaches an existing config file; the old key
+is left orphaned in any config already written). `InsertionRequestsPerReview` 3 → 6 to match: a
+review now has both first deliveries and reinforcements to serve.
+
+## Section 6 — Blocked landing zones and the airdrop (user, 2026-09-14)
+
+The user's report, verbatim: "air insertion of pickets sometimes is sent to land in tree covered
+areas - it cannot land, units aren't dropped, stuck. we either need to check for that and do an
+airdrop (preferred), or ignore those areas, or don't generate control points in those wooded regions
+in the first place."
+
+**This reverses Decisions 4 and 9** ("lands, not airdrops"; "the airdrop variant stays out of scope
+this track"), for the blocked case only. A landable landing zone is still landed on — landing puts
+the vehicles on their posts, an airdrop scatters them under canopies — so the airdrop is the
+exception the report asked for, not the new default.
+
+### What the game verifiably supports (decompiled with ilspycmd, 2026-09-14)
+
+- **Scatter trees are not colliders and never were.** `TerrainScatter.GenerateScatters` writes tree
+  positions into a binary `TextAsset`; `NuclearOption.Effects.TreeRenderer` draws them GPU-instanced
+  out of a `GraphicsBuffer`. `Assembly-CSharp` has no tree collider type, `PhysicsLayers` has no tree
+  layer, and `Aircraft.CheckRadarAlt` line-casts `Statics|Ships` only. So **no physics probe can
+  detect woodland**, and woodland cannot by itself physically stop a helicopter. Anyone who writes a
+  raycast tree test in future is writing a test that always passes.
+- **The game's own landing search refuses slope, not trees.**
+  `AIHeloTransportState.TransportDestination.UpdateTouchdownPoint` line-casts down on `StaticsMask`
+  and accepts a touchdown point only when the surface normal is within 20° of vertical, the hit is
+  above sea level, and `FactionHQ.IsDropZoneClear` agrees. Where no sample inside its search radius
+  passes, its `slope` stays at the 90° seed, the touchdown point is never refined, and the transport
+  hovers over whatever spot the mod handed it — which is the "stuck" the report describes. Dense
+  woodland in this game sits on hill flanks, which is exactly the ground the slope rule refuses; that
+  is why the symptom correlates with trees.
+- **Airdrop is a complete, AI-driven path.** With the state's private `airdrop` flag set — which
+  `OverrideTransportTarget` already mirrors from the mission every cycle — `FixedUpdateState` holds
+  `num = 200f` radar altitude, gear up, aims down the run-in, and calls `DeployCargo` once the
+  horizontal distance to the drop point is under four seconds' flying time. **The 200 m is the game's
+  hard-coded value; nothing in the mod sets an altitude.** The mod already ships this path for the
+  player's own supply runs (`AirdropDelivery`, `SelectedCargoSupportsAirdrop`).
+- **Airdrop needs parachutes.** `CargoMountSupportsAirdrop` requires every `MountedCargo.cargo`'s
+  prefab `GroundVehicle`/`Container` to carry a non-null `parachuteSystem`. Which vehicles have one
+  is asset data; the roster log remains the answer.
+- **Assumed, not verified:** that a parachuted vehicle survives and drives. The engine spawns it the
+  same way a landed one is spawned and the parachute field is what the player-facing airdrop toggle
+  already gates on, but no in-game airdrop of a VEHICLE (as against a supply container) has been
+  watched yet. First play test to confirm.
+
+### Decisions
+
+11. **Scout the landing zone before ordering the flight.** A spot is refused when more than
+    `LzMaxTreesInClearRadius` (3) trees stand within `Operations/LzClearRadiusMeters` (40 m), when any
+    static collider that is not the ground stands in that circle, or when the strategic height map
+    puts the slope above `LzMaxSlopeDegrees` (20°, the game's own threshold — read, not chosen).
+    Trees are counted from the game's scatter data through a one-byte-per-cell index built once per
+    mission at 25 m resolution.
+12. **Order of preference: airdrop, then relocate, then decline** (`ChooseInsertionDelivery`).
+    Airdrop beats relocation because relocating puts the vehicles up to 400 m off the posts they were
+    bought to hold. Declining marks the point `Wooded` and stamps the existing loss cooldown, which is
+    what makes `PicketDeliveryMode` hand the point back to the drive fill.
+13. **The relocation search is the levelness nudge's own offsets** (`EmitLevelSearchOffsets`), 50 m
+    rings out to `Operations/LzSearchRadiusMeters` (400 m), nearest first.
+14. **Stall clock, `Operations/InsertionStallTimeoutSeconds` (120 s).** A bound flight within 500 m of
+    its landing zone for longer than that without dropping is converted to an airdrop where the cargo
+    still aboard has parachutes, and recalled with the usual cooldown where it does not. This is the
+    catch-all for every cause the scout cannot predict.
+15. **Wooded points are marked, never dropped** (the user's third option declined): many hilltops
+    worth holding are wooded. Discovery stamps `CommanderStrategicPoint.Wooded` at the end of its run,
+    and `MarkAirDeliveredPickets` reserves a wooded point for the air only when the commander's roster
+    fields parachute-capable cargo.
+16. **An airdropped insertion flies itself home.** The landing branch's ramp-clear handshake never
+    runs on a drop run, so `OverrideTransportTarget` issues the return the moment the last vehicle is
+    out, and `ShouldDelayCargoTakeoff` holds the airframe until then so the game's combat state cannot
+    claim it first.

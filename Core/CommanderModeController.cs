@@ -97,6 +97,9 @@ internal sealed class CommanderModeController : MonoBehaviour
         services.Register(new CommanderPlayerCommanderService(), CommanderTier.Advanced);
         // Core tier: the round has to be able to end whether or not RTS mode is open.
         services.Register(new CommanderVictoryService());
+        // Core tier: pilots pile up whether or not the RTS view is open, and only the server may
+        // recover them.
+        services.Register(new CommanderDownedPilotService());
         // Core tier and unconditional on purpose: the toggle inside CommanderStateStore itself is
         // what gates all of this off by default, not the feature gate — a developer hot-reloading
         // on an unsupported mission still gets nothing written because there is nothing to write.

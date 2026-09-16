@@ -83,6 +83,12 @@ internal static class CommanderShortcutReference
         buffer.Add(Entry.Section("PRODUCTION AND UNITS"));
         buffer.Add(new Entry("Repeat deployment", Key(CommanderSettings.RepeatDeployment),
             "Hold while placing a supply target or siting a building."));
+        buffer.Add(new Entry("Turn the building being placed", Keys(
+                CommanderSettings.PlacementRotateLeft,
+                CommanderSettings.PlacementRotateRight),
+            "Anti-clockwise / clockwise, 15 degrees a press. Hold to keep turning."));
+        buffer.Add(new Entry("Sit the building on the slope", Key(CommanderSettings.PlacementConformGround),
+            "Toggle. Lays the building flat on ground up to 12 degrees steep instead of standing it upright."));
         buffer.Add(new Entry("Cancel placement", Key(CommanderSettings.SecondaryAction),
             "Backs out of an armed build, supply, area or trailer placement. Escape also works."));
         buffer.Add(new Entry("Delete instead of pin", Key(CommanderSettings.DeleteUnitModifier),

@@ -29,13 +29,19 @@ internal sealed partial class CommanderOperationsService
     internal readonly struct CommanderRankedPoint
     {
         internal CommanderRankedPoint(
-            CommanderStrategicPoint point, float distanceToEnemyMeters, bool isFront, bool hasThreatMark, float value)
+            CommanderStrategicPoint point,
+            float distanceToEnemyMeters,
+            bool isFront,
+            bool hasThreatMark,
+            float value,
+            bool needsPlatoonPurpose = false)
         {
             Point = point;
             DistanceToEnemyMeters = distanceToEnemyMeters;
             IsFront = isFront;
             HasThreatMark = hasThreatMark;
             Value = value;
+            NeedsPlatoonPurpose = needsPlatoonPurpose;
         }
 
         internal CommanderStrategicPoint Point { get; }
@@ -43,6 +49,27 @@ internal sealed partial class CommanderOperationsService
         internal bool IsFront { get; }
         internal bool HasThreatMark { get; }
         internal float Value { get; }
+
+        /// <summary>A resource site too close to the enemy for a two-vehicle picket (user decision
+        /// 2026-09-14, <see cref="SiteWantsPlatoonPurpose"/>). Only ever set for a site; every other
+        /// kind keeps the front/threat-mark rules it already had.</summary>
+        internal bool NeedsPlatoonPurpose { get; }
+    }
+
+    /// <summary>
+    /// Whether a resource site is held by a platoon rather than by a picket (user decision
+    /// 2026-09-14). A site pays through the mine standing on it and a mine is worth a real fight, so
+    /// a site ON the front, or one with the enemy inside the observed ring — a tracked hostile
+    /// ground unit or an enemy-held point or base within <paramref name="observedRadiusMeters"/> —
+    /// gets a forward-base purpose instead of a two-vehicle detachment. Everything farther back is an
+    /// ordinary picket. Pure, for the self-check.
+    /// </summary>
+    internal static bool SiteWantsPlatoonPurpose(
+        bool isFront, float nearestEnemyAssetMeters, int trackedHostilesNear, float observedRadiusMeters)
+    {
+        return isFront
+            || trackedHostilesNear > 0
+            || nearestEnemyAssetMeters <= Mathf.Max(0f, observedRadiusMeters);
     }
 
     /// <summary>A point within <paramref name="frontRangeMeters"/> of the nearest enemy-held point
@@ -115,6 +142,48 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
+    /// How far the enemy is from a piece of ground, pure: the nearer of the nearest point or base
+    /// another faction HOLDS and the nearest hostile ground unit this commander has SPOTTED (user
+    /// decision 2026-09-15). Until then only the held assets counted, so a point with an enemy column
+    /// five kilometres away reported "rear, 40 km clear" and every rule built on that distance — the
+    /// front line, a point's value, the picket insertion's standoff and the forward-base siting —
+    /// agreed that it was safe ground. Both terms are <c>float.MaxValue</c> when there is nothing of
+    /// that kind to measure, so a commander that has met nobody still reads every point as rear.
+    /// </summary>
+    internal static float NearestEnemyMeters(float heldAssetMeters, float spottedUnitMeters)
+    {
+        return Mathf.Min(heldAssetMeters, spottedUnitMeters);
+    }
+
+    /// <summary>
+    /// The live form: the held-asset walk and the tracked-contact walk over one position, with the
+    /// siting memory window rather than the home defence's raid window. <paramref name="bySpotted"/>
+    /// says which term won, and <paramref name="label"/> names the contact, so the log can say why a
+    /// point that looked rear has gone front.
+    /// </summary>
+    private static float NearestEnemyMeters(
+        FactionHQ hq, GlobalPosition position, out bool bySpotted, out string label)
+    {
+        float held = NearestEnemyAssetDistance(hq, position);
+        bool tracked = TryNearestTrackedHostile(
+            hq,
+            position,
+            float.MaxValue,
+            CommanderSettings.StandoffContactMemorySeconds,
+            out _,
+            out float spotted,
+            out string spottedLabel);
+        if (!tracked)
+        {
+            spotted = float.MaxValue;
+        }
+
+        bySpotted = spotted < held;
+        label = bySpotted ? spottedLabel : string.Empty;
+        return NearestEnemyMeters(held, spotted);
+    }
+
+    /// <summary>
     /// A hostile ground contact, seen recently, inside <paramref name="point"/>'s threat ring — the
     /// <c>IsUnderThreat</c> walk (<c>Ai/CommanderEnemyCommanderDefence.cs:197-228</c>) retargeted
     /// from "near my base" to "near this point", including its skip-buildings clause.
@@ -152,9 +221,50 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
-    /// Ranks every control point for this HQ: distance to the nearest enemy asset, front/rear,
-    /// threat mark and value, sorted by value descending (ties broken by distance ascending, so the
-    /// order used to fill missions is stable review to review).
+    /// Says once, per point, that a point has gone front because of something SPOTTED rather than
+    /// because of ground the enemy holds — the fact the user could not see from the log before
+    /// (2026-09-15), and the one that explains why a site or a landing zone was refused. Written when
+    /// the point enters that state and not again until it leaves it, the <c>ReportInsertionDenial</c>
+    /// convention: a review runs every 30 s and the same line every time is noise nobody reads.
+    /// </summary>
+    private static void ReportFrontBySpotting(
+        FactionHQ hq,
+        OperationsState state,
+        CommanderStrategicPoint point,
+        bool frontBySpotting,
+        string contactLabel,
+        float meters)
+    {
+        if (!frontBySpotting)
+        {
+            state.FrontBySpotting.Remove(point);
+            return;
+        }
+
+        if (!state.FrontBySpotting.Add(point))
+        {
+            return;
+        }
+
+        CommanderAiLog.Note(
+            hq,
+            $"{point.Label} is front: hostile {(contactLabel.Length > 0 ? contactLabel : "ground unit")} seen "
+                + $"{meters / 1000f:0.0} km away.");
+    }
+
+    /// <summary>
+    /// Ranks every control point AND every resource site for this HQ: distance to the nearest enemy
+    /// asset, front/rear, threat mark and value, sorted by value descending (ties broken by distance
+    /// ascending, so the order used to fill missions is stable review to review).
+    /// <para>
+    /// Sites joined the list on 2026-09-14 (user decision): a site is not a control point — it is
+    /// owned by whichever faction's mine stands on it (<c>CommanderStrategicPoint.GetOwner</c>) and
+    /// the presence hold machine never touches it — so nothing ever put a mission on one, and the
+    /// commander's own mines sat unguarded all match. A site now takes a picket like any other rear
+    /// point, and a forward-base purpose when it is near the enemy
+    /// (<see cref="SiteWantsPlatoonPurpose"/>). Holding it is what lets the owner's mine stand; the
+    /// paying itself is still the mine's, exactly as before.
+    /// </para>
     /// </summary>
     private void RankPoints(FactionHQ hq, OperationsState state)
     {
@@ -170,17 +280,30 @@ internal sealed partial class CommanderOperationsService
         for (int i = 0; i < points.Count; i++)
         {
             CommanderStrategicPoint point = points[i];
-            if (!StrategicPointKinds.IsControlPoint(point.Kind))
+            bool isSite = point.Kind == StrategicPointKind.Site;
+            if (!isSite && !StrategicPointKinds.IsControlPoint(point.Kind))
             {
                 continue;
             }
 
-            float distance = NearestEnemyAssetDistance(hq, point.Position);
+            float distance = NearestEnemyMeters(hq, point.Position, out bool bySpotted, out string contactLabel);
             bool isFront = IsFrontPoint(distance, frontRange);
             bool hasThreat = HasThreatMark(hq, point);
-            float income = CommanderStrategicPointService.IncomePerMinute(point.Kind, rates);
+            ReportFrontBySpotting(hq, state, point, isFront && bySpotted, contactLabel, distance);
+
+            // A site pays nothing itself — the points service's own self-check pins that — so its
+            // worth to the ranking is the mine it lets the owner keep standing there.
+            float income = isSite
+                ? CommanderSettings.GoldMineIncomePerMinute
+                : CommanderStrategicPointService.IncomePerMinute(point.Kind, rates);
             float value = PointValue(income, distance, frontRange);
-            state.RankedPoints.Add(new CommanderRankedPoint(point, distance, isFront, hasThreat, value));
+            state.RankedPoints.Add(new CommanderRankedPoint(
+                point,
+                distance,
+                isFront,
+                hasThreat,
+                value,
+                isSite && SiteWantsPlatoonPurpose(isFront, distance, CountObserved(hq, point.Position), ObservedRadiusMeters)));
         }
 
         state.RankedPoints.Sort(static (a, b) =>
@@ -254,6 +377,7 @@ internal sealed partial class CommanderOperationsService
     {
         List<GlobalPosition> posts = new();
         int slotCount = Mathf.Max(1, slots);
+        int movedOffAirfield = 0;
         for (int i = 0; i < slotCount; i++)
         {
             float angle = i * (Mathf.PI * 2f / slotCount);
@@ -261,14 +385,28 @@ internal sealed partial class CommanderOperationsService
                 center.x + Mathf.Cos(angle) * radius,
                 center.y,
                 center.z + Mathf.Sin(angle) * radius));
+            // Off the runways and taxiways (fix, 2026-09-15): with one base held, the territory
+            // centre IS the base and a 900 m ring around it runs across the strip. Two fighters
+            // died on Sandrift's own deck within 90 s of spawning before this.
+            candidate = CommanderBuildPreview.OffAirfieldPost(center, candidate, out bool moved);
+            if (moved)
+            {
+                movedOffAirfield++;
+            }
+
             if (!CommanderGameAccess.IsBelowSeaLevel(candidate))
             {
                 posts.Add(candidate);
             }
         }
 
+        LogAirfieldPostsMoved("Hold ring", center, movedOffAirfield, slotCount);
         return posts;
     }
+
+    // The "ring centres already logged" set moved to Operations/CommanderOperationsAirfieldClearance.cs
+    // (LogAirfieldPostsMoved) when the point ring and the defence arc needed the same one-line-per-ring
+    // rule; it is keyed by the ring's name as well as its centre so a point that has both says both.
 
     /// <summary>
     /// The point's fighting ring as plain positions, for a caller that wants somewhere on the point
@@ -369,6 +507,18 @@ internal sealed partial class CommanderOperationsService
         IReadOnlyList<Unit> members,
         Dictionary<Unit, GlobalPosition>? issued = null)
     {
+        // A resource site's garrison stands on the OUTER ring only (user report 2026-09-14: "captured
+        // a resource site, couldn't place mine as the units were in the way"): the inner posts sit
+        // where the mine's footprint goes, and both the player's click and the commander's own mine
+        // build were refused by their own picket. The umbrella loses its inner slot here; a 250 m
+        // ring is still inside its engagement range.
+        if (HoldPostsOuterOnly(point.Kind))
+        {
+            CommanderHoldPostSet ring = EnsureHoldPostSet(point, ThreatBearingFor(hq, point), Mathf.Max(1, members.Count), 0, 0);
+            DriveMembersToPosts(members, ring.Outer, issued);
+            return;
+        }
+
         SplitByHoldRole(members, holdRoleOuter, holdRoleAirDefence, holdRoleInner);
         CommanderHoldPostSet posts = EnsureHoldPostSet(
             point,
@@ -379,6 +529,91 @@ internal sealed partial class CommanderOperationsService
         DriveMembersToPosts(holdRoleOuter, posts.Outer, issued);
         DriveMembersToPosts(holdRoleAirDefence, PostsOrFallback(posts.AirDefence, posts.Outer), issued);
         DriveMembersToPosts(holdRoleInner, PostsOrFallback(posts.Inner, posts.Outer), issued);
+    }
+
+    /// <summary>
+    /// Whether a point nobody holds may be planned as an AIR-ONLY picket, pure: it is out of depot
+    /// reach (so no road picket could ever be sent), a held airbase is within the transport's range,
+    /// and helicopter insertion is switched on. A held point is planned by the ordinary rule.
+    /// </summary>
+    internal static bool AirPicketPlannable(
+        bool neutral, bool outOfReach, float nearestHeldAirbaseMeters, float insertionRangeMeters, bool insertionEnabled)
+    {
+        return neutral && outOfReach && insertionEnabled && nearestHeldAirbaseMeters <= insertionRangeMeters;
+    }
+
+    /// <summary>The live read of <see cref="AirPicketPlannable"/> for one ranked point.</summary>
+    private static bool IsAirPicketCandidate(FactionHQ hq, OperationsState state, CommanderStrategicPoint point)
+    {
+        float airbaseMeters = TryFindInsertionLaunchBase(hq, point.Position, out GlobalPosition airbase)
+            ? CommanderGameAccess.HorizontalDistance(airbase.AsVector3(), point.Position.AsVector3())
+            : float.MaxValue;
+        return AirPicketPlannable(
+            point.GetOwner() == null,
+            state.OutOfReach.Contains(point),
+            airbaseMeters,
+            CommanderSettings.OperationsHeliInsertionRangeMeters,
+            CommanderSettings.OperationsHeliInsertionEnabled);
+    }
+
+    /// <summary>Whether a point's garrison keeps off the inner ring, pure: true for a resource site,
+    /// whose centre is where the mine has to stand.</summary>
+    internal static bool HoldPostsOuterOnly(StrategicPointKind kind)
+    {
+        return kind == StrategicPointKind.Site;
+    }
+
+    /// <summary>How far beyond a site's ring its garrison is pushed when a mine build was refused
+    /// because of it: 100 m, enough to take a vehicle's whole hull clear of the ring edge without
+    /// leaving the point's capture presence.</summary>
+    private const float SiteClearanceMarginMeters = 100f;
+
+    /// <summary>A site's clearance nudge is logged at most once per this many seconds per site.</summary>
+    private const float SiteClearanceLogSeconds = 300f;
+
+    /// <summary>
+    /// Pushes every vehicle of <paramref name="hq"/> standing inside <paramref name="site"/>'s ring
+    /// out past it, so a mine can be placed there next review. Called when a mine build on a held
+    /// site was refused (the refusal's usual cause is the site's own picket). Each vehicle is sent
+    /// straight outward along its own bearing from the centre, which is the shortest way off.
+    /// </summary>
+    internal static void RequestSiteClearance(FactionHQ hq, CommanderStrategicPoint site)
+    {
+        CommanderOperationsService? service = Instance;
+        if (service == null || !service.states.TryGetValue(hq, out OperationsState state) || hq.factionUnits == null)
+        {
+            return;
+        }
+
+        int moved = 0;
+        Vector3 centre = site.Position.ToLocalPosition();
+        foreach (PersistentID id in hq.factionUnits)
+        {
+            if (!id.TryGetUnit(out Unit unit) || unit == null || unit.disabled || unit is not GroundVehicle)
+            {
+                continue;
+            }
+
+            if (CommanderGameAccess.HorizontalDistance(unit.transform.position, centre) > site.Radius)
+            {
+                continue;
+            }
+
+            float bearing = BearingTo(site.Position, unit.transform.GlobalPosition());
+            GlobalPosition outside = CommanderGameAccess.SnapToTerrain(
+                PositionAt(site.Position, bearing, site.Radius + SiteClearanceMarginMeters));
+            if (CommanderGameAccess.TrySetDestination(unit, outside))
+            {
+                moved++;
+            }
+        }
+
+        if (moved > 0
+            && (!state.SiteClearanceLoggedAt.TryGetValue(site, out float at) || Time.time - at > SiteClearanceLogSeconds))
+        {
+            state.SiteClearanceLoggedAt[site] = Time.time;
+            CommanderAiLog.Note(hq, $"{site.Label}: {moved} vehicle(s) move off the site so the mine can be built.");
+        }
     }
 
     /// <summary>The reserve platoon's ring: around the HQ's territory centre rather than a point,
@@ -466,11 +701,410 @@ internal sealed partial class CommanderOperationsService
         return strength * FailStrengthDenominator < establishment * FailStrengthNumerator;
     }
 
+    /// <summary>
+    /// Whether a control point is close enough to one of this commander's own vehicle depots to be
+    /// worth sending ground vehicles to, pure (reach-and-points, user decision 2026-09-14: "only
+    /// spawn units for objectives closer than some km"). Exactly on the reach counts as in reach,
+    /// the convention the rest of the mod uses for a distance boundary. A commander with no depot
+    /// and no base at all passes <c>float.MaxValue</c> here, which puts every point out of reach —
+    /// unproven is not reachable.
+    /// </summary>
+    internal static bool IsWithinDepotReach(float nearestDepotMeters, float reachMeters)
+    {
+        return nearestDepotMeters <= reachMeters;
+    }
+
+    /// <summary>Scratch for the reach pass: this commander's live depots, and the positions the
+    /// reach is measured from. Static because one review runs one commander at a time.</summary>
+    private static readonly List<VehicleDepot> reachDepotScratch = new();
+    private static readonly List<GlobalPosition> reachOriginScratch = new();
+
+    /// <summary>
+    /// Shortest horizontal distance from <paramref name="position"/> to any of
+    /// <paramref name="origins"/>, or <c>float.MaxValue</c> when the list is empty.
+    /// </summary>
+    private static float NearestOriginDistance(List<GlobalPosition> origins, GlobalPosition position)
+    {
+        float best = float.MaxValue;
+        for (int i = 0; i < origins.Count; i++)
+        {
+            float distance = CommanderGameAccess.HorizontalDistance(
+                position.AsVector3(), origins[i].AsVector3());
+            if (distance < best)
+            {
+                best = distance;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Rebuilds <c>state.OutOfReach</c> from this commander's live vehicle depots, once per review,
+    /// right after the ranking it walks (reach-and-points Section 2). A point outside the reach gets
+    /// no forward base, no road picket and no platoon; a helicopter insertion is the only way to
+    /// staff it until a depot comes within reach of it, which is what a forward operating base is
+    /// for.
+    /// <para>A commander with no working depot at all measures from the centres of the bases it
+    /// holds instead. That is the state of a fresh match — the depots exist in the scene but the
+    /// captured-depot watch has not swept yet — and measuring from nothing would freeze the whole
+    /// ground force out of the first review.</para>
+    /// </summary>
+    private static void RefreshReach(FactionHQ hq, OperationsState state)
+    {
+        state.OutOfReach.Clear();
+        reachOriginScratch.Clear();
+        CommanderEconomyService.CollectOwnedDepots(hq, reachDepotScratch);
+        for (int i = 0; i < reachDepotScratch.Count; i++)
+        {
+            VehicleDepot depot = reachDepotScratch[i];
+            if (depot != null && !depot.disabled)
+            {
+                // A depot knocked out this minute is repaired within seconds and keeps its place in
+                // the owner table, but it cannot deploy anything while it is down, so the ground it
+                // reaches does not count until it is back.
+                reachOriginScratch.Add(depot.transform.GlobalPosition());
+            }
+        }
+
+        reachDepotScratch.Clear();
+        if (reachOriginScratch.Count == 0)
+        {
+            foreach (Airbase airbase in hq.GetAirbases())
+            {
+                if (airbase != null && !airbase.disabled && airbase.center != null && !CommanderGameAccess.IsShipAirbase(airbase))
+                {
+                    reachOriginScratch.Add(airbase.center.GlobalPosition());
+                }
+            }
+        }
+
+        float reach = CommanderSettings.DepotReachMeters;
+        for (int i = 0; i < state.RankedPoints.Count; i++)
+        {
+            CommanderStrategicPoint point = state.RankedPoints[i].Point;
+            if (!IsWithinDepotReach(NearestOriginDistance(reachOriginScratch, point.Position), reach))
+            {
+                state.OutOfReach.Add(point);
+            }
+        }
+
+        reachOriginScratch.Clear();
+    }
+
+    // ---- The drive-time gate (design.md, air-mobile-platoons_20260915 Section 1) ----
+
+    /// <summary>
+    /// Armour slots in an air-mobile platoon: NONE. No transport on any faction's roster fields a
+    /// tank as cargo (the insertion cargo roster carries the APC, IFV, anti-tank and air-defence
+    /// family and nothing heavier), so a recipe asking for armour here would ask for a load that
+    /// cannot be flown. The tanks follow by road once a depot is inside the drive threshold, which
+    /// is what the armour line's own gate waits for.
+    /// </summary>
+    internal const int AirMobileRecipeArmour = 0;
+
+    /// <summary>
+    /// Carrier slots in an air-mobile platoon: four, against the driving recipe's one. A carrier is
+    /// the APC/IFV family the transports actually carry and the only role that can take a point, so
+    /// with the armour slots gone the weight of the platoon moves here rather than leaving it a
+    /// two-vehicle detachment with an umbrella.
+    /// </summary>
+    internal const int AirMobileRecipeCarrier = 4;
+
+    /// <summary>
+    /// Air-defence slots in an air-mobile platoon: two, the same as the driving recipe. A platoon
+    /// standing on a point 30 km from its own depots is threatened by aircraft before anything else,
+    /// and the insertion chooser already loads air defence first for exactly that reason.
+    /// </summary>
+    internal const int AirMobileRecipeAirDefence = 2;
+
+    /// <summary>
+    /// How long a loaded vehicle would take to drive <paramref name="meters"/>, in minutes, pure:
+    /// the straight-line distance stretched by <paramref name="detourFactor"/> because roads are not
+    /// straight, over <paramref name="speedMetersPerSecond"/>, over sixty. A speed of zero or less
+    /// is a vehicle that never arrives, which reads as <c>float.MaxValue</c> rather than a division
+    /// by zero.
+    /// </summary>
+    internal static float DriveMinutes(float meters, float detourFactor, float speedMetersPerSecond)
+    {
+        if (speedMetersPerSecond <= 0f)
+        {
+            return float.MaxValue;
+        }
+
+        if (meters >= float.MaxValue)
+        {
+            // No depot at all: the drive never happens, and multiplying MaxValue by the detour would
+            // report infinity rather than the "unreachable" the callers test against.
+            return float.MaxValue;
+        }
+
+        return Mathf.Max(0f, meters) * Mathf.Max(0f, detourFactor) / speedMetersPerSecond / 60f;
+    }
+
+    /// <summary>
+    /// Whether a NEW platoon for an objective is flown in rather than driven, pure (design.md,
+    /// air-mobile-platoons_20260915 Section 1; user decision 2026-09-15): the drive from the nearest
+    /// usable depot is longer than <paramref name="thresholdMinutes"/> AND a lift can actually reach
+    /// the objective. Exactly on the threshold the platoon still drives — the patient side of the
+    /// boundary, the convention the rest of the mod uses.
+    /// <para>The enemy standoff is deliberately NOT a term here. Every lift flies under a cover
+    /// sortie (design Section 3), and decision 3 makes an escorted lift legal inside the standoff an
+    /// unescorted picket flight has to keep; what the standoff still governs is the UNESCORTED picket
+    /// insertion, which reads it through <c>InsertionStandoffClear</c> exactly as before.</para>
+    /// </summary>
+    internal static bool PlatoonFlies(float driveMinutes, float thresholdMinutes, bool liftPossible)
+    {
+        return liftPossible && driveMinutes > thresholdMinutes;
+    }
+
+    /// <summary>
+    /// The drive-time gate's first term for one objective: minutes from the nearest working depot
+    /// this commander owns, through <see cref="DriveMinutes"/> and the shared
+    /// <c>TryNearestOwnedDepot</c> that already decides where a bought vehicle appears (Reuse rule 4).
+    /// <c>float.MaxValue</c> when the commander owns no working depot — unproven is not drivable, the
+    /// same convention the depot reach uses.
+    /// </summary>
+    private static float DriveMinutesToObjective(FactionHQ hq, GlobalPosition objective)
+    {
+        float meters = CommanderEconomyService.TryNearestOwnedDepot(hq, objective, out _, out float nearest)
+            ? nearest
+            : float.MaxValue;
+        return DriveMinutes(
+            meters, CommanderSettings.RoadDetourFactor, CommanderSettings.GroundSpeedMetersPerSecond);
+    }
+
+    /// <summary>
+    /// Whether a lift currently OWNS a mission, pure: it is air-mobile and a lift order is open for
+    /// it — one that is still being loaded or already in the air with its cargo aboard. While that
+    /// holds, nothing else may touch the mission: no platoon is formed or assigned to it, no
+    /// reinforcement is stripped into it, and it is not demoted to a picket.
+    /// <para>The live evidence (2026-09-15): a lift was airborne with `lift 1/3 for 3RD PLATOON away`
+    /// when the forward-base allowance demoted the mission to a picket, which made the lift's own
+    /// "does my objective still want a platoon" test go false and recalled the transport with its
+    /// cargo still aboard — and the idle pool then formed a driving platoon for the same point and
+    /// sent it on the hour-long drive the lift existed to remove. Not one lift landed all match.</para>
+    /// </summary>
+    internal static bool LiftHoldsMission(bool airMobile, bool liftOpen)
+    {
+        return airMobile && liftOpen;
+    }
+
+    /// <summary>
+    /// Whether a mission may be given a platoon out of the free pool, pure: any mission except one a
+    /// lift is currently delivering to. An air-mobile mission with NO lift open — saving for one, or
+    /// waiting out a landing zone's cooldown — may still be filled by road, which is the right
+    /// fallback when the pool has six vehicles standing idle and the sky has not delivered.
+    /// </summary>
+    internal static bool MissionTakesPoolPlatoon(bool airMobile, bool liftOpen)
+    {
+        return !LiftHoldsMission(airMobile, liftOpen);
+    }
+
+    /// <summary>
+    /// The gate's second term: whether a lift could reach <paramref name="objective"/> at all — this
+    /// commander can launch a vehicle-carrying transport, and it holds a base within a transport's
+    /// range of the objective. Both reads are the picket insertion's own
+    /// (<c>HasLaunchableVehicleTransport</c> and <see cref="TryFindInsertionLaunchBase"/>), so a lift
+    /// is never planned down a leg the flight itself would refuse.
+    /// </summary>
+    /// <param name="transportAvailable">Whether this commander can launch a vehicle-carrying
+    /// transport at all, read ONCE per commander per review by the caller and handed down. That read
+    /// walks the whole cargo catalog, so asking it per candidate point would be thirty catalog walks
+    /// a review — the shape of frame-rate problem this service has paid for before.</param>
+    private static bool LiftCanReach(FactionHQ hq, GlobalPosition objective, bool transportAvailable)
+    {
+        return transportAvailable
+            && TryFindInsertionLaunchBase(hq, objective, out GlobalPosition launchBase)
+            && CommanderGameAccess.HorizontalDistance(launchBase.AsVector3(), objective.AsVector3())
+                <= CommanderSettings.OperationsHeliInsertionRangeMeters;
+    }
+
+    /// <summary>The drive-time gate at its named boundaries (design.md,
+    /// air-mobile-platoons_20260915 Section 1).</summary>
+    private static void CheckAirMobile(List<string> failures)
+    {
+        const float detour = 1.3f;
+        const float speed = 15f;
+        const float threshold = 10f;
+
+        // 34 km of straight line is about 49 minutes of driving at the shipped detour and speed —
+        // the design's worked example, and the distance the far map puts between a home depot and a
+        // front objective.
+        float far = DriveMinutes(34000f, detour, speed);
+        Expect(failures, "34 km by road is about 49 minutes", far > 48f && far < 50f, true);
+        float middling = DriveMinutes(10000f, detour, speed);
+        Expect(failures, "10 km by road is about 14 minutes", middling > 14f && middling < 15f, true);
+        float near = DriveMinutes(6000f, detour, speed);
+        Expect(failures, "6 km by road is under the ten-minute threshold", near < threshold, true);
+        Expect(failures, "a depot on the objective is no drive at all", DriveMinutes(0f, detour, speed), 0f);
+        Expect(
+            failures,
+            "no depot at all is an infinite drive",
+            DriveMinutes(float.MaxValue, detour, speed),
+            float.MaxValue);
+        Expect(
+            failures,
+            "a vehicle that cannot move never arrives",
+            DriveMinutes(10000f, detour, 0f),
+            float.MaxValue);
+        Expect(
+            failures,
+            "the detour factor lengthens the drive",
+            DriveMinutes(10000f, detour, speed) > DriveMinutes(10000f, 1f, speed),
+            true);
+
+        // The gate itself.
+        Expect(failures, "a platoon 49 minutes out flies", PlatoonFlies(far, threshold, true), true);
+        Expect(failures, "a platoon 8.7 minutes out drives", PlatoonFlies(near, threshold, true), false);
+        Expect(
+            failures,
+            "a platoon exactly on the threshold still drives",
+            PlatoonFlies(threshold, threshold, true),
+            false);
+        Expect(
+            failures,
+            "one second past the threshold flies",
+            PlatoonFlies(threshold + 0.017f, threshold, true),
+            true);
+        Expect(
+            failures,
+            "no transport that can reach it means the platoon drives however far it is",
+            PlatoonFlies(far, threshold, false),
+            false);
+        Expect(
+            failures,
+            "an unreachable objective with no lift is still driven to",
+            PlatoonFlies(float.MaxValue, threshold, false),
+            false);
+
+        // The air-mobile recipe: six vehicles the transports can actually carry, no tanks.
+        Expect(
+            failures,
+            "an air-mobile platoon asks for no armour, because no transport carries a tank",
+            AirMobileRecipeArmour,
+            0);
+        Expect(
+            failures,
+            "an air-mobile platoon is a full platoon, not a detachment",
+            AirMobileRecipeCarrier + AirMobileRecipeAirDefence,
+            CommanderSettings.OperationsPlatoonSize);
+        Expect(
+            failures,
+            "an air-mobile platoon keeps its umbrella",
+            AirMobileRecipeAirDefence,
+            CommanderSettings.OperationsRecipeAirDefence);
+        Expect(
+            failures,
+            "the drive threshold is positive, or every platoon would fly; check the Operations section of the config",
+            CommanderSettings.AirMobileDriveMinutes > 0f,
+            true);
+        Expect(
+            failures,
+            "the road detour never shortens a drive; check the Operations section of the config",
+            CommanderSettings.RoadDetourFactor >= 1f,
+            true);
+
+        // How far the enemy is (user decision 2026-09-15): the nearer of the ground it holds and the
+        // units this commander has spotted. Before it, a point with a column five kilometres away
+        // read as rear and 40 km clear, and every standoff built on that distance agreed.
+        Expect(
+            failures,
+            "a held point nearer than anything spotted sets the distance",
+            NearestEnemyMeters(4000f, 9000f),
+            4000f);
+        Expect(
+            failures,
+            "a spotted column nearer than any held ground sets the distance",
+            NearestEnemyMeters(40000f, 5000f),
+            5000f);
+        Expect(
+            failures,
+            "with nothing held and nothing spotted the enemy is infinitely far",
+            NearestEnemyMeters(float.MaxValue, float.MaxValue),
+            float.MaxValue);
+        Expect(
+            failures,
+            "a spotted column counts even when the commander holds every point on the map",
+            NearestEnemyMeters(float.MaxValue, 5000f),
+            5000f);
+        Expect(
+            failures,
+            "held ground still counts when nothing is spotted",
+            NearestEnemyMeters(12000f, float.MaxValue),
+            12000f);
+        Expect(
+            failures,
+            "a column five kilometres out makes a point front where forty kilometres of held ground did not",
+            IsFrontPoint(NearestEnemyMeters(40000f, 5000f), CommanderSettings.OperationsFrontRangeMeters)
+                && !IsFrontPoint(NearestEnemyMeters(40000f, float.MaxValue), CommanderSettings.OperationsFrontRangeMeters),
+            true);
+
+        // The memory window that decides whether a contact still counts for siting.
+        Expect(failures, "a contact seen this instant counts", ContactStillCounts(0f, 300f), true);
+        Expect(failures, "a contact seen four minutes ago still counts", ContactStillCounts(240f, 300f), true);
+        Expect(failures, "a contact exactly on the window still counts", ContactStillCounts(300f, 300f), true);
+        Expect(failures, "a contact one second past the window does not", ContactStillCounts(301f, 300f), false);
+        Expect(failures, "a window of zero counts nothing", ContactStillCounts(0f, 0f), false);
+        Expect(
+            failures,
+            "the siting memory is longer than the raid memory, or a column would be forgotten between reviews; check the Operations section of the config",
+            CommanderSettings.StandoffContactMemorySeconds > CommanderEnemyCommanderService.ThreatMemorySeconds,
+            true);
+
+        // Who may touch a mission a lift is delivering to (fix, 2026-09-15). The live match demoted a
+        // base whose lift was in the air, which recalled the transport with its cargo aboard and let
+        // the idle pool drive a platoon to the same point instead.
+        Expect(
+            failures,
+            "a lift in the air owns its mission",
+            LiftHoldsMission(true, true),
+            true);
+        Expect(
+            failures,
+            "an air-mobile base with no lift open is nobody's yet",
+            LiftHoldsMission(true, false),
+            false);
+        Expect(
+            failures,
+            "an ordinary base is never held by a lift",
+            LiftHoldsMission(false, true),
+            false);
+        Expect(
+            failures,
+            "a base a lift is delivering to is never filled from the pool",
+            MissionTakesPoolPlatoon(true, true),
+            false);
+        Expect(
+            failures,
+            "an air-mobile base still saving for its lift may be filled by road",
+            MissionTakesPoolPlatoon(true, false),
+            true);
+        Expect(
+            failures,
+            "an ordinary base is filled from the pool exactly as before",
+            MissionTakesPoolPlatoon(false, false),
+            true);
+        Expect(
+            failures,
+            "an ordinary base with somebody else's lift open is still filled from the pool",
+            MissionTakesPoolPlatoon(false, true),
+            true);
+        Expect(
+            failures,
+            "the two rules are one rule: a mission is filled from the pool exactly when no lift holds it",
+            MissionTakesPoolPlatoon(true, true),
+            !LiftHoldsMission(true, true));
+    }
+
     /// <summary>One ForwardBase mission per front point not already carrying a mission, in ranked
     /// order, wanting two platoons under a threat mark and one otherwise (design SS2). The
     /// forward-base share cap (T8) and the truck requisition/siting (T9) are added on top of this.</summary>
     private void PlanForwardBases(FactionHQ hq, OperationsState state)
     {
+        // Once per commander per review: the cargo-catalog walk behind it is the expensive half of
+        // the lift gate, and it answers a standing question about the roster, not about this point.
+        bool transportAvailable = CommanderSupplyHeliService.Instance?.HasLaunchableVehicleTransport(hq) == true;
         for (int i = 0; i < state.RankedPoints.Count; i++)
         {
             CommanderRankedPoint ranked = state.RankedPoints[i];
@@ -482,7 +1116,25 @@ internal sealed partial class CommanderOperationsService
             // held-only version of this test meant no mission ever existed at match start, when every
             // control point is neutral, so nothing ever went out to take one. Enemy-held points are
             // attack targets, never forward bases.
-            if (!ranked.IsFront || !IsHeldOrReachable(hq, ranked.Point) || HasMissionFor(state, ranked.Point))
+            // A resource site near the enemy takes a forward base even when it is behind the front
+            // range (user decision 2026-09-14): the mine on it is worth a platoon, and the observed
+            // ring is the range at which "near the enemy" means one thing everywhere in this
+            // service.
+            // Out of reach of every depot this commander owns (reach-and-points Section 2): a
+            // forward base is a platoon standing on a point, and a platoon cannot drive there. The
+            // point keeps its picket mission below, which is what the helicopter insertion loop
+            // flies to, and becomes eligible again the review a depot comes within reach of it.
+            // Out of reach of every depot this commander owns and no lift can get there either: a
+            // platoon cannot drive to it and cannot be flown to it, so the point keeps its picket
+            // mission and becomes eligible again the review a depot comes within reach of it. A
+            // point a lift CAN reach is now a forward base like any other
+            // (air-mobile-platoons_20260915 Section 1): the reach rule was written when the only way
+            // to put a platoon on a point was to drive it there.
+            bool liftCanReach = LiftCanReach(hq, ranked.Point.Position, transportAvailable);
+            if ((!ranked.IsFront && !ranked.NeedsPlatoonPurpose)
+                || (!IsHeldOrReachable(hq, ranked.Point) && !liftCanReach)
+                || (state.OutOfReach.Contains(ranked.Point) && !liftCanReach)
+                || HasMissionFor(state, ranked.Point))
             {
                 continue;
             }
@@ -495,6 +1147,81 @@ internal sealed partial class CommanderOperationsService
                 Label = ranked.Point.Label,
             });
         }
+
+        MarkAirMobileMissions(hq, state, transportAvailable);
+    }
+
+    /// <summary>
+    /// The drive-time gate applied to every forward base that is still waiting for its first platoon
+    /// (design.md, air-mobile-platoons_20260915 Section 1). A base whose objective is more than
+    /// <c>CommanderSettings.AirMobileDriveMinutes</c> from the nearest usable depot, and that a lift
+    /// can reach, raises its platoon by air: nothing is bought for it at a depot and no existing
+    /// platoon is sent driving to it. A base that already has a platoon is never converted — the
+    /// decision is about how a NEW platoon is raised, not about moving one that exists.
+    /// <para>The mark is dropped again once a depot comes inside the threshold with no lift open —
+    /// which is what a forward operating base coming online does — so the base goes back to raising
+    /// an ordinary driving platoon.</para>
+    /// </summary>
+    private static void MarkAirMobileMissions(FactionHQ hq, OperationsState state, bool transportAvailable)
+    {
+        float threshold = CommanderSettings.AirMobileDriveMinutes;
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind != CommanderMissionKind.ForwardBase || mission.Point == null)
+            {
+                continue;
+            }
+
+            // Refreshed for every forward base, air-mobile or not: the order book's armour and truck
+            // lines read it to decide whether the vehicles no transport can carry may be bought yet.
+            mission.DriveMinutesToPoint = DriveMinutesToObjective(hq, mission.Point.Position);
+            if (mission.AirMobile)
+            {
+                // Dropped the moment a depot is close enough to drive from — which is what a forward
+                // operating base coming online does — whether or not the lift has already delivered.
+                // With the mark gone the mission's order book reverts to the ordinary recipe, so the
+                // armour the transports could never carry follows by road as the platoon takes losses.
+                if (mission.LiftOrder == null
+                    && !PlatoonFlies(mission.DriveMinutesToPoint, threshold, true))
+                {
+                    mission.AirMobile = false;
+                    CommanderAiLog.Note(
+                        hq,
+                        $"{mission.Label} is {mission.DriveMinutesToPoint:0} min from a depot now; "
+                            + "its armour follows by road.");
+                }
+
+                continue;
+            }
+
+            if (mission.Assigned.Count > 0)
+            {
+                continue;
+            }
+
+            if (!PlatoonFlies(
+                    mission.DriveMinutesToPoint,
+                    threshold,
+                    LiftCanReach(hq, mission.Point.Position, transportAvailable)))
+            {
+                continue;
+            }
+
+            mission.AirMobile = true;
+            mission.AirMobilePlatoonName = ReservePlatoonName(state);
+            float depotMeters = CommanderEconomyService.TryNearestOwnedDepot(
+                hq, mission.Point.Position, out _, out float nearest)
+                ? nearest
+                : float.MaxValue;
+            CommanderAiLog.Note(
+                hq,
+                $"raises {mission.AirMobilePlatoonName} air-mobile for {mission.Label}: "
+                    + (depotMeters >= float.MaxValue
+                        ? "it owns no depot that could drive there"
+                        : $"{depotMeters / 1000f:0} km from the nearest depot, {mission.DriveMinutesToPoint:0} min by road")
+                    + ".");
+        }
     }
 
     /// <summary>Where a forward base's truck parks — inside the platoon's own ring, where it is
@@ -502,10 +1229,41 @@ internal sealed partial class CommanderOperationsService
     private const float TruckRingFraction = 0.3f;
 
     /// <summary>
-    /// Gives every forward base without one the cheapest free-pool munitions truck, detaching it
-    /// from the game's own rearm AI (<c>allowRestock: false</c>, so it cannot be driven off the
-    /// forward base the moment it registers below half capacity) and parking it on the ring at
-    /// <c>Radius * TruckRingFraction</c>. None available -> logs once per mission (design SS2).
+    /// Whether a forward base may have a munitions truck sent to it, pure: only once at least one
+    /// of its platoons is Holding the point (user report 2026-09-14: "individual trucks driving
+    /// around, often straight into the enemy by themselves"). A truck dispatched to a point with
+    /// <c>0/2</c> platoons drove there alone and unescorted; the platoon it was meant to supply had
+    /// not even formed yet.
+    /// </summary>
+    internal static bool ForwardBaseWantsTruck(int holdingPlatoons)
+    {
+        return holdingPlatoons > 0;
+    }
+
+    /// <summary>How many of a mission's platoons stand Holding on its point right now.</summary>
+    internal static int CountHoldingPlatoons(CommanderOperationsMission mission)
+    {
+        int holding = 0;
+        for (int i = 0; i < mission.Assigned.Count; i++)
+        {
+            if (mission.Assigned[i].State == CommanderPlatoonState.Holding)
+            {
+                holding++;
+            }
+        }
+
+        return holding;
+    }
+
+    /// <summary>
+    /// Gives every forward base that a platoon is Holding, and that has no truck yet, the free-pool
+    /// munitions truck nearest the point, detaching it from the game's own rearm AI
+    /// (<c>allowRestock: false</c>, so it cannot be driven off the forward base the moment it
+    /// registers below half capacity) and parking it on the ring at
+    /// <c>Radius * TruckRingFraction</c>. A base whose platoons have all left (stripped for
+    /// reinforcements, withdrawn, dissolved) hands its truck back to the pool, where
+    /// <c>StagePool</c> brings it home, instead of leaving it parked alone on the point. None
+    /// available -> logs once per mission (design SS2).
     /// </summary>
     private static void FillMissionTrucks(FactionHQ hq, OperationsState state)
     {
@@ -522,18 +1280,43 @@ internal sealed partial class CommanderOperationsService
                 mission.Truck = null;
             }
 
+            bool wantsTruck = ForwardBaseWantsTruck(CountHoldingPlatoons(mission));
             if (mission.Truck != null)
+            {
+                if (!wantsTruck)
+                {
+                    CommanderAiLog.Note(hq, $"{mission.Label}: no platoon holds the point; its truck returns to the pool.");
+                    state.Pool.Add(mission.Truck);
+                    mission.Truck = null;
+                    mission.NoTruckLogged = false;
+                }
+
+                continue;
+            }
+
+            if (!wantsTruck)
             {
                 continue;
             }
 
             Unit? truck = null;
+            float truckDistance = float.MaxValue;
+            Vector3 pointLocal = mission.Point.Position.ToLocalPosition();
             for (int p = 0; p < state.Pool.Count; p++)
             {
-                if (CommanderPlatoonRoles.Of(state.Pool[p]?.definition as VehicleDefinition) == CommanderPlatoonRole.Truck)
+                Unit candidate = state.Pool[p];
+                if (candidate == null
+                    || candidate.disabled
+                    || CommanderPlatoonRoles.Of(candidate.definition as VehicleDefinition) != CommanderPlatoonRole.Truck)
                 {
-                    truck = state.Pool[p];
-                    break;
+                    continue;
+                }
+
+                float distance = CommanderGameAccess.HorizontalDistance(candidate.transform.position, pointLocal);
+                if (distance < truckDistance)
+                {
+                    truckDistance = distance;
+                    truck = candidate;
                 }
             }
 
@@ -555,7 +1338,11 @@ internal sealed partial class CommanderOperationsService
             float ring = mission.Point.Radius * TruckRingFraction;
             GlobalPosition park = CommanderGameAccess.SnapToTerrain(new GlobalPosition(
                 mission.Point.Position.x + ring, mission.Point.Position.y, mission.Point.Position.z));
+            // A forward base on an airfield would park its munitions truck on the taxiway
+            // (user instruction, 2026-09-16).
+            park = OffAirfieldStandingPoint(park, mission.Point.Position, out _);
             CommanderGameAccess.TrySetDestination(truck, park);
+            CommanderAiLog.Note(hq, $"{mission.Label}: truck follows {mission.Assigned[0].Name} to the forward base ({truckDistance / 1000f:0.0} km).");
         }
     }
 
@@ -695,7 +1482,10 @@ internal sealed partial class CommanderOperationsService
             }
         }
 
-        return bestPoint;
+        // An airbase centre is a rally point right on the field, which is how a withdrawing platoon
+        // ended up gathering on the apron (user instruction, 2026-09-16). Pushed off toward the side
+        // the platoon is coming from, so the remnant stops short of the strip instead of crossing it.
+        return OffAirfieldStandingPoint(bestPoint, from, out _);
     }
 
     /// <summary>Distance from its rally point within which a withdrawing platoon counts as
@@ -808,6 +1598,17 @@ internal sealed partial class CommanderOperationsService
             int strength = platoon.Members.Count;
             if (strength == 0)
             {
+                // Except one whose vehicles are in the gap between being taken off the road and
+                // reappearing at the nearer depot they were re-raised from (user instruction
+                // 2026-09-16, Operations/CommanderOperationsReseat.cs). That platoon has lost
+                // nothing: it is being moved, keeps its name, mission and objective, and its
+                // vehicles are on the depot's deployment reservation. Sweeping it off the board
+                // here would throw away the very platoon the re-raise exists to save.
+                if (ReseatVehiclesInTransit(platoon.Reseat, platoon.Members.Count) > 0)
+                {
+                    continue;
+                }
+
                 ReleaseFromMission(platoon);
                 state.Platoons.RemoveAt(i);
                 continue;
@@ -818,7 +1619,11 @@ internal sealed partial class CommanderOperationsService
             // until it has left the form-up point. Without this a platoon formed on one vehicle
             // withdrew on its first review and never got to form.
             int armour = CountRole(platoon, CommanderPlatoonRole.Armour);
-            int armourWanted = CommanderSettings.OperationsRecipeArmour;
+            // The platoon's OWN recipe, not the live setting (air-mobile-platoons_20260915): an
+            // air-mobile platoon is six light vehicles by design and never had a tank to lose, so
+            // reading the driving recipe's three armour slots here would have sent it home the
+            // review it landed.
+            int armourWanted = platoon.ArmourWanted;
             if (platoon.State != CommanderPlatoonState.Withdrawing
                 && platoon.State != CommanderPlatoonState.Forming
                 && ShouldWithdraw(strength, platoon.Establishment, armour, armourWanted))
@@ -857,21 +1662,44 @@ internal sealed partial class CommanderOperationsService
         for (int m = 0; m < state.Missions.Count; m++)
         {
             CommanderOperationsMission mission = state.Missions[m];
-            if (mission.Kind != CommanderMissionKind.ForwardBase || mission.Point == null)
+            // A base a lift is delivering to is filled from the sky (air-mobile-platoons_20260915
+            // Section 2): handing it the nearest free platoon would send exactly the twenty-minute
+            // drive the lift exists to avoid, and an existing platoon is never converted to an
+            // air-mobile one.
+            if (mission.Kind != CommanderMissionKind.ForwardBase
+                || mission.Point == null
+                || !MissionTakesPoolPlatoon(mission.AirMobile, mission.LiftOrder != null))
             {
                 continue;
             }
 
-            for (int i = 0; i < state.Platoons.Count && mission.Assigned.Count < mission.WantedPlatoons; i++)
+            // Nearest available platoon first (user report 2026-09-14: tasking "seems random").
+            // The loop used to take platoons in list order, so the platoon standing next to the
+            // point could be sent across the map while a far one drove past it.
+            while (mission.Assigned.Count < mission.WantedPlatoons)
             {
-                CommanderPlatoon platoon = state.Platoons[i];
-                if (!IsAvailableForMission(platoon))
+                CommanderPlatoon? platoon = NearestAvailablePlatoon(state, mission.Point.Position);
+                if (platoon == null)
                 {
-                    continue;
+                    break;
                 }
 
+                bool wasEmpty = mission.Assigned.Count == 0;
                 platoon.Objective = mission.Point.Position;
                 AttachPlatoon(hq, platoon, mission, CommanderPlatoonState.Moving);
+                // Filled by road after all: the pool had a platoon standing idle while the lift was
+                // still being saved for, and a platoon on the way beats one waiting for money. The
+                // mark comes off with it, or the base would keep its air-mobile order book — which
+                // posts nothing a depot can fill — for a platoon that drove there. Only for the
+                // FIRST platoon: a base whose air-mobile platoon has already landed and that wants a
+                // second one is being reinforced, not replaced.
+                if (mission.AirMobile && wasEmpty)
+                {
+                    mission.AirMobile = false;
+                    mission.AirMobilePlatoonName = string.Empty;
+                    CommanderAiLog.Note(
+                        hq, $"{platoon.Name} drives to {mission.Label}; the pool filled it before a lift could.");
+                }
             }
         }
 
@@ -884,12 +1712,15 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
-            for (int i = 0; i < state.Platoons.Count && mission.Assigned.Count < mission.WantedPlatoons; i++)
+            GlobalPosition target = mission.Point != null
+                ? mission.Point.Position
+                : mission.TargetAirbase != null ? mission.TargetAirbase.center.GlobalPosition() : default;
+            while (mission.Assigned.Count < mission.WantedPlatoons)
             {
-                CommanderPlatoon platoon = state.Platoons[i];
-                if (!IsAvailableForMission(platoon))
+                CommanderPlatoon? platoon = NearestAvailablePlatoon(state, target);
+                if (platoon == null)
                 {
-                    continue;
+                    break;
                 }
 
                 AttachPlatoon(hq, platoon, mission, CommanderPlatoonState.Attacking);
@@ -971,7 +1802,10 @@ internal sealed partial class CommanderOperationsService
         for (int i = 0; i < state.Platoons.Count; i++)
         {
             CommanderPlatoon platoon = state.Platoons[i];
-            if (platoon.Members.Count < platoon.Establishment)
+            // An air-mobile platoon's replacements come by air or not at all: its objective is past
+            // the drive threshold by definition, so topping it up out of the depot pool would send
+            // single vehicles on the twenty-minute drive the lift exists to avoid.
+            if (platoon.Members.Count < platoon.Establishment && platoon.Mission?.AirMobile != true)
             {
                 ReinforcePlatoon(state, platoon);
             }
@@ -1007,6 +1841,11 @@ internal sealed partial class CommanderOperationsService
             CommanderOperationsMission mission = state.Missions[i];
             if (mission.Kind == CommanderMissionKind.ForwardBase
                 && mission.Point != null
+                // A base a lift is delivering to has its platoon coming out of the sky, not out of a
+                // depot (air-mobile-platoons_20260915 Section 2), so it is no reason to buy vehicles
+                // at one — counting it here would have the commander raise a driving platoon for the
+                // very objective the drive-time gate just ruled too far to drive to.
+                && MissionTakesPoolPlatoon(mission.AirMobile, mission.LiftOrder != null)
                 // A forward base whose point has stopped being front is about to be demoted to a
                 // picket; it is no longer a reason to build a platoon.
                 && (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront))
@@ -1042,6 +1881,7 @@ internal sealed partial class CommanderOperationsService
             CommanderOperationsMission mission = state.Missions[i];
             if (mission.Kind == CommanderMissionKind.ForwardBase
                 && mission.Point != null
+                && MissionTakesPoolPlatoon(mission.AirMobile, mission.LiftOrder != null)
                 && mission.Assigned.Count < mission.WantedPlatoons
                 && (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront))
             {
@@ -1129,6 +1969,13 @@ internal sealed partial class CommanderOperationsService
         platoon.Mission = mission;
         platoon.State = state;
         mission.Assigned.Add(platoon);
+        // A platoon taking a mission is starting a new journey, so the distance its last re-raise
+        // achieved no longer describes where it is going (user decision 2026-09-16,
+        // Operations/CommanderOperationsReseat.cs). This is the one choke point every platoon passes
+        // through to get an objective, which is why the strict-progress memory is dropped here and
+        // nowhere else; a re-raise's own objective change is deliberately NOT a reset, because that is
+        // the same journey continuing.
+        platoon.Reseat.ResetForNewObjective();
         if (mission.ReinforcePlatoons > 0)
         {
             if (platoon.ReinforcesLabel != mission.Label)
@@ -1144,6 +1991,55 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
+    /// The available platoon (<see cref="IsAvailableForMission"/>) whose leader stands nearest
+    /// <paramref name="target"/>, or null when none is free. A platoon with no live leader measures
+    /// from its first live member; one with no live members at all measures as farthest, so it is
+    /// taken last (the losses rule dissolves it next review anyway).
+    /// </summary>
+    private static CommanderPlatoon? NearestAvailablePlatoon(OperationsState state, GlobalPosition target)
+    {
+        CommanderPlatoon? nearest = null;
+        float nearestDistance = float.MaxValue;
+        Vector3 targetLocal = target.ToLocalPosition();
+        for (int i = 0; i < state.Platoons.Count; i++)
+        {
+            CommanderPlatoon platoon = state.Platoons[i];
+            if (!IsAvailableForMission(platoon))
+            {
+                continue;
+            }
+
+            float distance = PlatoonDistanceTo(platoon, targetLocal);
+            if (nearest == null || distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = platoon;
+            }
+        }
+
+        return nearest;
+    }
+
+    /// <summary>Horizontal metres from a platoon's leader (or first live member) to
+    /// <paramref name="targetLocal"/>; <c>float.MaxValue</c> for a platoon with nothing alive.</summary>
+    private static float PlatoonDistanceTo(CommanderPlatoon platoon, Vector3 targetLocal)
+    {
+        Unit? anchor = platoon.Leader != null && !platoon.Leader.disabled ? platoon.Leader : null;
+        for (int i = 0; anchor == null && i < platoon.Members.Count; i++)
+        {
+            Unit member = platoon.Members[i];
+            if (member != null && !member.disabled)
+            {
+                anchor = member;
+            }
+        }
+
+        return anchor == null
+            ? float.MaxValue
+            : CommanderGameAccess.HorizontalDistance(anchor.transform.position, targetLocal);
+    }
+
+    /// <summary>
     /// Addendum 2026-09-14 §3's fill order, step two: a mission with an open reinforcement request
     /// the released reserve platoons could not satisfy takes platoons that are Holding other
     /// forward bases' posts — most rear point first (leaving the point nearest the enemy is the
@@ -1156,7 +2052,11 @@ internal sealed partial class CommanderOperationsService
         {
             CommanderOperationsMission mission = state.Missions[m];
             if (mission.ReinforcePlatoons <= 0
-                || (mission.Kind == CommanderMissionKind.ForwardBase && mission.Point == null))
+                || (mission.Kind == CommanderMissionKind.ForwardBase && mission.Point == null)
+                // A base a lift is delivering to is never stripped a platoon from another point
+                // either: the sky is already bringing it one, and a donor would arrive by the road
+                // the lift exists to avoid.
+                || LiftHoldsMission(mission.AirMobile, mission.LiftOrder != null))
             {
                 continue;
             }
@@ -1419,6 +2319,13 @@ internal sealed partial class CommanderOperationsService
         mission.NoTruckLogged = false;
         mission.Kind = CommanderMissionKind.Picket;
         mission.WantedPlatoons = 0;
+        // The air-mobile mark goes with the platoon purpose (fix, 2026-09-15). A picket is a
+        // two-vehicle detachment the insertion chain already flies to; leaving the mark on left a
+        // demoted mission looking like a base a lift should be ordered for, and the lift that was
+        // then ordered was cancelled on the next review for a mission that no longer wanted a
+        // platoon. A base a lift is actually delivering to is never demoted at all.
+        mission.AirMobile = false;
+        mission.AirMobilePlatoonName = string.Empty;
         // A demoted base asks for no reinforcements (addendum 2026-09-14 §3): the request review
         // skips pickets, so a lingering request would never close and the marker flag never clear.
         mission.ReinforcePlatoons = 0;
@@ -1431,6 +2338,12 @@ internal sealed partial class CommanderOperationsService
     /// detachment, never a platoon, so it never competes for the forward-base share. Surplus front
     /// points beyond <see cref="MaxForwardBases"/> demote to a picket instead, and a picket whose
     /// point gains a threat mark promotes back to a forward base.
+    /// <para>
+    /// Resource sites are ordinary picket points since 2026-09-14 (user decision): a site away from
+    /// the enemy is taken and held by a picket exactly like a hilltop, which is what lets the
+    /// owner's mine stand on it. A site inside the observed ring takes a forward-base purpose
+    /// instead (<see cref="SiteWantsPlatoonPurpose"/>) and keeps it through the demotion walk below.
+    /// </para>
     /// </summary>
     private void PlanPickets(FactionHQ hq, OperationsState state)
     {
@@ -1452,7 +2365,14 @@ internal sealed partial class CommanderOperationsService
         for (int i = 0; i < state.RankedPoints.Count; i++)
         {
             CommanderRankedPoint ranked = state.RankedPoints[i];
-            if (ranked.IsFront || !IsHeldOrReachable(hq, ranked.Point) || HasMissionFor(state, ranked.Point))
+            // A point beyond depot reach but within a transport's range of a held airbase gets a
+            // picket mission too (reach-and-points: "for objectives further than this ... helicopter
+            // insertion only"). Without it the 15 km front range kept every far point off the board
+            // and the transports had nothing to fly to on the 82 km map.
+            if (ranked.IsFront
+                || ranked.NeedsPlatoonPurpose
+                || (!IsHeldOrReachable(hq, ranked.Point) && !IsAirPicketCandidate(hq, state, ranked.Point))
+                || HasMissionFor(state, ranked.Point))
             {
                 continue;
             }
@@ -1473,7 +2393,24 @@ internal sealed partial class CommanderOperationsService
         for (int i = 0; i < forwardBasesByRank.Count; i++)
         {
             CommanderOperationsMission mission = forwardBasesByRank[i];
-            bool stillFront = !TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) || ranked.IsFront;
+            // A base a lift is delivering to is never demoted (fix, 2026-09-15). This walk is the
+            // path the live log took: the forward-base ALLOWANCE demoted a base whose lift was
+            // already in the air, which re-keyed the mission to a picket, made the lift's own
+            // "does my objective still want a platoon" test go false, and recalled the transport with
+            // its cargo aboard. A lift is a commitment the commander has already paid for and cannot
+            // take back in flight; the base competes for the allowance again the moment it lands.
+            if (LiftHoldsMission(mission.AirMobile, mission.LiftOrder != null))
+            {
+                kept++;
+                continue;
+            }
+
+            // A resource site inside the observed ring keeps its platoon purpose even though it is
+            // behind the front range (user decision 2026-09-14) — demoting it to a picket every
+            // review is exactly the two-vehicle detachment the decision exists to avoid.
+            bool stillFront = !TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked)
+                || ranked.IsFront
+                || ranked.NeedsPlatoonPurpose;
             if (!stillFront)
             {
                 DemoteForwardBaseToPicket(state, mission);
@@ -1497,12 +2434,20 @@ internal sealed partial class CommanderOperationsService
             CommanderOperationsMission mission = state.Missions[i];
             if (mission.Kind == CommanderMissionKind.Picket
                 && TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked)
-                && ranked.HasThreatMark)
+                && (ranked.HasThreatMark || ranked.NeedsPlatoonPurpose))
             {
                 mission.Kind = CommanderMissionKind.ForwardBase;
-                mission.WantedPlatoons = 2;
+                // A site that has come inside the observed ring wants a platoon, not the two a
+                // point with the enemy already on top of it asks for.
+                mission.WantedPlatoons = ranked.HasThreatMark ? 2 : 1;
             }
         }
+
+        // Which points the transport is expected to deliver to (departure 2026-09-14): decided here,
+        // after the missions exist and before the drive fill, because the fill below and the order
+        // book both used to take every off-road point's vehicles out of the pool before
+        // PlanInsertions ever saw a shortfall to fly to.
+        MarkAirDeliveredPickets(hq, state);
 
         // Order (a) before (b): the platoons a threatened purpose is waiting on are left vehicles in
         // the pool before any picket is topped up. With nothing threatened the hold-back is zero and
@@ -1639,7 +2584,7 @@ internal sealed partial class CommanderOperationsService
                 }
 
                 CommanderOperationsMission? mission = FindPicketMission(state, ranked.Point);
-                if (mission != null)
+                if (mission != null && !IsAirDeliveredPicket(state, ranked.Point))
                 {
                     FillOnePicket(state, mission, heldForPlatoons);
                 }
@@ -1655,9 +2600,11 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
+            bool airDelivered = IsAirDeliveredPicket(state, mission.Point);
+
             // A picket whose point is not in the ranked list at all gets its fill here, last of
             // everything: an unranked point is the least knowable one on the board.
-            if (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked))
+            if (!TryGetRanked(state, mission.Point, out CommanderRankedPoint ranked) && !airDelivered)
             {
                 FillOnePicket(state, mission, heldForPlatoons);
             }
@@ -1665,8 +2612,10 @@ internal sealed partial class CommanderOperationsService
             // Only a picket AWAY from the front withholds the pool from platoon formation. A picket
             // on a front point is a forward base the share cap demoted; the platoon that would form
             // instead is the better answer there, and holding the pool for it would deadlock the two
-            // against each other.
-            if (mission.PicketMembers.Count < CommanderSettings.PointsMinGarrison && !ranked.IsFront)
+            // against each other. A point reserved for the transport (departure 2026-09-14) is not
+            // waiting on the pool at all, so it never withholds it either — it would otherwise hold
+            // every idle vehicle hostage to a flight that fills it from the depot.
+            if (mission.PicketMembers.Count < CommanderSettings.PointsMinGarrison && !ranked.IsFront && !airDelivered)
             {
                 shortMissions++;
             }
@@ -1693,33 +2642,76 @@ internal sealed partial class CommanderOperationsService
         return null;
     }
 
-    /// <summary>One picket's top-up out of the pool's cheapest vehicles, never taking the pool below
+    /// <summary>
+    /// Added to a pool vehicle's distance when ranking it for a picket if it is armour, so armour
+    /// is taken only when nothing lighter is left anywhere: the platoons' tanks are not picket
+    /// stock, and a tank taken here is one the buyer must replace. Fifty kilometres exceeds any
+    /// map's usable span, so this never loses to plain distance.
+    /// </summary>
+    private const float ArmourPicketPenaltyMeters = 50_000f;
+
+    /// <summary>
+    /// Where a free-pool vehicle sits in one picket's fill order, pure — lower is taken first (user
+    /// report 2026-09-14: picket tasking "seems random, rather than towards closest"). Nearest to the
+    /// point first; armour after every lighter vehicle (<see cref="ArmourPicketPenaltyMeters"/>); a
+    /// munitions truck NEVER (<c>float.PositiveInfinity</c>). The fill used to take the pool's
+    /// cheapest vehicle by value — and the truck, at value 2, is the cheapest thing on the roster,
+    /// so surplus trucks became pickets and drove off alone.
+    /// </summary>
+    internal static float PicketCandidateRank(CommanderPlatoonRole role, float distanceMeters)
+    {
+        return role switch
+        {
+            CommanderPlatoonRole.Truck => float.PositiveInfinity,
+            CommanderPlatoonRole.Armour => distanceMeters + ArmourPicketPenaltyMeters,
+            _ => distanceMeters,
+        };
+    }
+
+    /// <summary>One picket's top-up out of the pool, nearest vehicle first by
+    /// <see cref="PicketCandidateRank"/>, never taking the pool below
     /// <paramref name="heldForPlatoons"/>.</summary>
     private static void FillOnePicket(OperationsState state, CommanderOperationsMission mission, int heldForPlatoons)
     {
-        int wanted = CommanderSettings.PointsMinGarrison;
+        // Short by whatever a re-raise still owes this picket (user instruction 2026-09-16,
+        // Operations/CommanderOperationsReseat.cs). Without this the fill would replace the vehicles
+        // the re-raise has just taken off the road with whatever the pool has NOW — which on the
+        // review a forward base opens is still the far vehicles the re-raise exists to stop driving —
+        // and the detachment would set off on the same long journey again.
+        int wanted = Mathf.Max(
+            0,
+            CommanderSettings.PointsMinGarrison
+                - ReseatVehiclesInTransit(mission.Reseat, mission.PicketMembers.Count));
+        Vector3 pointLocal = mission.Point!.Position.ToLocalPosition();
         while (mission.PicketMembers.Count < wanted && state.Pool.Count > Mathf.Max(0, heldForPlatoons))
         {
-            Unit? cheapest = null;
-            float cheapestValue = float.MaxValue;
+            Unit? best = null;
+            float bestRank = float.PositiveInfinity;
             for (int p = 0; p < state.Pool.Count; p++)
             {
                 Unit candidate = state.Pool[p];
-                float value = candidate.definition is VehicleDefinition definition ? definition.value : float.MaxValue;
-                if (value < cheapestValue)
+                if (candidate == null || candidate.disabled)
                 {
-                    cheapestValue = value;
-                    cheapest = candidate;
+                    continue;
+                }
+
+                float rank = PicketCandidateRank(
+                    CommanderPlatoonRoles.Of(candidate.definition as VehicleDefinition),
+                    CommanderGameAccess.HorizontalDistance(candidate.transform.position, pointLocal));
+                if (rank < bestRank)
+                {
+                    bestRank = rank;
+                    best = candidate;
                 }
             }
 
-            if (cheapest == null)
+            if (best == null)
             {
                 break;
             }
 
-            mission.PicketMembers.Add(cheapest);
-            state.Pool.Remove(cheapest);
+            mission.PicketMembers.Add(best);
+            state.Pool.Remove(best);
         }
     }
 
@@ -1728,10 +2720,98 @@ internal sealed partial class CommanderOperationsService
     /// platoon, not the other way round.</summary>
     private static void CheckForwardBaseShare(List<string> failures)
     {
+        // Depot reach (reach-and-points, user decision 2026-09-14). The boundary matters: 20 km is
+        // the default, and being wrong by a metre either way is the difference between a whole line
+        // of points getting platoons and none of them getting any.
+        Expect(failures, "a point at the depot reach is in reach", IsWithinDepotReach(20000f, 20000f), true);
+        Expect(
+            failures,
+            "a point one metre past the depot reach is out of reach",
+            IsWithinDepotReach(20001f, 20000f),
+            false);
+        Expect(
+            failures,
+            "no depot at all puts every point out of reach",
+            IsWithinDepotReach(float.MaxValue, 20000f),
+            false);
+        Expect(failures, "a point on top of a depot is in reach", IsWithinDepotReach(0f, 20000f), true);
         Expect(failures, "a full platoon moves out at once", IsReadyToMoveOut(6, 6, 0f, 180f), true);
         Expect(failures, "a short platoon waits", IsReadyToMoveOut(4, 6, 60f, 180f), false);
         Expect(failures, "a short platoon moves out once it has waited long enough", IsReadyToMoveOut(4, 6, 180f, 180f), true);
         Expect(failures, "one short picket withholds the pool from platoon formation", PicketsNeedThePool(1, 0), true);
+        Expect(failures, "a forward base nobody holds yet gets no truck", ForwardBaseWantsTruck(0), false);
+        Expect(failures, "twenty pooled vehicles over a cap of twelve sell eight", PoolSurplusToSell(20, 12), 8);
+        Expect(failures, "a pool at its cap sells nothing", PoolSurplusToSell(12, 12), 0);
+        Expect(failures, "a zero cap disables the sale", PoolSurplusToSell(50, 0), 0);
+        Expect(failures, "a vehicle idle five minutes is sellable", PoolUnitSellable(300f, 5f), true);
+        Expect(failures, "a vehicle idle four minutes is kept", PoolUnitSellable(240f, 5f), false);
+        // Fix B (2026-09-15): the sale keeps back exactly as many vehicles of a role as the book
+        // has open lines for, and no more.
+        int[] openForSale = new int[RoleCount];
+        openForSale[(int)CommanderPlatoonRole.Armour] = 2;
+        Expect(failures, "the first idle tank against a two-tank line is kept", PoolUnitWanted(openForSale, CommanderPlatoonRole.Armour), true);
+        Expect(failures, "the second idle tank against a two-tank line is kept", PoolUnitWanted(openForSale, CommanderPlatoonRole.Armour), true);
+        Expect(failures, "the third idle tank against a two-tank line is sold", PoolUnitWanted(openForSale, CommanderPlatoonRole.Armour), false);
+        Expect(failures, "an idle carrier with no carrier line is sold", PoolUnitWanted(openForSale, CommanderPlatoonRole.Carrier), false);
+        Expect(failures, "a vehicle of no recipe role is never kept for the book", PoolUnitWanted(openForSale, CommanderPlatoonRole.Other), false);
+        Expect(failures, "a resource site's garrison keeps to the outer ring", HoldPostsOuterOnly(StrategicPointKind.Site), true);
+        Expect(failures, "a 500 m site's garrison stands at 437.5 m", HoldRingRadius(StrategicPointKind.Site, 500f), 437.5f);
+        Expect(failures, "a hilltop's garrison stands on its full ring", HoldRingRadius(StrategicPointKind.Hilltop, 300f), 300f);
+        Expect(failures, "a neutral point out of reach within transport range is an air picket", AirPicketPlannable(true, true, 40_000f, 60_000f, true), true);
+        Expect(failures, "a point within depot reach is not planned by the air rule", AirPicketPlannable(true, false, 40_000f, 60_000f, true), false);
+        Expect(failures, "a point past transport range gets no air picket", AirPicketPlannable(true, true, 61_000f, 60_000f, true), false);
+        Expect(failures, "an enemy-held point is never an air picket", AirPicketPlannable(false, true, 40_000f, 60_000f, true), false);
+        Expect(failures, "insertion switched off plans no air pickets", AirPicketPlannable(true, true, 40_000f, 60_000f, false), false);
+        Expect(failures, "a hilltop's garrison still uses its inner posts", HoldPostsOuterOnly(StrategicPointKind.Hilltop), false);
+        Expect(failures, "a Hexhound SAM is air defence by name", CommanderPlatoonRoles.IsAirDefenceByName("Hexhound SAM"), true);
+        Expect(failures, "an LCV25 AA is air defence by name", CommanderPlatoonRoles.IsAirDefenceByName("LCV25 AA"), true);
+        Expect(failures, "a Jackknife is not air defence by name", CommanderPlatoonRoles.IsAirDefenceByName("M12 Jackknife"), false);
+        Expect(failures, "a name merely containing the letters is not air defence", CommanderPlatoonRoles.IsAirDefenceByName("Samson GMG"), false);
+        Expect(failures, "a forward base one platoon holds gets its truck", ForwardBaseWantsTruck(1), true);
+        Expect(failures, "a truck is never picket stock", float.IsPositiveInfinity(PicketCandidateRank(CommanderPlatoonRole.Truck, 0f)), true);
+        Expect(failures, "the nearer light vehicle fills the picket first",
+            PicketCandidateRank(CommanderPlatoonRole.AirDefence, 500f) < PicketCandidateRank(CommanderPlatoonRole.Carrier, 900f), true);
+        Expect(failures, "armour fills a picket only after every lighter vehicle",
+            PicketCandidateRank(CommanderPlatoonRole.Carrier, 40_000f) < PicketCandidateRank(CommanderPlatoonRole.Armour, 0f), true);
+        // The resource-site split (user decision 2026-09-14): a picket on the quiet ones, a platoon
+        // purpose on the ones the enemy can reach. The ring is the observed ring, so "near the
+        // enemy" means the same 8 km here as it does to the sortie sizing and the insertion gate.
+        Expect(
+            failures,
+            "a site far from everything is an ordinary picket",
+            SiteWantsPlatoonPurpose(false, 30000f, 0, ObservedRadiusMeters),
+            false);
+        Expect(
+            failures,
+            "a site on the front is a forward base",
+            SiteWantsPlatoonPurpose(true, 30000f, 0, ObservedRadiusMeters),
+            true);
+        Expect(
+            failures,
+            "a rear site with a tracked hostile in its ring is a forward base",
+            SiteWantsPlatoonPurpose(false, 30000f, 1, ObservedRadiusMeters),
+            true);
+        Expect(
+            failures,
+            "a rear site inside the observed ring of an enemy-held asset is a forward base",
+            SiteWantsPlatoonPurpose(false, ObservedRadiusMeters - 1f, 0, ObservedRadiusMeters),
+            true);
+        Expect(
+            failures,
+            "a site exactly on the observed ring is still a forward base, the safe side of the boundary",
+            SiteWantsPlatoonPurpose(false, ObservedRadiusMeters, 0, ObservedRadiusMeters),
+            true);
+        Expect(
+            failures,
+            "a site just outside the observed ring goes back to being a picket",
+            SiteWantsPlatoonPurpose(false, ObservedRadiusMeters + 1f, 0, ObservedRadiusMeters),
+            false);
+        Expect(
+            failures,
+            "a map with no enemy asset at all leaves every site to its pickets",
+            SiteWantsPlatoonPurpose(false, float.MaxValue, 0, ObservedRadiusMeters),
+            false);
+
         Expect(failures, "several short pickets still withhold the pool", PicketsNeedThePool(4, 0), true);
         Expect(failures, "no short picket releases the pool to platoon formation", PicketsNeedThePool(0, 0), false);
         Expect(failures, "a count that never ran never withholds the pool", PicketsNeedThePool(-1, 0), false);

@@ -53,8 +53,11 @@ internal sealed class CommanderStateStore : ICommanderTickPersistent, ICommander
 
     /// <summary>True only for the run that loaded from bytes rather than from the plugins\ folder
     /// on disk — BepInEx ScriptEngine's hot reload. The same detector
-    /// <see cref="CommanderMissionInstaller"/> already uses for the same reason.</summary>
-    private static bool IsHotReloadLoad => string.IsNullOrEmpty(typeof(CommanderStateStore).Assembly.Location);
+    /// <see cref="CommanderMissionInstaller"/> already uses for the same reason. Internal rather
+    /// than private since 2026-09-14 so the strategic-points service can hold discovery back for
+    /// the restore grace on exactly the runs this is true for, instead of defining the check a
+    /// third time.</summary>
+    internal static bool IsHotReloadLoad => string.IsNullOrEmpty(typeof(CommanderStateStore).Assembly.Location);
 
     public void ResetSession()
     {

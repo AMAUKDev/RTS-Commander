@@ -1,4 +1,4 @@
-# Building and installing Ground Control (RTS)
+﻿# Building and installing Ground Control (RTS)
 
 Ground Control (RTS) is a BepInEx 5 plugin for Nuclear Option. It compiles against the game's own
 assemblies, so the build needs to know where the game is installed.
@@ -45,7 +45,8 @@ Output lands in `bin\Release\net472\`:
 | --- | --- |
 | `GroundControlRts.dll` | The plugin. |
 | `GroundControlRts.pdb` | Debug symbols; BepInEx stack traces get line numbers with it present. |
-| `Ground Control Duel.json` | The mission that ships with the mod. Copied from `Mission\` to the output root on purpose. |
+| `Ground Control Duel.json` | A mission that ships with the mod. Copied from `Mission\` to the output root on purpose. |
+| `Ground Control Duel Far.json` | The far-start version of that duel, shipped the same way. |
 
 Game assemblies are referenced with `Private=false`, so they are not copied to the output.
 
@@ -61,7 +62,7 @@ Copy-Item "bin\Release\net472\*" $dst -Recurse -Force
 
 The mission JSON files must sit beside the DLL: `CommanderMissionInstaller` reads them from the
 plugin folder when the game loads and installs them into the game's user mission list. A DLL-only
-copy logs a warning and the Ground Control Duel mission never appears.
+copy logs a warning and the Ground Control Duel missions never appear.
 
 If a `NuclearOptionCommander` folder exists in `BepInEx\plugins`, delete it. That is this mod under
 its old name; with both present every Harmony patch runs twice.
@@ -159,8 +160,9 @@ is already loaded, and if it did load, every Harmony patch would run twice.
 ## Checking it loaded
 
 Launch Nuclear Option and look in `<game>\BepInEx\LogOutput.log` for lines from
-`Ground Control (RTS)`. A clean load prints the plugin version, `Installed mission 'Ground Control Duel'`
-on first run, and no `self-check FAILED` lines. The self-checks run at plugin load and are the mod's
+`Ground Control (RTS)`. A clean load prints the plugin version, one
+`Installed mission '...'` line per shipped mission on first run (`Ground Control Duel` and
+`Ground Control Duel Far`), and no `self-check FAILED` lines. The self-checks run at plugin load and are the mod's
 only automated tests; a failed one means a tuning constant or price ladder is wrong.
 
 ## Keeping up with upstream

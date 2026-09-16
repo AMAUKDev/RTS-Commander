@@ -154,6 +154,7 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         ClearMissionMapVisuals();
         missions.Clear();
         staleAircraft.Clear();
+        ResetSurvival();
         mapClickTracker.Reset();
         selectedPrimaryWeaponIndex = -1;
         selectedSecondaryWeaponIndex = -1;
@@ -204,6 +205,9 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
             RefreshMissionMapVisuals();
             TickLandingOrders();
             ProcessReturningMissions();
+            // After the returning pass, so an airframe already going home is skipped rather than
+            // ordered home twice (design.md, air-survival-layer_20260916 Layer 2).
+            TickSurvival();
             RecoverLandedAircraft();
         }
 
@@ -549,34 +553,9 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
         return false;
     }
 
-    /// <summary>
-    /// True when this airframe has nothing left to shoot with but its guns — "Winchester" in the
-    /// idle sweep's sense (design SS6). Guns are deliberately not counted: a pilot with cannon
-    /// rounds left keeps making strafing runs, which is the behaviour the wing's INTERNAL CANNONS
-    /// rule already exists to stop. Cargo stations are not weapons.
-    /// </summary>
-    internal static bool IsWinchester(Aircraft? aircraft)
-    {
-        if (aircraft?.weaponStations == null || aircraft.weaponStations.Count == 0)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < aircraft.weaponStations.Count; i++)
-        {
-            WeaponStation station = aircraft.weaponStations[i];
-            if (station != null
-                && !station.Cargo
-                && station.WeaponInfo != null
-                && !station.WeaponInfo.gun
-                && station.Ammo > 0)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    // IsWinchester moved to AirCommand/CommanderAirCommandSurvival.cs on 2026-09-16, beside the
+    // survival check that is its second caller and beside MissionIsOutOfAmmo, the pure rule it now
+    // reads (design.md, air-survival-layer_20260916 Layer 2; Reuse rules 3 and 4).
 
     /// <summary>Internal (one-word widening): the operations air step reads it for the rotary leg
     /// of its transit estimate. One definition of "flies like a helicopter", two callers.</summary>

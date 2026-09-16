@@ -143,19 +143,37 @@ internal sealed partial class CommanderOverlayUi
     {
         GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 84f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(new Rect(24f, y + 10f, settingsWindowRect.width - 48f, 22f), "SPAWNING", CommanderUiTheme.Header);
-        // Two half-width toggles on one row, the same layout the UI tab uses, because the tab
-        // below is already at the window's height limit.
-        float spawnHalf = (settingsWindowRect.width - 60f) * 0.5f;
-        CommanderSettings.LimitToFactoryVehicles = GUI.Toggle(
-            new Rect(24f, y + 42f, spawnHalf, 30f),
-            CommanderSettings.LimitToFactoryVehicles,
-            "Limit to vehicles from factories",
+        // Three third-width toggles on one row, because the tab below is already at the window's
+        // height limit. The cannon toggle is the AIR window's INTERNAL CANNONS switch (one setting,
+        // two places): it applies to every commander's aircraft, and a player who never opens the
+        // AIR window could not find it (user, 2026-09-14).
+        float spawnThird = (settingsWindowRect.width - 72f) / 3f;
+        CommanderSettings.LimitToFactionRoster = GUI.Toggle(
+            new Rect(24f, y + 42f, spawnThird, 30f),
+            CommanderSettings.LimitToFactionRoster,
+            "Own faction roster only",
             CommanderUiTheme.Toggle);
         CommanderSettings.AiAircraftLaunchFromHangar = GUI.Toggle(
-            new Rect(36f + spawnHalf, y + 42f, spawnHalf, 30f),
+            new Rect(36f + spawnThird, y + 42f, spawnThird, 30f),
             CommanderSettings.AiAircraftLaunchFromHangar,
-            "AI aircraft take off from hangars",
+            "AI aircraft from hangars",
             CommanderUiTheme.Toggle);
+        // Written through the AIR service, not the setting, so its loadouts re-sort the way the
+        // AIR window's own toggle makes them.
+        bool stripCannons = GUI.Toggle(
+            new Rect(48f + spawnThird * 2f, y + 42f, spawnThird, 30f),
+            !CommanderSettings.AirIncludeInternalCannons,
+            "Strip internal cannons",
+            CommanderUiTheme.Toggle);
+        CommanderAirCommandService? air = CommanderAirCommandService.Instance;
+        if (air != null)
+        {
+            air.IncludeInternalCannons = !stripCannons;
+        }
+        else
+        {
+            CommanderSettings.AirIncludeInternalCannons = !stripCannons;
+        }
 
         // The COMMAND box carries two commander buttons now. Its rows are on a 32 px pitch rather
         // than 34 so the whole box still fits under the settings window with the help overlay open:
@@ -502,6 +520,10 @@ internal sealed partial class CommanderOverlayUi
             rowY, width, "Insertion off-road", CommanderSettings.OperationsHeliInsertionOffRoadMeters / 1000f, 0f, 10f, "0", " km") * 1000f);
         rowY += 38f;
 
+        CommanderSettings.OperationsMaxPreemptiveAirObjectives = Mathf.RoundToInt(DrawPointsSlider(
+            rowY, width, "Pre-emptive air cover", CommanderSettings.OperationsMaxPreemptiveAirObjectives, 0f, 12f, "0", " marches"));
+        rowY += 38f;
+
         GUI.Label(
             new Rect(16f, rowY + 4f, width - 32f, 22f),
             "Platoon recipe, insertion limit and cooldown live in the config file, Operations section.",
@@ -615,7 +637,7 @@ internal sealed partial class CommanderOverlayUi
 
     private void DrawControlSettings(float y)
     {
-        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 540f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(12f, y, settingsWindowRect.width - 24f, 628f), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(
             new Rect(24f, y + 8f, settingsWindowRect.width - 48f, 32f),
             "Bindings are active only in RTS mode. Click one, then press a keyboard or mouse button. Escape cancels.",
@@ -651,6 +673,9 @@ internal sealed partial class CommanderOverlayUi
         DrawBinding(new Rect(right, rowY + 320f, columnWidth, 30f), "Cycle idle", "cycle_idle");
         DrawBinding(new Rect(right, rowY + 352f, columnWidth, 30f), "Map box select", "map_box_select");
         DrawBinding(new Rect(right, rowY + 384f, columnWidth, 30f), "Player commander", "toggle_player_commander");
+        DrawBinding(new Rect(right, rowY + 416f, columnWidth, 30f), "Rotate build left", "rotate_left");
+        DrawBinding(new Rect(right, rowY + 448f, columnWidth, 30f), "Rotate build right", "rotate_right");
+        DrawBinding(new Rect(right, rowY + 480f, columnWidth, 30f), "Sit on slope", "conform_ground");
 
         if (centerFollowRect.Contains(Event.current.mousePosition))
         {
@@ -659,12 +684,12 @@ internal sealed partial class CommanderOverlayUi
                 "Press briefly to center on the selected unit. Hold to center and follow it.");
         }
 
-        if (GUI.Button(new Rect(left, y + 492f, columnWidth, 32f), "RESET CAMERA", CommanderUiTheme.Button))
+        if (GUI.Button(new Rect(left, y + 588f, columnWidth, 32f), "RESET CAMERA", CommanderUiTheme.Button))
         {
             ResetCameraBindings();
             bindingCapture = null;
         }
-        if (GUI.Button(new Rect(right, y + 492f, columnWidth, 32f), "RESET ACTIONS", CommanderUiTheme.Button))
+        if (GUI.Button(new Rect(right, y + 588f, columnWidth, 32f), "RESET ACTIONS", CommanderUiTheme.Button))
         {
             ResetActionBindings();
             bindingCapture = null;
@@ -757,6 +782,9 @@ internal sealed partial class CommanderOverlayUi
             "cycle_idle" => CommanderSettings.CycleIdleUnit,
             "map_box_select" => CommanderSettings.MapBoxSelect,
             "toggle_player_commander" => CommanderSettings.TogglePlayerCommander,
+            "rotate_left" => CommanderSettings.PlacementRotateLeft,
+            "rotate_right" => CommanderSettings.PlacementRotateRight,
+            "conform_ground" => CommanderSettings.PlacementConformGround,
             _ => new KeyboardShortcut(KeyCode.None)
         };
     }
@@ -787,6 +815,9 @@ internal sealed partial class CommanderOverlayUi
             case "cycle_idle": CommanderSettings.CycleIdleUnit = shortcut; break;
             case "map_box_select": CommanderSettings.MapBoxSelect = shortcut; break;
             case "toggle_player_commander": CommanderSettings.TogglePlayerCommander = shortcut; break;
+            case "rotate_left": CommanderSettings.PlacementRotateLeft = shortcut; break;
+            case "rotate_right": CommanderSettings.PlacementRotateRight = shortcut; break;
+            case "conform_ground": CommanderSettings.PlacementConformGround = shortcut; break;
         }
     }
 
@@ -820,6 +851,11 @@ internal sealed partial class CommanderOverlayUi
         // Unbound by default: handing your own faction to the AI is not something a stray key
         // press should do.
         CommanderSettings.TogglePlayerCommander = new KeyboardShortcut(KeyCode.None);
+        // The RTS convention, and the same keys the camera rises and descends on: the build ghost
+        // only borrows them while a placement is armed.
+        CommanderSettings.PlacementRotateLeft = new KeyboardShortcut(KeyCode.Q);
+        CommanderSettings.PlacementRotateRight = new KeyboardShortcut(KeyCode.E);
+        CommanderSettings.PlacementConformGround = new KeyboardShortcut(KeyCode.R);
     }
 
     private void ResetUiLayout()

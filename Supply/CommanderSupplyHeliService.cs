@@ -54,6 +54,11 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
     private static readonly FieldInfo? BayDoorOpenAmountField = AccessTools.Field(typeof(BayDoor), "openAmount");
     private static readonly FieldInfo? SwivelAircraftField = AccessTools.Field(typeof(SwivelDuctSystem), "aircraft");
 
+    // The cargo-run slot identity (InsertionFlightUnslotted, InsertionFlightMatches) moved to
+    // CommanderCargoFlightSlot on 2026-09-16: it is the contract between this service and the
+    // operations side rather than this service's own business, and it has to be self-checkable
+    // outside a running game, which nothing reachable from this class's type initializer is.
+
     private readonly List<CargoAircraftOption> aircraftOptions = new();
     private readonly List<AirbaseOption> airbaseOptions = new();
     private readonly Queue<QueuedCargoSpawn> queuedCargoSpawns = new();
@@ -243,6 +248,8 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
     public void TickPersistent()
     {
         BindPendingTerrainAutopilots();
+        RunPendingAirborneHandoffs();
+        SweepShields();
 
         if (pendingAircraftSpawn != null && Time.unscaledTime > pendingAircraftSpawn.ExpiresAt)
         {
@@ -292,11 +299,15 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
         aircraftOptions.Clear();
         airbaseOptions.Clear();
         assignedMissions.Clear();
+        shielded.Clear();
+        pendingAirborneHandoffs.Clear();
+        transportLaunchBlockedUntil.Clear();
         terrainClearanceAutopilots.Clear();
         assignedAutopilotAircraft.Clear();
         pendingTerrainAutopilotBindings.Clear();
         pendingSamCargoDeposits.Clear();
         loggedInsertionRoster.Clear();
+        ResetLandingZoneScout();
         pendingTargetSelection = null;
         pendingAircraftSpawn = null;
         uiVisible = false;
@@ -627,6 +638,8 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
         }
 
         bool any = false;
+        bool anyCapture = false;
+        bool anyAirDefence = false;
         Dictionary<string, float> depotPrices = CollectInsertionDepotPrices(hq);
         for (int i = 0; i < aircraftOptions.Count; i++)
         {
@@ -639,10 +652,12 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
                 {
                     WeaponMount mount = slot.Mounts[m];
                     if (WeaponChecker.MountAllowedHQ(mount, hq)
-                        && TryGetVehicleCargo(mount, depotPrices, out List<InsertionVehicle> cargo))
+                        && TryGetVehicleCargo(hq, mount, depotPrices, out List<InsertionVehicle> cargo))
                     {
                         for (int v = 0; v < cargo.Count; v++)
                         {
+                            anyCapture |= cargo[v].Role == CommanderPlatoonRole.Carrier;
+                            anyAirDefence |= cargo[v].Role == CommanderPlatoonRole.AirDefence;
                             // Name, platoon role, and the price an insertion would actually be
                             // charged — the depot price when the faction's own ground catalog lists
                             // the same vehicle by name (cargo variants often carry a placeholder
@@ -667,6 +682,25 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
             CommanderPlugin.Log.LogInfo(
                 $"Insertion cargo roster ({hq.faction.name}): no transport fields a mountable ground vehicle; pickets drive.");
         }
+
+        // The two roles the air-mobile buyer ever asks a lift for
+        // (CommanderOperationsRequisitions): something that can take ground, and something that can
+        // defend it. A side that has neither after the faction split cannot fly in a forward base
+        // or an air-mobile platoon at all, which is a broken mod rather than an asymmetry, so it is
+        // logged as a failure rather than as information.
+        if (anyCapture && anyAirDefence)
+        {
+            CommanderPlugin.Log.LogInfo(
+                $"Insertion cargo roster ({hq.faction.name}): air-landable roster can take ground and defend it.");
+            return;
+        }
+
+        string missing = !anyCapture && !anyAirDefence
+            ? "capture-capable or air-defence"
+            : anyCapture ? "air-defence" : "capture-capable";
+        CommanderPlugin.Log.LogError(
+            $"Faction roster self-check FAILED: {hq.faction.name} can air-land no {missing} vehicle; "
+                + "flown-in forward bases and air-mobile platoons will not work for it.");
     }
 
     internal bool RequestAutomaticCargoRun(GlobalPosition target)
@@ -1178,7 +1212,10 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
     {
         try
         {
-            return Instance != null && Instance.OverrideTransportTarget(state);
+            // The cheap test first (fix, 2026-09-15): with no cargo mission anywhere there is
+            // nothing to override, and the reflection read below runs on every physics tick of
+            // every transport helicopter in the world.
+            return Instance != null && Instance.assignedMissions.Count > 0 && Instance.OverrideTransportTarget(state);
         }
         catch (Exception exception)
         {
@@ -1316,6 +1353,7 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
     internal static void ForceAssignedVerticalTakeoff(SwivelDuctSystem swivelDuct)
     {
         if (Instance == null
+            || Instance.assignedMissions.Count == 0
             || SwivelAircraftField?.GetValue(swivelDuct) is not Aircraft aircraft
             || !Instance.assignedMissions.TryGetValue(aircraft, out CargoMission mission)
             || !mission.VerticalDepartureActive)
@@ -1397,12 +1435,54 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
         }
     }
 
+    /// <summary>
+    /// Whether this base will launch this aircraft for this HQ. The faction gate is here rather
+    /// than at each caller because every transport and cargo decision in the supply side — the
+    /// insertion chooser, its cheapest-flight estimate, the re-route, the surface-to-air runs and
+    /// the naval supply — already passes through this one test (Reuse rule 4, one definition,
+    /// eleven callers). Today the gate changes nothing, because both transports are on the SHARED
+    /// airframe list and always will be while the UH-90 Ibis carries no capture-capable cargo;
+    /// it is here so a later split cannot launch an aircraft the side does not own.
+    /// </summary>
     private static bool IsAvailableAirbase(Airbase? airbase, FactionHQ hq, AircraftDefinition definition)
     {
         return airbase != null
             && !airbase.disabled
             && airbase.CurrentHQ == hq
+            && CommanderFactionRoster.MayFlyAircraft(hq, definition)
             && airbase.CanSpawnAircraft(definition);
+    }
+
+    /// <summary>
+    /// Minutes a base's transports spawn airborne instead of out of a hangar after a transport's crew
+    /// ejected on its deck (overnight log 2026-09-15: the enemy's Sandrift Airbase wrecked 99
+    /// transports in a row): 10, the same figure as the insertion loss cooldown. Short enough that a
+    /// base whose deck clears — the stuck-on-deck refund runs every four minutes — is back to its
+    /// hangars the same match.
+    /// </summary>
+    internal const float TransportLaunchBlockMinutes = 10f;
+
+    /// <summary>Scaled <c>Time.time</c> until which each base's transports spawn airborne.</summary>
+    private static readonly Dictionary<Airbase, float> transportLaunchBlockedUntil = new();
+
+    /// <summary>The block rule, pure: closed strictly before <paramref name="until"/>, open on it —
+    /// the patient side of the boundary, the convention every other clock here uses.</summary>
+    internal static bool LaunchBlockActive(float now, float until)
+    {
+        return now < until;
+    }
+
+    private static bool TransportLaunchBlocked(Airbase airbase)
+    {
+        return transportLaunchBlockedUntil.TryGetValue(airbase, out float until) && LaunchBlockActive(Time.time, until);
+    }
+
+    private static void BlockTransportLaunches(Airbase? airbase)
+    {
+        if (airbase != null)
+        {
+            transportLaunchBlockedUntil[airbase] = Time.time + TransportLaunchBlockMinutes * 60f;
+        }
     }
 
     private static bool IsCompatibleAirbase(Airbase? airbase, FactionHQ hq, AircraftDefinition definition)

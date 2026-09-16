@@ -30,11 +30,21 @@ internal sealed partial class CommanderEconomyService
     private const int ShoreLanePointBudget = 32;
     private const int ShoreLanePointStride = 3;
 
-    /// <summary>Defensive structures a commander keeps once its economy is running.</summary>
+    /// <summary>Defensive structures a commander keeps AT EVERY BASE IT HOLDS once its economy is
+    /// running. Per base, not per faction (fix, 2026-09-14): the count used to be faction-wide, and
+    /// the emplacements the mission authors around a starting airfield already exceed it, so a
+    /// commander holding four bases was over target from the first second and no captured base was
+    /// ever hardened — the 2026-09-14 `Ground Control Duel Far` match logged `buildings 0` on all
+    /// fifty ladder lines of both sides.</summary>
     private const int EnemyDefenceBuildingTarget = 3;
 
     /// <summary>A base counts as having radar cover with a radar building this close to it.</summary>
     private const float RadarCoverageMeters = 3000f;
+
+    /// <summary>Reviews between two "rung 4 is saving for X" lines. The same cadence the commander's
+    /// own hold line uses, for the same reason: a standing shortfall should be visible without
+    /// filling the console.</summary>
+    private const int StructureWishReportEveryReviews = 8;
 
     /// <summary>Ring a base-adjacent structure is dropped into: near enough to be part of the base,
     /// far enough not to be on the apron.</summary>
@@ -54,6 +64,10 @@ internal sealed partial class CommanderEconomyService
     /// why the bank is capped at the next want's price (see <see cref="SpendEnemyStructures"/>).
     /// </summary>
     private readonly Dictionary<FactionHQ, float> structureSavings = new();
+
+    /// <summary>Reviews since this HQ's rung 4 last said what it is saving for, for the
+    /// <see cref="StructureWishReportEveryReviews"/> cadence.</summary>
+    private readonly Dictionary<FactionHQ, int> structureWishReviews = new();
 
     /// <summary>
     /// The next thing rung 4 wants and its price — ONE definition of "what to build next" (the
@@ -134,7 +148,51 @@ internal sealed partial class CommanderEconomyService
         // review — "the rung saves its allocation across reviews until the next structure is
         // affordable" (design Section 3).
         structureSavings[hq] = savings;
+        ReportStructureWish(hq, price, savings, allocation, spent);
         return spent;
+    }
+
+    /// <summary>
+    /// What rung 4 is saving for and what is stopping it, on the
+    /// <see cref="StructureWishReportEveryReviews"/> cadence and only while it is buying nothing
+    /// (diagnostic, 2026-09-14). The ladder line reports `buildings 0` for a rung that has no wish,
+    /// a rung whose bank is short and a rung whose site search keeps failing, and those three read
+    /// identically: the 2026-09-14 match showed fifty consecutive `buildings 0` lines on both sides
+    /// with nothing in the log to say which of the three it was.
+    /// </summary>
+    private void ReportStructureWish(FactionHQ hq, float price, float savings, float allocation, float spent)
+    {
+        if (spent > 0f)
+        {
+            structureWishReviews[hq] = 0;
+            return;
+        }
+
+        int quiet = (structureWishReviews.TryGetValue(hq, out int seen) ? seen : 0) + 1;
+        structureWishReviews[hq] = quiet;
+        if (quiet % StructureWishReportEveryReviews != 1)
+        {
+            return;
+        }
+
+        if (price <= 0f)
+        {
+            CommanderAiLog.Note(
+                hq,
+                $"builds nothing: its structure list is finished — every base has radar, the mine and "
+                    + $"factory targets are met and no upgrade is wanted ({quiet} quiet reviews).");
+            return;
+        }
+
+        string blocker = savings < price
+            ? $"the rung has banked {savings:0} of it"
+            : (hq.factionFunds < price
+                ? $"the rung has the {savings:0} but the balance is {hq.factionFunds:0}"
+                : "the bank and the balance both cover it, so the site search is what failed");
+        CommanderAiLog.Note(
+            hq,
+            $"saves for its next structure at {price:0}: {blocker} "
+                + $"(this review's allocation {allocation:0}, {quiet} quiet reviews).");
     }
 
     /// <summary>
@@ -252,6 +310,26 @@ internal sealed partial class CommanderEconomyService
             return 0f;
         }
 
+        // A held resource site with no mine comes before everything (user, 2026-09-14: "ensure the
+        // AI commander will actually prioritise building a gold mine once a resource site is
+        // captured"): the site is the only income the ground fight wins, the mine is the cheapest
+        // structure on the list, and on a map with sites the count target no longer applies — every
+        // held site gets one. The target still bounds the anywhere-in-reach mines of a map with none.
+        if (WantsSiteMine(hq))
+        {
+            return MineBuildCost;
+        }
+
+        // A base the commander holds but cannot USE comes next (design.md,
+        // fob-construction_20260914 Section 4): a captured airfield with no vehicle depot deploys
+        // nothing, and one with no vertical landing pad neither launches nor recovers a helicopter.
+        // Both were invisible to this list until now, which is why a captured base sat idle.
+        float facility = NextBaseFacilityCost(hq);
+        if (facility > 0f)
+        {
+            return facility;
+        }
+
         // A base that cannot see the attack coming outranks income. Without a radar building the
         // commander's tracking database holds only what its parked units happen to see, and the
         // whole defence posture reads that database.
@@ -262,19 +340,37 @@ internal sealed partial class CommanderEconomyService
         }
 
         bool duel = CommanderEnemyCommanderService.IsDuelMission;
-        if (service.CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget)
-            && CommanderStrategicPointService.Instance?.TryPickFreeReachableSite(hq, out GlobalPosition _) == true)
+        if (CommanderStrategicPointService.Instance?.HasResourceSites != true
+            && service.CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget))
         {
+            // A map with no resource sites keeps the old anywhere-in-reach mines, capped as before.
             return MineBuildCost;
         }
 
-        if (service.CountFactories(hq) < (duel ? DuelEnemyFactoryTarget : EnemyFactoryTarget))
+        // A forward operating base (design.md, fob-construction_20260914 Section 1) comes BEFORE
+        // the factories (user, 2026-09-14, "still no FOB!?"): with reach in force a FOB is what puts
+        // the next objectives on the board at all, while a factory only feeds a pool that already
+        // holds more than the reachable points can use. The 2026-09-14 match never asked about a
+        // FOB on the player's side because the rung was still buying factories.
+        float fob = CommanderOperationsService.WantsFob(hq) ? FobStructuresCost() : 0f;
+        if (fob > 0f)
+        {
+            return fob;
+        }
+
+        if (CommanderSettings.FactoriesEnabled
+            && service.CountFactories(hq) < (duel ? DuelEnemyFactoryTarget : EnemyFactoryTarget))
         {
             return FactoryBuildCost;
         }
 
+        // Per base, not per faction (fix, 2026-09-14): see EnemyDefenceBuildingTarget. A captured
+        // airfield is exactly the base that has no emplacements and exactly the base the enemy is
+        // coming back for.
         BuildingDefinition? defence = service.ResolveCategoryDefinition(BuildingType.DEF, preferDearest: false);
-        if (defence != null && CountBuildings(hq, BuildingType.DEF) < EnemyDefenceBuildingTarget)
+        if (defence != null
+            && TryGetBaseShortOfBuildings(
+                hq, BuildingType.DEF, BaseBuildingCoverageMeters, EnemyDefenceBuildingTarget, out _))
         {
             return GetStructureCost(defence);
         }
@@ -290,19 +386,35 @@ internal sealed partial class CommanderEconomyService
     private bool TryBuildEnemyEconomy(FactionHQ hq)
     {
         // Same order as GetEnemyBuildReserve, because that method is what saved up for this one.
+        if (WantsSiteMine(hq) && TryBuildEnemyMine(hq))
+        {
+            return true;
+        }
+
+        if (TryBuildBaseFacility(hq))
+        {
+            return true;
+        }
+
         if (TryBuildEnemyRadar(hq))
         {
             return true;
         }
 
         bool duel = CommanderEnemyCommanderService.IsDuelMission;
-        if (CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget)
-            && CommanderStrategicPointService.Instance?.TryPickFreeReachableSite(hq, out GlobalPosition _) == true)
+        if (CommanderStrategicPointService.Instance?.HasResourceSites != true
+            && CountMines(hq) < (duel ? DuelEnemyMineTarget : EnemyMineTarget))
         {
             return TryBuildEnemyMine(hq);
         }
 
-        if (CountFactories(hq) < (duel ? DuelEnemyFactoryTarget : EnemyFactoryTarget))
+        if (CommanderOperationsService.TryOrderFob(hq))
+        {
+            return true;
+        }
+
+        if (CommanderSettings.FactoriesEnabled
+            && CountFactories(hq) < (duel ? DuelEnemyFactoryTarget : EnemyFactoryTarget))
         {
             return TryBuildEnemyFactory(hq);
         }
@@ -313,6 +425,14 @@ internal sealed partial class CommanderEconomyService
         }
 
         return TryBuildEnemyNavalDock(hq);
+    }
+
+    /// <summary>Whether this commander holds a resource site with no working mine that it can reach
+    /// — the first wish of the building rung on any map that has sites.</summary>
+    private static bool WantsSiteMine(FactionHQ hq)
+    {
+        CommanderStrategicPointService? points = CommanderStrategicPointService.Instance;
+        return points != null && points.HasResourceSites && points.TryPickFreeReachableSite(hq, out GlobalPosition _);
     }
 
     /// <summary>
@@ -336,24 +456,31 @@ internal sealed partial class CommanderEconomyService
         return true;
     }
 
-    /// <summary>Hardens a base with whatever the encyclopedia files under DEFENCE.</summary>
+    /// <summary>
+    /// Hardens the first base this commander holds that is short of its own
+    /// <see cref="EnemyDefenceBuildingTarget"/> emplacements, with whatever the encyclopedia files
+    /// under DEFENCE. Sited beside THAT base rather than wherever the shared dart lands (fix,
+    /// 2026-09-14, same shape as <see cref="TryBuildEnemyRadar"/>): the thing being answered is
+    /// "this base is undefended", and a fourth pillbox at the home field answers nothing.
+    /// </summary>
     private bool TryBuildEnemyDefence(FactionHQ hq)
     {
         BuildingDefinition? defence = ResolveCategoryDefinition(BuildingType.DEF, preferDearest: false);
-        if (defence == null || CountBuildings(hq, BuildingType.DEF) >= EnemyDefenceBuildingTarget)
-        {
-            return false;
-        }
-
-        GlobalPosition site = default;
-        if (!TryFindEnemyBuildSite(hq, defence, ref site)
+        if (defence == null
+            || !TryGetBaseShortOfBuildings(
+                hq, BuildingType.DEF, BaseBuildingCoverageMeters, EnemyDefenceBuildingTarget,
+                out GlobalPosition anchor)
+            || !TryFindSiteNear(hq, defence, anchor, out GlobalPosition site)
             || SpawnBuilding(hq, site, defence, GetStructureLabel(defence), randomRotation: true) == null)
         {
             return false;
         }
 
         hq.AddFunds(-GetStructureCost(defence));
-        CommanderAiLog.Note(hq, $"built a {GetStructureLabel(defence)} to defend its base.");
+        CommanderAiLog.Note(
+            hq,
+            $"built a {GetStructureLabel(defence)} at a base short of its "
+                + $"{EnemyDefenceBuildingTarget} defences.");
         return true;
     }
 
@@ -401,23 +528,43 @@ internal sealed partial class CommanderEconomyService
         return best;
     }
 
-    /// <summary>The first base this faction holds with no building of that category near it.</summary>
+    /// <summary>The first base this faction holds with no building of that category near it — the
+    /// one-building case of <see cref="TryGetBaseShortOfBuildings"/> (Reuse rule 5: the defence
+    /// target was the second per-base count, so the first one was generalised rather than
+    /// forked).</summary>
     private static bool TryGetUncoveredBase(
         FactionHQ hq,
         BuildingType type,
         float coverage,
         out GlobalPosition center)
     {
+        return TryGetBaseShortOfBuildings(hq, type, coverage, 1, out center);
+    }
+
+    /// <summary>
+    /// The first base this faction holds with fewer than <paramref name="target"/> buildings of that
+    /// category within <paramref name="coverage"/> of its centre, and that base's centre. THE
+    /// per-base structure test: the radar wish and the defence wish read the same answer, so the
+    /// price the ladder banks toward and the base the build actually goes to can never disagree.
+    /// </summary>
+    private static bool TryGetBaseShortOfBuildings(
+        FactionHQ hq,
+        BuildingType type,
+        float coverage,
+        int target,
+        out GlobalPosition center)
+    {
         center = default;
         foreach (Airbase airbase in hq.GetAirbases())
         {
-            if (airbase == null || airbase.disabled || airbase.center == null)
+            // A ship's deck (AttachedAirbase) is never a site for radar, defences or anything else.
+            if (airbase == null || airbase.disabled || airbase.center == null || CommanderGameAccess.IsShipAirbase(airbase))
             {
                 continue;
             }
 
             GlobalPosition candidate = airbase.center.GlobalPosition();
-            if (!HasBuildingNear(hq, type, candidate, coverage))
+            if (BuildingsStillWantedAtBase(CountBuildingsNear(hq, type, candidate, coverage), target) > 0)
             {
                 center = candidate;
                 return true;
@@ -427,31 +574,22 @@ internal sealed partial class CommanderEconomyService
         return false;
     }
 
-    private static bool HasBuildingNear(FactionHQ hq, BuildingType type, GlobalPosition position, float radius)
+    /// <summary>
+    /// How many more buildings of a category a base still wants, given how many stand near THAT
+    /// base. Pure, for the self-check. The argument this deliberately does not take is the
+    /// faction-wide count: measuring the target across the whole faction is the 2026-09-14 bug —
+    /// the emplacements authored around a starting airfield covered every base the commander would
+    /// ever capture, so no captured base was ever hardened.
+    /// </summary>
+    internal static int BuildingsStillWantedAtBase(int nearThisBase, int target)
     {
-        if (hq.factionUnits == null)
-        {
-            return false;
-        }
-
-        foreach (PersistentID id in hq.factionUnits)
-        {
-            if (id.TryGetUnit(out Unit unit)
-                && unit != null
-                && !unit.disabled
-                && unit is Building
-                && unit.definition is BuildingDefinition definition
-                && definition.buildingType == type
-                && FastMath.InRange(unit.transform.GlobalPosition(), position, radius))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return Mathf.Max(0, target - Mathf.Max(0, nearThisBase));
     }
 
-    private static int CountBuildings(FactionHQ hq, BuildingType type)
+    /// <summary>How many buildings of that category this faction owns within
+    /// <paramref name="radius"/> of a point. One definition for "is there one" and "are there
+    /// three" (Reuse rule 4) — <see cref="HasBuildingNear"/> is the &gt; 0 case.</summary>
+    private static int CountBuildingsNear(FactionHQ hq, BuildingType type, GlobalPosition position, float radius)
     {
         if (hq.factionUnits == null)
         {
@@ -466,13 +604,19 @@ internal sealed partial class CommanderEconomyService
                 && !unit.disabled
                 && unit is Building
                 && unit.definition is BuildingDefinition definition
-                && definition.buildingType == type)
+                && definition.buildingType == type
+                && FastMath.InRange(unit.transform.GlobalPosition(), position, radius))
             {
                 count++;
             }
         }
 
         return count;
+    }
+
+    private static bool HasBuildingNear(FactionHQ hq, BuildingType type, GlobalPosition position, float radius)
+    {
+        return CountBuildingsNear(hq, type, position, radius) > 0;
     }
 
     /// <summary>A legal site on a ring around one point, through the same shared rule as every
@@ -746,7 +890,8 @@ internal sealed partial class CommanderEconomyService
         float best = reach;
         foreach (Airbase airbase in hq.GetAirbases())
         {
-            if (airbase == null || airbase.disabled || airbase.center == null)
+            // A ship's deck (AttachedAirbase) is never a site for radar, defences or anything else.
+            if (airbase == null || airbase.disabled || airbase.center == null || CommanderGameAccess.IsShipAirbase(airbase))
             {
                 continue;
             }

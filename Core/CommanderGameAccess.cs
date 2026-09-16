@@ -13,6 +13,17 @@ internal static class CommanderGameAccess
     private static readonly FieldInfo? OnFollowingUnitSetField = AccessTools.Field(typeof(CameraStateManager), "onFollowingUnitSet");
     private static readonly FieldInfo? VehicleDepotSpawnTransformField = AccessTools.Field(typeof(VehicleDepot), "spawnTransform");
     private static readonly List<VehicleDefinition> RepairVehicleScratch = new();
+    private static readonly Dictionary<string, VehicleDefinition> SharedVehicleCache = new();
+    private static readonly Dictionary<string, int> SharedVehicleMisses = new();
+
+    /// <summary>
+    /// How many times a shared vehicle name is looked up before the mod stops looking: 8. The scan
+    /// behind the lookup walks every managed object in the process and the depot window asks on
+    /// every frame it is open, so a name that is never going to resolve — a game build without that
+    /// asset — must not cost a scan a frame forever. Eight is enough to cover assets that are still
+    /// streaming in at mission load, and small enough that a permanent miss is paid for once.
+    /// </summary>
+    private const int SharedVehicleLookupAttempts = 8;
 
     internal static FactionHQ? GetLocalHq()
     {
@@ -494,6 +505,18 @@ internal static class CommanderGameAccess
             && !CommanderSamSiteService.IsReservedConstructionJacknife(unit);
     }
 
+    /// <summary>
+    /// Whether an airbase is a ship's deck rather than ground (2026-09-14/15). Two reads, because
+    /// the game's own <c>AttachedAirbase</c> flag is set by <c>SetupAttachedAirbase</c> and was
+    /// false for a destroyer in the 2026-09-15 match while the mod built a depot beside it: a ship's
+    /// airbase is a component on the ship itself, so the <see cref="Ship"/> on the same object is
+    /// the surer sign.
+    /// </summary>
+    internal static bool IsShipAirbase(Airbase? airbase)
+    {
+        return airbase != null && (airbase.AttachedAirbase || airbase.GetComponent<Ship>() != null || airbase.GetComponentInParent<Ship>() != null);
+    }
+
     internal static bool IsFriendlyDepot(VehicleDepot? depot)
     {
         return IsFriendlyDepot(depot, GetLocalHq());
@@ -764,8 +787,79 @@ internal static class CommanderGameAccess
         CollectFactionVehicleDefinitions(buffer, GetSupplyHq());
     }
 
-    /// <summary>The ground units <paramref name="hq"/>'s faction fields, from its convoy groups.</summary>
+    /// <summary>
+    /// The ground units <paramref name="hq"/>'s faction may BUY — its own convoy groups, plus the
+    /// handful of types <see cref="CommanderFactionRoster.SharedVehicles"/> deliberately gives both
+    /// sides. The shared half exists because no stock faction's convoy groups contain a repair
+    /// vehicle at all, so before it this returned nothing for the repair lookup on either side.
+    /// The whole-game scan is walked once and filtered by the one fielding predicate, so this
+    /// collector and every other buy path can never disagree about what a faction may field.
+    /// </summary>
     internal static void CollectFactionVehicleDefinitions(List<VehicleDefinition> buffer, FactionHQ? hq)
+    {
+        CollectConvoyGroupVehicles(buffer, hq);
+        if (hq?.faction == null)
+        {
+            return;
+        }
+
+        CommanderRosterEntry[] shared = CommanderFactionRoster.SharedVehicles;
+        for (int i = 0; i < shared.Length; i++)
+        {
+            VehicleDefinition? definition = ResolveSharedVehicle(shared[i].Key);
+            if (definition != null
+                && CommanderFactionRoster.MayFieldVehicle(hq, definition, CommanderFieldingRoute.Depot)
+                && !buffer.Contains(definition))
+            {
+                buffer.Add(definition);
+            }
+        }
+    }
+
+    /// <summary>
+    /// One shared vehicle definition by its unit name, resolved from the loaded assets and then
+    /// remembered. Only the two or three names on the shared list are ever looked up, and only
+    /// until each has been found once — the underlying scan walks every managed object in the
+    /// process, which is far too slow to repeat from an OnGUI pass, and the depot window's roster
+    /// filter runs on every frame it is open. Deliberately NOT a permanent cache of the whole
+    /// scan: a scan taken before the mission's assets finished loading would be short, and a
+    /// permanent cache of a short answer would never correct itself, where an unresolved name here
+    /// simply tries again on the next call.
+    /// </summary>
+    private static VehicleDefinition? ResolveSharedVehicle(string unitName)
+    {
+        if (SharedVehicleCache.TryGetValue(unitName, out VehicleDefinition cached) && cached != null)
+        {
+            return cached;
+        }
+
+        SharedVehicleMisses.TryGetValue(unitName, out int misses);
+        if (misses >= SharedVehicleLookupAttempts)
+        {
+            return null;
+        }
+
+        SharedVehicleMisses[unitName] = misses + 1;
+        VehicleDefinition[] allDefinitions = Resources.FindObjectsOfTypeAll<VehicleDefinition>();
+        for (int i = 0; i < allDefinitions.Length; i++)
+        {
+            VehicleDefinition definition = allDefinitions[i];
+            if (IsSpawnableVehicleDefinition(definition)
+                && string.Equals(definition.unitName, unitName, System.StringComparison.OrdinalIgnoreCase))
+            {
+                SharedVehicleCache[unitName] = definition;
+                return definition;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The raw convoy-group walk — the game's own answer to "what ground units does this
+    /// faction field", with nothing of the mod's added. Kept separate from
+    /// <see cref="CollectFactionVehicleDefinitions"/> so the fielding predicate can ask it without
+    /// asking itself.</summary>
+    internal static void CollectConvoyGroupVehicles(List<VehicleDefinition> buffer, FactionHQ? hq)
     {
         buffer.Clear();
         if (hq?.faction == null)
@@ -815,6 +909,53 @@ internal static class CommanderGameAccess
         }
 
         return null;
+    }
+
+    private static readonly FieldInfo? DamageCreditField = AccessTools.Field(typeof(Unit), "damageCredit");
+
+    /// <summary>
+    /// Who the game credits with damaging <paramref name="unit"/>, for a loss line: the game keeps a
+    /// per-unit ledger of damage by attacker (<c>Unit.damageCredit</c>, filled by
+    /// <c>RecordDamage</c> for every hit with a valid dealer) and impact damage — the ground, a
+    /// tree, the deck — carries no dealer and never reaches it. So a lost airframe with an empty
+    /// ledger crashed, and one with a ledger was shot at. Reads
+    /// "after taking fire from Hexhound SAM (Primeva)" or "with no damage credited to any attacker
+    /// (a crash, or the ground)"; empty when the unit is already gone. One definition for the wing's
+    /// loss line and the FOB's (Reuse rule 4; diagnostics, 2026-09-16: construction flights were
+    /// "lost … at 0 m" and nothing said whether they were shot down or flew into a hill).
+    /// </summary>
+    internal static string DescribeDamageCredit(Unit? unit)
+    {
+        if (unit == null || DamageCreditField == null)
+        {
+            return string.Empty;
+        }
+
+        if (DamageCreditField.GetValue(unit) is not Dictionary<PersistentID, float> credit || credit.Count == 0)
+        {
+            return "with no damage credited to any attacker (a crash, or the ground)";
+        }
+
+        PersistentID topId = default;
+        float topDamage = -1f;
+        int attackers = 0;
+        foreach (KeyValuePair<PersistentID, float> entry in credit)
+        {
+            attackers++;
+            if (entry.Value > topDamage)
+            {
+                topDamage = entry.Value;
+                topId = entry.Key;
+            }
+        }
+
+        string who = UnitRegistry.TryGetUnit(topId, out Unit attacker) && attacker != null
+            ? GetUnitLabel(attacker)
+                + (attacker.NetworkHQ != null ? $" ({attacker.NetworkHQ.faction?.name ?? "unknown faction"})" : string.Empty)
+            : "an attacker no longer in the world";
+        return attackers > 1
+            ? $"after taking fire from {attackers} attackers, most from {who}"
+            : $"after taking fire from {who}";
     }
 
     internal static string GetUnitLabel(Unit? unit)

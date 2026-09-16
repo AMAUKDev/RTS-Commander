@@ -261,6 +261,7 @@ internal sealed partial class CommanderEnemyCommanderService
             if (airbase != null
                 && !airbase.disabled
                 && airbase.center != null
+                && !CommanderGameAccess.IsShipAirbase(airbase)
                 && FastMath.InRange(position, airbase.center.GlobalPosition(), radius))
             {
                 return true;
@@ -279,7 +280,7 @@ internal sealed partial class CommanderEnemyCommanderService
         int bases = 0;
         foreach (Airbase airbase in hq.GetAirbases())
         {
-            if (airbase != null && !airbase.disabled && airbase.center != null)
+            if (airbase != null && !airbase.disabled && airbase.center != null && !CommanderGameAccess.IsShipAirbase(airbase))
             {
                 bases++;
             }
@@ -294,7 +295,7 @@ internal sealed partial class CommanderEnemyCommanderService
         state.DefencePosts.Clear();
         foreach (Airbase airbase in hq.GetAirbases())
         {
-            if (airbase == null || airbase.disabled || airbase.center == null)
+            if (airbase == null || airbase.disabled || airbase.center == null || CommanderGameAccess.IsShipAirbase(airbase))
             {
                 continue;
             }
@@ -304,6 +305,7 @@ internal sealed partial class CommanderEnemyCommanderService
                 airbase.SavedAirbase?.CaptureRange ?? 0f,
                 DefenceRingMinMeters,
                 DefenceRingMaxMeters);
+            int movedOffAirfield = 0;
             for (int i = 0; i < DefencePostsPerBase; i++)
             {
                 float angle = i * (Mathf.PI * 2f / DefencePostsPerBase);
@@ -311,12 +313,27 @@ internal sealed partial class CommanderEnemyCommanderService
                     center.x + Mathf.Cos(angle) * ring,
                     center.y,
                     center.z + Mathf.Sin(angle) * ring));
+                // Off the runways and taxiways (fix, 2026-09-15; see BuildHoldRing): a home guard
+                // parked on the strip is what a taxiing fighter runs into.
+                post = CommanderBuildPreview.OffAirfieldPost(center, post, out bool moved);
+                if (moved)
+                {
+                    movedOffAirfield++;
+                }
+
                 // SnapToTerrain returns the seabed over water, so this is also what keeps a coastal
                 // base's ring off the sea floor.
                 if (!CommanderGameAccess.IsBelowSeaLevel(post))
                 {
                     state.DefencePosts.Add(post);
                 }
+            }
+
+            if (movedOffAirfield > 0)
+            {
+                CommanderAiLog.Note(
+                    hq,
+                    $"home guard at {CommanderCaptureService.GetAirbaseLabel(airbase)}: {movedOffAirfield} of {DefencePostsPerBase} posts moved off a runway or taxiway.");
             }
         }
     }

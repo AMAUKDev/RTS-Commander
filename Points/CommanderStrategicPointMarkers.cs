@@ -105,13 +105,24 @@ internal sealed partial class CommanderStrategicPointService
         if (point.Kind == StrategicPointKind.Site)
         {
             bool free = point.Mine == null || point.Mine.disabled;
-            if (free)
+            if (!free)
             {
-                return "free";
+                int level = CommanderEconomyService.Instance?.GetMineLevel(point.Mine!) ?? 1;
+                return $"mine L{level}";
             }
 
-            int level = CommanderEconomyService.Instance?.GetMineLevel(point.Mine!) ?? 1;
-            return $"mine L{level}";
+            // A free site is now taken and held like any other point (user decision 2026-09-14), so
+            // its marker has to show the garrison taking it. Saying only "free" is what made the
+            // user's own test — two vehicles parked on a site — look like nothing was happening.
+            if (owner != null)
+            {
+                return "held, no mine";
+            }
+
+            int siteGarrison = localHq != null ? point.PresentCount(localHq, hqOrder) : 0;
+            return point.Hold.Contested
+                ? $"free, contested {siteGarrison}/{CommanderSettings.PointsMinGarrison}"
+                : $"free {siteGarrison}/{CommanderSettings.PointsMinGarrison}";
         }
 
         int minGarrison = CommanderSettings.PointsMinGarrison;

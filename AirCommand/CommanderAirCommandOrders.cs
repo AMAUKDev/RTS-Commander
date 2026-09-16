@@ -83,8 +83,18 @@ internal sealed partial class CommanderAirCommandService
     /// claim off anything already spoken for.
     /// </para>
     /// </summary>
+    /// <param name="targetAltitude">The station height the mission is flown at, in metres above
+    /// ground, or 0 for the game's own standard height. Only the modes that support one read it
+    /// (<see cref="SupportsTargetAltitude(AirCommandMode)"/>); everything else is given 0 whatever is
+    /// passed, so a CAS mission can never be handed a patrol altitude. It is what gives the
+    /// commander's patrols their station bands (design.md, strike-packages_20260915 Section 4).</param>
     internal bool TryTaskAiAircraft(
-        Aircraft? aircraft, AirCommandMode mode, GlobalPosition center, float radius, bool retaskExisting = false)
+        Aircraft? aircraft,
+        AirCommandMode mode,
+        GlobalPosition center,
+        float radius,
+        bool retaskExisting = false,
+        float targetAltitude = 0f)
     {
         FactionHQ? hq = aircraft?.NetworkHQ;
         if (aircraft == null
@@ -98,6 +108,7 @@ internal sealed partial class CommanderAirCommandService
             return false;
         }
 
+        float altitude = SupportsTargetAltitude(mode) ? Mathf.Max(0f, targetAltitude) : 0f;
         if (missions.TryGetValue(aircraft, out AirMission? existing))
         {
             if (!retaskExisting)
@@ -108,10 +119,18 @@ internal sealed partial class CommanderAirCommandService
             existing.Mode = mode;
             existing.AreaCenter = center;
             existing.Radius = radius;
+            existing.TargetAltitude = altitude;
+            // A new task is a new posture (review, 2026-09-16): the fallback stamps belong to the
+            // sortie that set them, and a fighter re-tasked through here — released to another
+            // sortie, to the home patrol, or to the player — otherwise kept holding 15 km from a
+            // fight it was no longer part of. Whoever re-stamps does so AFTER this call
+            // (TaskOntoSortie, BindCap, BindCas), so a falling-back sortie loses nothing.
+            existing.HoldOverride = null;
+            existing.SelfDefenceOnly = false;
             return true;
         }
 
-        missions[aircraft] = new AirMission(hq, mode, center, radius, 0f, false, false, false, 0f);
+        missions[aircraft] = new AirMission(hq, mode, center, radius, altitude, false, false, false, 0f);
         return true;
     }
 

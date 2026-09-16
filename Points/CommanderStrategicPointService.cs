@@ -90,6 +90,14 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
 
         if (discovery != DiscoveryState.Done)
         {
+            // On a hot-reload run the snapshot store has not had its turn yet this frame (it is
+            // registered after this service), so discovery holds off briefly rather than re-rolling
+            // a map the restore is about to hand back. See CommanderStrategicPointPersist.cs.
+            if (IsWaitingForRestore())
+            {
+                return;
+            }
+
             StepDiscovery();
             return;
         }
@@ -131,6 +139,7 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
         discoveryRetryAt = 0f;
         nextHoldAt = CommanderScheduler.Stagger("points.hold", HoldCheckSeconds);
         FocusedPoint = null;
+        ResetPersistState();
         // The road-network pass (outposts, crossroads, roadside points) keeps state across several
         // TickPersistent calls the way the fill/hilltop passes already do, but unlike those it has
         // its own sub-state machine — reset it explicitly so a new mission does not resume the last
@@ -183,15 +192,11 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
         for (int p = 0; p < points.Count; p++)
         {
             CommanderStrategicPoint point = points[p];
-            if (point.Kind == StrategicPointKind.Site)
+            if (point.Kind == StrategicPointKind.Site && point.Mine != null && point.Mine.disabled)
             {
-                if (point.Mine != null && point.Mine.disabled)
-                {
-                    // Design SS2: "Mine destroyed -> site free."
-                    point.Mine = null;
-                }
-
-                continue;
+                // Design SS2: "Mine destroyed -> site free." The hold machine below then decides
+                // who holds the ground it stood on (user decision 2026-09-14).
+                point.Mine = null;
             }
 
             if (!StrategicPointKinds.IsControlPoint(point.Kind))
@@ -254,7 +259,7 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
                 && unit != null
                 && unit is GroundVehicle
                 && !unit.disabled
-                && FastMath.InRange(unit.transform.GlobalPosition(), point.Position, point.Radius))
+                && FastMath.InRange(unit.transform.GlobalPosition(), point.Position, point.CaptureRadius))
             {
                 count++;
             }
@@ -512,7 +517,48 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
     /// site", called from both the ghost (<c>CommanderBuildPreview.Tick</c>/<c>Evaluate</c>) and the
     /// spawn path (<c>CommanderEconomyService.SpawnMine</c>).
     /// </summary>
-    internal bool TrySnapMineSite(GlobalPosition target, out GlobalPosition site)
+    /// <summary>
+    /// Whether one faction may put a mine on a resource site (user decision 2026-09-14). Two
+    /// conditions, both necessary: no live mine already stands there, and the would-be builder is
+    /// the faction that HOLDS the site by presence. Before this, reach alone was the rule, so both
+    /// sides could build on ground neither had taken. Pure, for the self-check; the caller resolves
+    /// who the holder is.
+    /// <para>
+    /// A caller with no faction at all — discovery's "is this patch of ground clear" probe — is
+    /// asking about the ground, not about a build, and is answered on the mine alone. That is the
+    /// same <c>hq == null</c> convention <c>CommanderBuildPreview.Evaluate</c> already uses.
+    /// </para>
+    /// </summary>
+    internal static bool SiteMinePermitted(bool mineStanding, bool holderIsBuilder)
+    {
+        return !mineStanding && holderIsBuilder;
+    }
+
+    /// <summary>
+    /// Who owns a resource site, as HQ-order indices (user decision 2026-09-14): the mine's owner
+    /// while a live mine stands on it, the presence holder once it does not, and -1 for neither.
+    /// The order matters — a site with an enemy mine on it stays enemy-owned however the ground
+    /// around it is garrisoned, because the building is still standing and still paying. Pure, for
+    /// the self-check; <see cref="CommanderStrategicPoint.GetOwner"/> is the live reading of the
+    /// same rule.
+    /// </summary>
+    internal static int SiteOwnerIndex(bool mineStanding, int mineOwnerIndex, int holdOwnerIndex)
+    {
+        return mineStanding ? mineOwnerIndex : holdOwnerIndex;
+    }
+
+    /// <summary>Whether <paramref name="hq"/> holds <paramref name="point"/> outright right now —
+    /// it owns it and nobody is contesting it. The live half of
+    /// <see cref="SiteMinePermitted"/>'s second condition; a null <paramref name="hq"/> is the
+    /// ground-clearance probe and passes.</summary>
+    internal bool HoldsOutright(CommanderStrategicPoint point, FactionHQ? hq)
+    {
+        return hq == null || (Pays(point.Hold) && ReferenceEquals(HqAt(point.Hold.OwnerIndex), hq));
+    }
+
+    /// <param name="builder">The faction about to build, so the site rule can refuse ground it does
+    /// not hold (user decision 2026-09-14). Null for the ground-clearance probe.</param>
+    internal bool TrySnapMineSite(GlobalPosition target, out GlobalPosition site, FactionHQ? builder = null)
     {
         siteScratch.Clear();
         siteScratchDistances.Clear();
@@ -527,7 +573,8 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
 
             siteScratch.Add(point);
             siteScratchDistances.Add(HorizontalDistance(target, point.Position));
-            siteScratchFree.Add(point.Mine == null || point.Mine.disabled);
+            siteScratchFree.Add(SiteMinePermitted(
+                point.Mine != null && !point.Mine.disabled, HoldsOutright(point, builder)));
         }
 
         int index = NearestFreeSiteIndex(siteScratchDistances, siteScratchFree, CommanderSettings.PointsMineSnapMeters);
@@ -539,6 +586,25 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
 
         site = siteScratch[index].Position;
         return true;
+    }
+
+    /// <summary>The resource site standing at (within a metre of) <paramref name="site"/> — the
+    /// position <see cref="TrySnapMineSite"/> handed out — or null. The same one-metre match
+    /// <see cref="AttachMine"/> makes (Reuse rule 4).</summary>
+    internal bool TryGetPointAt(GlobalPosition site, out CommanderStrategicPoint? point)
+    {
+        for (int i = 0; i < points.Count; i++)
+        {
+            CommanderStrategicPoint candidate = points[i];
+            if (candidate.Kind == StrategicPointKind.Site && HorizontalDistance(candidate.Position, site) <= 1f)
+            {
+                point = candidate;
+                return true;
+            }
+        }
+
+        point = null;
+        return false;
     }
 
     /// <summary>Marks the site at (within a metre of) <paramref name="site"/> as occupied by
@@ -636,7 +702,11 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
         for (int i = 0; i < points.Count; i++)
         {
             CommanderStrategicPoint candidate = points[i];
-            if (candidate.Kind != StrategicPointKind.Site || (candidate.Mine != null && !candidate.Mine.disabled))
+            if (candidate.Kind != StrategicPointKind.Site
+                // Only the faction holding the site may mine it (user decision 2026-09-14) — the
+                // same rule the player's ghost is held to, read through one predicate.
+                || !SiteMinePermitted(
+                    candidate.Mine != null && !candidate.Mine.disabled, HoldsOutright(candidate, hq)))
             {
                 continue;
             }
@@ -759,7 +829,7 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
                 continue;
             }
 
-            hq.AddFunds(GetPointIncomePerMinute(hq, out _) * share);
+            hq.AddFunds(GetPointIncomePerMinute(hq, out _) * share * CommanderEconomyService.IncomeHandicap(hq));
         }
     }
 
@@ -829,6 +899,9 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
         CheckRoadJunctions(failures);
         CheckRoadsideEmission(failures);
         CheckNearestRoadDistance(failures);
+        CheckLevelness(failures);
+        CheckPointValidity(failures);
+        CheckPersistRoundTrip(failures);
 
         if (failures.Count == 0)
         {
@@ -1057,18 +1130,87 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
             true);
     }
 
-    /// <summary>Every control-point kind reports true, a site and a base report false — the
-    /// truth table <see cref="StrategicPointKinds.IsControlPoint"/> replaces the scattered
-    /// <c>!= Village &amp;&amp; != Hilltop</c> checks with.</summary>
+    /// <summary>Every control-point kind reports true and only a base reports false — the truth
+    /// table <see cref="StrategicPointKinds.IsControlPoint"/> replaces the scattered
+    /// <c>!= Village &amp;&amp; != Hilltop</c> checks with. The resource site joined the group on
+    /// 2026-09-14, which is the whole of "two vehicles parked on a site now take it"; the rules that
+    /// stay special to a site — it pays nothing itself, and its holder is who may mine it — are
+    /// checked below.</summary>
     private static void CheckControlPointKinds(List<string> failures)
     {
-        Expect(failures, "a site is not a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Site), false);
+        Expect(
+            failures,
+            "a resource site is a control point held by presence (user decision 2026-09-14)",
+            StrategicPointKinds.IsControlPoint(StrategicPointKind.Site),
+            true);
         Expect(failures, "a village is a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Village), true);
         Expect(failures, "a hilltop is a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Hilltop), true);
         Expect(failures, "an outpost is a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Outpost), true);
         Expect(failures, "a crossroads is a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Crossroads), true);
         Expect(failures, "a roadside point is a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Roadside), true);
         Expect(failures, "a base is not a control point", StrategicPointKinds.IsControlPoint(StrategicPointKind.Base), false);
+
+        CheckSiteOwnership(failures);
+    }
+
+    /// <summary>
+    /// What is still special about a resource site once it is held by presence (user decision
+    /// 2026-09-14). Three rules, each of which the change could have broken silently: a held site
+    /// pays nothing on its own, ownership follows the mine while one stands and the garrison once it
+    /// does not, and only the holder may build there.
+    /// </summary>
+    private static void CheckSiteOwnership(List<string> failures)
+    {
+        PointIncomeRates rates = new(30f, 10f, 5f, 5f, 10f, 3f);
+        Expect(
+            failures,
+            "a held site with no mine on it still pays nothing; the mine is what pays",
+            IncomePerMinute(StrategicPointKind.Site, rates),
+            0f);
+
+        // Ownership: the mine's owner while one stands, the presence holder once it is gone.
+        Expect(
+            failures,
+            "a site under an enemy mine stays the mine owner's however the ground is garrisoned",
+            SiteOwnerIndex(mineStanding: true, mineOwnerIndex: 1, holdOwnerIndex: 0),
+            1);
+        Expect(
+            failures,
+            "a site whose mine is destroyed passes to whoever holds the ground",
+            SiteOwnerIndex(mineStanding: false, mineOwnerIndex: 1, holdOwnerIndex: 0),
+            0);
+        Expect(
+            failures,
+            "a free site nobody holds is neutral",
+            SiteOwnerIndex(mineStanding: false, mineOwnerIndex: -1, holdOwnerIndex: -1),
+            -1);
+        Expect(
+            failures,
+            "a site whose mine is gone and whose ground is untaken is neutral, not still the mine owner's",
+            SiteOwnerIndex(mineStanding: false, mineOwnerIndex: 1, holdOwnerIndex: -1),
+            -1);
+
+        // Build permission follows the holder.
+        Expect(
+            failures,
+            "the faction holding a free site may mine it",
+            SiteMinePermitted(mineStanding: false, holderIsBuilder: true),
+            true);
+        Expect(
+            failures,
+            "a faction that has not taken a free site may not mine it (the rule reach alone used to allow)",
+            SiteMinePermitted(mineStanding: false, holderIsBuilder: false),
+            false);
+        Expect(
+            failures,
+            "a site already carrying a live mine is mined by nobody, holder included",
+            SiteMinePermitted(mineStanding: true, holderIsBuilder: true),
+            false);
+        Expect(
+            failures,
+            "an enemy mine blocks the site for everyone until it is destroyed",
+            SiteMinePermitted(mineStanding: true, holderIsBuilder: false),
+            false);
     }
 
     /// <summary>
@@ -1218,6 +1360,14 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
         if (actual != expected)
         {
             failures.Add($"{name}: expected {expected}, got {actual}");
+        }
+    }
+
+    private static void Expect(List<string> failures, string name, string actual, string expected)
+    {
+        if (!string.Equals(actual, expected, System.StringComparison.Ordinal))
+        {
+            failures.Add($"{name}: expected '{expected}', got '{actual}'");
         }
     }
 }

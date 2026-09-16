@@ -212,6 +212,26 @@ internal sealed partial class CommanderAirCommandService
     /// would leave nothing at all (a gun-only trainer), the original is returned — an unarmed
     /// aircraft never finds a target and never comes home either.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why nulling the entry is enough, verified in <c>Assembly-CSharp</c> 2026-09-14.</b>
+    /// <c>Loadout.weapons</c> is one <c>WeaponMount</c> per <c>HardpointSet</c>, positionally.
+    /// <c>WeaponManager.LoadHardpointSet(set, null)</c> takes the <c>RemoveMounts</c> branch instead
+    /// of <c>SpawnMounts</c>, and <c>Hardpoint.SpawnMount</c> is the ONLY place a weapon is handed
+    /// to <c>WeaponManager.RegisterWeapon</c>. So a null entry means the built-in
+    /// <c>Hardpoint.BuiltInWeapons</c> gun is never registered, no <c>WeaponStation</c> is created
+    /// for it, and every path the AI fires through — <c>WeaponStation.Ready()</c> and
+    /// <c>AIPilotCombatModes</c>' own <c>currentWeaponStation.Ammo &lt;= 0</c> gate — can never
+    /// reach it. The gun object itself still self-loads one magazine in <c>Gun.Awake</c> when its
+    /// <c>startLoaded</c> flag is set; that magazine is unreachable without a station, which is why
+    /// <see cref="StripCannonAmmo"/> exists as a second line rather than a first.
+    /// </para>
+    /// <para>
+    /// What must NOT be done: <c>WeaponMount</c> is a <c>ScriptableObject</c> shared by every
+    /// aircraft in the game, so its <c>ammo</c> field is asset data. Writing to it would take the
+    /// rounds off the player's aircraft, and off every future spawn, for the rest of the session.
+    /// </para>
+    /// </remarks>
     internal static Loadout WithoutInternalCannons(Loadout loadout)
     {
         if (loadout?.weapons == null || CommanderSettings.AirIncludeInternalCannons)
@@ -224,7 +244,7 @@ internal sealed partial class CommanderAirCommandService
         for (int i = 0; i < loadout.weapons.Count; i++)
         {
             WeaponMount? mount = loadout.weapons[i];
-            bool gun = mount != null && mount.info?.gun == true;
+            bool gun = IsGunMount(mount);
             stripped.weapons.Add(gun ? null! : mount!);
             if (mount != null && !gun)
             {
@@ -233,6 +253,97 @@ internal sealed partial class CommanderAirCommandService
         }
 
         return kept == 0 ? loadout : stripped;
+    }
+
+    /// <summary>
+    /// Whether one mount is a gun — the single reading of the game's own <c>WeaponInfo.gun</c> flag
+    /// that the strip, the survivor test and the launch guard all share (Reuse rule 4). A mount with
+    /// no <c>info</c> at all (a tail hook, a plain pylon) is not a gun.
+    /// </summary>
+    internal static bool IsGunMount(WeaponMount? mount)
+    {
+        return mount != null && mount.info?.gun == true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="loadout"/> still carries a gun mount — the guard the commander's
+    /// launch runs over whatever loadout it is about to fly, so a path that never reached
+    /// <see cref="WithoutInternalCannons"/> says so in the console instead of taking off armed.
+    /// </summary>
+    internal static bool LoadoutHasGunMount(Loadout? loadout)
+    {
+        if (loadout?.weapons == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < loadout.weapons.Count; i++)
+        {
+            if (IsGunMount(loadout.weapons[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Empties the internal cannon of an aircraft the commander has just put in the air, and reports
+    /// how many rounds it took off. The second line of defence behind
+    /// <see cref="WithoutInternalCannons"/>: the loadout rule prevents the gun ever getting a
+    /// weapon station, and this removes the rounds from any station that exists anyway — a stock
+    /// loadout the game substituted for a null one, a hangar spawn the mod does not build the
+    /// loadout for, an airframe adopted from somewhere else.
+    /// <para>
+    /// <c>Gun.LoadAmmunition(null)</c> is the game's own unload — it is what
+    /// <c>Hardpoint.RemoveMount</c> calls — and it zeroes the gun's magazine count and its
+    /// <c>Weapon.ammo</c>. <c>WeaponStation.AccountAmmo</c> then re-totals the station from its
+    /// weapons, which is the number every AI fire gate reads. Nothing here touches a
+    /// <c>WeaponMount</c> asset.
+    /// </para>
+    /// Returns 0 when INTERNAL CANNONS is on, when the aircraft has no gun station, or when the
+    /// station is already empty.
+    /// </summary>
+    internal static int StripCannonAmmo(Aircraft? aircraft)
+    {
+        if (aircraft == null || aircraft.disabled || CommanderSettings.AirIncludeInternalCannons)
+        {
+            return 0;
+        }
+
+        List<WeaponStation>? stations = aircraft.weaponStations;
+        if (stations == null)
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        for (int i = 0; i < stations.Count; i++)
+        {
+            WeaponStation station = stations[i];
+            if (station?.WeaponInfo?.gun != true || station.Ammo <= 0)
+            {
+                continue;
+            }
+
+            removed += station.Ammo;
+            for (int w = 0; w < station.Weapons.Count; w++)
+            {
+                if (station.Weapons[w] is Gun gun)
+                {
+                    gun.LoadAmmunition(null!);
+                }
+                else if (station.Weapons[w] != null)
+                {
+                    station.Weapons[w].ammo = 0;
+                }
+            }
+
+            station.AccountAmmo();
+        }
+
+        return removed;
     }
 
     private static void EnsureInternalCannons(AirMissionOption option)
@@ -688,6 +799,15 @@ internal sealed partial class CommanderAirCommandService
     private static void AutoConfigureRoleLoadout(
         AirMissionOption option, bool preferArhMissiles = false, bool preferCasOrdnance = false)
     {
+        // Suppression picks its pylons by its own two-pass rule (user decision 2026-09-14), because
+        // a greedy walk in group order can knock an anti-radiation missile off the aeroplane
+        // through the hardpoint exclusions. Everything else keeps the single greedy pass below.
+        if (option.Mode == AirCommandMode.Arad)
+        {
+            AutoConfigureAradLoadout(option);
+            return;
+        }
+
         for (int groupIndex = 0; groupIndex < option.HardpointGroups.Count; groupIndex++)
         {
             AirHardpointGroup group = option.HardpointGroups[groupIndex];
@@ -717,6 +837,80 @@ internal sealed partial class CommanderAirCommandService
                 SelectHardpointMount(option, groupIndex, bestIndex);
             }
         }
+    }
+
+    /// <summary>
+    /// The suppression loadout, in two passes (user decision 2026-09-14: "ARADs are not using the
+    /// correct ordinance, should be AGM-99 or AGM-68 etc"). Every hardpoint group that can carry a
+    /// real anti-radiation missile takes one FIRST; only then do the groups that cannot take the
+    /// named standoff stores, and one of those is skipped whenever selecting it would exclude a
+    /// group that already has a store on it.
+    /// <para>
+    /// The order is the whole point. The suppression scorer counts anti-radiation stores and
+    /// nothing else, so before this every other pylon on the aeroplane flew EMPTY — which is what
+    /// the user saw. Filling them with one greedy pass in group index order would have been worse
+    /// than empty: the game's hardpoint exclusions let a fat standoff store on an inboard pylon
+    /// clear the missile off the pylon beside it, and the sortie would arrive with nothing that can
+    /// hit a radar at all.
+    /// </para>
+    /// </summary>
+    private static void AutoConfigureAradLoadout(AirMissionOption option)
+    {
+        for (int pass = 0; pass < 2; pass++)
+        {
+            bool antiRadiationPass = pass == 0;
+            for (int groupIndex = 0; groupIndex < option.HardpointGroups.Count; groupIndex++)
+            {
+                AirHardpointGroup group = option.HardpointGroups[groupIndex];
+                if (group.SelectedMount != null
+                    || (!antiRadiationPass && ConflictsWithSelectedGroup(option, groupIndex)))
+                {
+                    continue;
+                }
+
+                int bestIndex = -1;
+                float bestScore = 0f;
+                for (int mountIndex = 0; mountIndex < group.Mounts.Count; mountIndex++)
+                {
+                    WeaponMount mount = group.Mounts[mountIndex];
+                    bool antiRadiation = mount.info != null && IsAradWeapon(mount.info, mount);
+                    if (antiRadiation != antiRadiationPass)
+                    {
+                        continue;
+                    }
+
+                    float score = ScoreAradMountForCommander(mount) * group.PhysicalMountCount;
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestIndex = mountIndex;
+                    }
+                }
+
+                if (bestIndex >= 0)
+                {
+                    SelectHardpointMount(option, groupIndex, bestIndex);
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether filling this hardpoint group would exclude a group that already carries a
+    /// store — the guard that keeps the suppression pass's second half from undoing its first.
+    /// </summary>
+    private static bool ConflictsWithSelectedGroup(AirMissionOption option, int groupIndex)
+    {
+        for (int i = 0; i < option.HardpointGroups.Count; i++)
+        {
+            if (i != groupIndex
+                && option.HardpointGroups[i].SelectedMount != null
+                && GroupsConflict(option.HardpointSets, option.HardpointGroups[groupIndex], option.HardpointGroups[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal void SelectHardpointMount(int groupIndex, int mountIndex)
@@ -766,7 +960,7 @@ internal sealed partial class CommanderAirCommandService
         List<string> tags = new();
         if (mount.radar || mount.prefab?.GetComponentInChildren<Radar>(true) != null) tags.Add("RADAR");
         if (info?.jammer == true) tags.Add("ECM");
-        if (info != null && IsAradWeapon(info)) tags.Add("ARAD");
+        if (info != null && IsAradWeapon(info, mount)) tags.Add("ARAD");
         if (info?.effectiveness.antiAir > 0.05f) tags.Add("A/A");
         if (info?.effectiveness.antiSurface > 0.05f) tags.Add("A/G");
         string suffix = tags.Count > 0 ? $"  [{string.Join(", ", tags)}]" : string.Empty;

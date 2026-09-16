@@ -3,7 +3,9 @@
 A BepInEx mod for **Nuclear Option** that adds RTS-style command gameplay on top of the base
 game: a free camera, unit selection, orders, group control, ground/naval production and an
 air-tasking layer. Intended mainly for the **Escalation** and **Terminal Control** game modes,
-and it ships with a 1v1 base-against-base mission of its own, **Ground Control Duel**.
+and it ships with a 1v1 base-against-base mission of its own, **Ground Control Duel**, in two
+versions: the original close-quarters one and a far-start one with the two sides at opposite
+corners of the map.
 ## Requirements
 
 - Nuclear Option
@@ -455,10 +457,10 @@ the mod's own rule and it applies on every mission, so the round always has an e
 mission author never wrote a capture objective for a particular base. It is also why the build
 radius matters: lose your last base and you can neither launch nor build, so the game is over.
 
-## Ground Control Duel (the mission that ships with the mod)
+## Ground Control Duel (the missions that ship with the mod)
 
-The mod installs one mission of its own, **Ground Control Duel**, into your mission list the
-first time it loads. Nothing extra to download — but the whole `GroundControlRts` folder has
+The mod installs two missions of its own, **Ground Control Duel** and **Ground Control Duel Far**,
+into your mission list the first time it loads. Nothing extra to download — but the whole `GroundControlRts` folder has
 to be in `BepInEx\plugins`, not just the DLL. Host it from the normal mission list.
 
 It is a **1v1 commander duel, base against base**:
@@ -518,12 +520,33 @@ Only the host can construct buildings, because buildings are spawned server-side
 two-human duel the guest commander plays the depots, the orders and the air war, and the host
 builds.
 
-The mission is mod content: it is rewritten from the plugin folder whenever the shipped copy
-changes, so save it under a different name before editing it.
+### Ground Control Duel Far (the far-start version)
+
+**Ground Control Duel Far** is the same match with the two sides pulled apart. On the original map
+the strips are 20 km apart, close enough that both sides' standing patrols meet within the first
+minutes and the match can settle into one long air battle over the middle before either economy has
+grown.
+
+- Boscali starts at **North Boscali Airbase** in the north-west, Primeva at **Sandrift Airbase** in
+  the south-east, about **69 km apart**. Both are proper airbases rather than highway strips.
+- Each side still opens with two vehicle depots and a few AA mounts at its own base, the same
+  funds, the same empty sky and the same MATCHED enemy commander.
+- **Four neutral airbases sit in between**: K92 Highway Strip and Dustbowl Highway Strip (the two
+  starting strips of the original duel) plus Maris Airport and South Boscali General Aviation. All
+  four are unowned and capturable. They are not evenly shared out - Dustbowl is 18 km from
+  Sandrift while Boscali's nearest is Maris at 34 km - so expect a long-range map, not a mirror.
+- Win the same way: capture the enemy airbase, or leave them holding none.
+
+Because a mission is only copied into your mission list when the game starts normally, **restart
+the game** after updating the mod if the far-start map is not in the list yet.
+
+The missions are mod content: each is rewritten from the plugin folder whenever the shipped copy
+changes, so save one under a different name before editing it.
 
 ## Enemy commander
 
-Off by default on every mission except **Ground Control Duel**, which forces it on. Cycle it in
+Off by default on every mission except **Ground Control Duel** and **Ground Control Duel Far**,
+which force it on. Cycle it in
 **Settings → Gameplay**.
 
 The base game only ever deploys the fixed vehicle reserve a mission was authored with — no

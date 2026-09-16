@@ -208,12 +208,7 @@ internal sealed partial class CommanderOperationsService
         int untasked = 0;
         Aircraft? homeCapLead = HomeCapLead(state);
         int homeCapAlive = CountHomeCapFighters(hq);
-        int homeCapWanted = CommanderEnemyCommanderService.WantedHomeCap(
-            CommanderSettings.HomeCapBaseline,
-            CommanderSettings.HomeCapPerEnemyAircraft,
-            CommanderEnemyCommanderService.CountTrackedEnemyAircraftNearBases(hq),
-            HomeCapLosses(hq),
-            CommanderSettings.HomeCapMax);
+        int homeCapWanted = WantedHomeCapNow(hq);
 
         foreach (Aircraft aircraft in state.CommanderAirframes)
         {
@@ -230,10 +225,14 @@ internal sealed partial class CommanderOperationsService
             }
 
             CommanderInsertion? insertion = FindInsertion(state, aircraft);
+            CommanderFobFlight? fobFlight = insertion == null ? FindFobFlight(state, aircraft) : null;
             CommanderAirframeTask task = ClassifyAirframe(
-                insertion: insertion != null,
+                insertion: insertion != null || fobFlight != null,
                 returning: IsReturning(aircraft),
-                homeCap: state.HomeCapAirframes.Contains(aircraft),
+                // A spare fighter flying the patrol orbit reads as HOME CAP too (fix, 2026-09-14):
+                // it used to be UNTASKED because only the standing roster counted.
+                homeCap: state.HomeCapAirframes.Contains(aircraft)
+                    || airCommand?.TryGetMission(aircraft)?.Mode == CommanderAirCommandService.AirCommandMode.AirGuard,
                 transport: aircraft.definition is AircraftDefinition definition
                     && CommanderEnemyCommanderService.GetAirRole(definition)
                         == CommanderEnemyCommanderService.AirRole.Transport,
@@ -252,14 +251,21 @@ internal sealed partial class CommanderOperationsService
             GlobalPosition at = aircraft.transform.GlobalPosition();
             string place = task switch
             {
-                CommanderAirframeTask.Insertion => insertion!.Point.Label,
+                // A construction flight reads as an insertion to the FOB site (user, 2026-09-14:
+                // "still no Tarantula FOB ... missions!?" — the flight was in the air, unlabelled).
+                CommanderAirframeTask.Insertion => insertion != null
+                    ? insertion.Point.Label
+                    : LiftLabel(fobFlight!.Order),
                 CommanderAirframeTask.Rtb => NearestAirbaseLabel(hq, at),
                 CommanderAirframeTask.HomeCap => NearestAirbaseLabel(hq, at),
                 _ => NearestPlaceLabel(at),
             };
             string detail = task switch
             {
-                CommanderAirframeTask.Insertion => InsertionPhase(insertion!),
+                CommanderAirframeTask.Insertion => insertion != null
+                    ? InsertionPhase(insertion)
+                    : LiftFlightDetail(
+                        fobFlight!.LoadOrdinal, fobFlight.Order.LoadsWanted, fobFlight.Delivered),
                 CommanderAirframeTask.Rtb => CommanderAirCommandService.IsWinchester(aircraft)
                     ? "Winchester"
                     : "recovered soon",
@@ -272,7 +278,8 @@ internal sealed partial class CommanderOperationsService
                 ReferenceEquals(aircraft, homeCapLead) ? homeCapAlive : -1,
                 homeCapWanted,
                 detail,
-                enemy: !isLocal);
+                enemy: !isLocal,
+                isLift: fobFlight != null);
             // Section 16: the same ground/departing/en-route truth on the patrol, the AWACS, the
             // lent fighters and the adopted strays.
             string phase = AirframePhaseText(hq, aircraft, at, place, string.Empty);
@@ -284,7 +291,11 @@ internal sealed partial class CommanderOperationsService
                 camera,
                 at,
                 label,
-                task == CommanderAirframeTask.Untasked ? UntaskedMarkerColor : color,
+                task == CommanderAirframeTask.Untasked
+                    ? UntaskedMarkerColor
+                    : (isLocal && (task == CommanderAirframeTask.Insertion || task == CommanderAirframeTask.Transport))
+                        ? CommanderUiTheme.LogisticsMarkerColor
+                        : color,
                 MarkerElementWorldSize,
                 MarkerElementMapSize,
                 fullscreenMap,
@@ -293,7 +304,10 @@ internal sealed partial class CommanderOperationsService
             drawn++;
         }
 
-        if (CommanderSettings.OperationsDebugLog && hq.faction != null && owned > 0)
+        // Drawn every frame, so the count line is throttled to once per review cadence per
+        // commander — unthrottled it wrote 500k lines in a session and buried every other line.
+        if (CommanderSettings.OperationsDebugLog && hq.faction != null && owned > 0
+            && MarkerCountLogDue(hq))
         {
             CommanderPlugin.Log.LogInfo(
                 $"Ops {CommanderPlayerCommanderService.CommanderLabel(hq)}: air markers: {owned} owned, "
@@ -310,6 +324,19 @@ internal sealed partial class CommanderOperationsService
             if (fighter != null && !fighter.disabled)
             {
                 return fighter;
+            }
+        }
+
+        return null;
+    }
+
+    private static CommanderFobFlight? FindFobFlight(OperationsState state, Aircraft aircraft)
+    {
+        for (int i = 0; i < state.FobFlights.Count; i++)
+        {
+            if (ReferenceEquals(state.FobFlights[i].Aircraft, aircraft))
+            {
+                return state.FobFlights[i];
             }
         }
 
@@ -414,7 +441,7 @@ internal sealed partial class CommanderOperationsService
 
             string role = state.LentHomeCap.Contains(aircraft)
                 ? $"lent to {sortie.Label}"
-                : AirMarkerElementRole(sortie.Kind, asCap);
+                : AirMarkerElementRole(sortie.Kind, asCap, IsBomberElement(sortie, aircraft));
             if (!isLocal)
             {
                 DrawAirMarkerAt(
@@ -430,9 +457,9 @@ internal sealed partial class CommanderOperationsService
                     + AirframePhaseText(
                         hq,
                         aircraft,
-                        SortieHoldsAtFormUp(sortie) ? sortie.FormUpPoint : sortie.Center,
+                        SortieStation(sortie),
                         sortie.Label,
-                        "on station"),
+                        sortie.FallingBack ? FallingBackText(sortie) : "on station"),
                 color,
                 MarkerElementWorldSize,
                 MarkerElementMapSize,
@@ -546,8 +573,13 @@ internal sealed partial class CommanderOperationsService
     /// the patrol carries the count. <paramref name="enemy"/> prefixes an opposing commander's
     /// airframe, whose task the player can only guess at. Pure, for the self-check.
     /// </summary>
+    /// <param name="isLift">True for a transport flying one load of a LIFT — a FOB construction
+    /// order or an air-mobile platoon (design.md, air-mobile-platoons_20260915 Section 4). It reads
+    /// <c>LIFT</c> rather than <c>INSERTION</c> because a reader watching three dots converge on a
+    /// hilltop is watching a platoon arrive, not a picket; a picket insertion is unchanged.</param>
     internal static string AirframeMarkerLabel(
-        CommanderAirframeTask task, string place, int bound, int wanted, string detail, bool enemy)
+        CommanderAirframeTask task, string place, int bound, int wanted, string detail, bool enemy,
+        bool isLift = false)
     {
         if (enemy)
         {
@@ -562,7 +594,9 @@ internal sealed partial class CommanderOperationsService
 
         return task switch
         {
-            CommanderAirframeTask.Insertion => $"INSERTION {place} — {detail}",
+            CommanderAirframeTask.Insertion => isLift
+                ? $"LIFT {place} — {detail}"
+                : $"INSERTION {place} — {detail}",
             CommanderAirframeTask.Rtb => $"RTB {place} — {detail}",
             CommanderAirframeTask.HomeCap => bound >= 0
                 ? $"HOME CAP {place} — {bound}/{wanted}"
@@ -584,6 +618,7 @@ internal sealed partial class CommanderOperationsService
     {
         return kind switch
         {
+            CommanderSortieKind.Strike => "ENEMY STRIKE",
             CommanderSortieKind.Awacs => "ENEMY AWACS",
             CommanderSortieKind.Arad => "ENEMY ARAD",
             CommanderSortieKind.Cap => "ENEMY CAP",
@@ -801,14 +836,27 @@ internal sealed partial class CommanderOperationsService
     /// <summary>The live sortie's whole marker text, assembled from the pure pieces below.</summary>
     private static string SortieMarkerLabel(FactionHQ hq, CommanderAirSortie sortie, Aircraft? lead)
     {
-        bool package = SortieIsPackage(sortie.Wanted, sortie.CapsWanted, sortie.NoCapWait);
+        // The same rule the form-up itself reads (one definition, 2026-09-16). AirMarkerKind adds
+        // the marker's own half of the question — PKG needs something to DELIVER — so a pair of
+        // fighters, which now forms up too, is still drawn as an ESCORT rather than as a package.
+        bool package = SortieFormsUp(
+            sortie.Kind, sortie.Wanted, sortie.CapsWanted, groundContact: sortie.NoCapWait, aradGoneIn: false);
         bool forming = SortieHoldsAtFormUp(sortie);
-        bool capSlot = sortie.Kind == CommanderSortieKind.Cap || sortie.Wanted <= 0;
+        // The AWACS is never read as a fighter slot, however its counts fall: since the one-per-
+        // commander limit landed (2026-09-14) its Wanted is what it may still BUY, which is zero
+        // the moment it owns one, and the "Wanted <= 0 means this sortie is all fighters" shortcut
+        // would have turned the radar marker into an empty CAP.
+        bool awacs = sortie.Kind == CommanderSortieKind.Awacs;
+        bool capSlot = !awacs && (sortie.Kind == CommanderSortieKind.Cap || sortie.Wanted <= 0);
         int bound = capSlot ? sortie.Caps.Count : sortie.Cas.Count;
-        int wanted = capSlot ? sortie.CapsWanted : sortie.Wanted;
+        // For the same reason the radar marker shows the standing LIMIT rather than the outstanding
+        // buy: "1/1" with one on station, "0/1" while the commander is still saving for it.
+        int wanted = awacs
+            ? AwacsPerCommander
+            : capSlot ? sortie.CapsWanted : sortie.Wanted;
 
-        // The AWACS sortie's own label already says "AWACS …", so the marker names the ground it
-        // orbits instead and lets the kind word carry the rest.
+        // The AWACS sortie's own label is a distance from a named airbase, so the marker names the
+        // ground it orbits instead and lets the kind word carry the rest.
         string label = sortie.Kind == CommanderSortieKind.Awacs
             ? NearestPlaceLabel(sortie.Center)
             : sortie.Label;
@@ -824,17 +872,24 @@ internal sealed partial class CommanderOperationsService
                 hq,
                 sortie,
                 lead,
-                AirMarkerPhase(
+                sortie.FallingBack ? FallingBackText(sortie) : AirMarkerPhase(
                     lent: false,
                     retasked: false,
                     aradPending: sortie.AradPending,
+                    // Read from what is bound, not from what the sortie believes (user report,
+                    // 2026-09-14): a strike slot with nothing in it and an escort already flying is
+                    // an escort, whatever phase the package thinks it is in.
+                    escortOnly: sortie.Wanted > 0 && sortie.Cas.Count == 0 && sortie.Caps.Count > 0,
                     formingAtFormUp: forming,
-                    atFormUp: forming ? CountAtFormUp(sortie.Cas, sortie.FormUpPoint) : 0,
+                    atFormUp: forming ? CountAtFormUp(sortie) : 0,
                     casWanted: sortie.Wanted,
                     escortMissing: sortie.CapsWanted > 0 && sortie.Caps.Count == 0,
                     onStation: sortie.GoneIn && bound > 0)),
             AirMarkerFlags(
-                hasEscort: sortie.CapsWanted > 0 && sortie.Caps.Count > 0,
+                // A sortie whose own counts ARE its fighters (a platoon's CAP request, an escort
+                // over a strike-less objective) must not repeat them as a flag.
+                escortBound: capSlot ? 0 : sortie.Caps.Count,
+                escortWanted: capSlot ? 0 : sortie.CapsWanted,
                 preemptive: sortie.Preemptive,
                 rotary: sortie.Kind == CommanderSortieKind.Objective && sortie.WantsRotary));
     }
@@ -849,9 +904,35 @@ internal sealed partial class CommanderOperationsService
             : AirframePhaseText(
                 hq,
                 lead,
-                SortieHoldsAtFormUp(sortie) ? sortie.FormUpPoint : sortie.Center,
+                SortieStation(sortie),
                 sortie.Label,
                 missionPhase);
+    }
+
+    /// <summary>Where a sortie's airframes are actually sent right now: the fallback point while the
+    /// posture holds them back (user report 2026-09-16: a package holding 15 km back read "En route to
+    /// HILLTOP 4 — CAP 1/8"), the form-up point while a package forms, else the objective. One
+    /// definition for the lead's phase and each airframe's (Reuse rule 4).</summary>
+    private static GlobalPosition SortieStation(CommanderAirSortie sortie)
+    {
+        return sortie.FallingBack
+            ? sortie.FallbackPoint
+            : SortieHoldsAtFormUp(sortie) ? sortie.FormUpPoint : sortie.Center;
+    }
+
+    /// <summary>The holding-back words: what the sortie is waiting for. Outnumbered carries the last
+    /// "ours v hostiles" the posture logged; the belt hold says what it is waiting for instead, which
+    /// is a sweep and not reinforcements (design.md, air-survival-layer_20260916 Layer 3).</summary>
+    private static string FallingBackText(CommanderAirSortie sortie)
+    {
+        if (sortie.HoldReason == CommanderAirHoldReason.Belt)
+        {
+            return "Holding for sweep";
+        }
+
+        return sortie.FallbackReported.Length > 0
+            ? $"Falling back ({sortie.FallbackReported})"
+            : "Falling back";
     }
 
     /// <summary>
@@ -872,9 +953,17 @@ internal sealed partial class CommanderOperationsService
                 return "ARAD";
             case CommanderSortieKind.Cap:
                 return "CAP";
+            // A deliberate strike package says what it is whatever its shape: it is the one sortie
+            // the player has no other way of knowing about, and calling it PKG would hide it among
+            // the reactive packages (design.md, strike-packages_20260915 Section 6).
+            case CommanderSortieKind.Strike:
+                return "STRIKE";
         }
 
-        if (isPackage)
+        // A package has something to DELIVER. The test used to be inside the caller's rule; it moved
+        // here on 2026-09-16 when that rule widened to fighter patrols, which form up but are not
+        // packages. Behaviour-neutral: the old rule already required a strike element.
+        if (isPackage && casWanted > 0)
         {
             return "PKG";
         }
@@ -888,10 +977,17 @@ internal sealed partial class CommanderOperationsService
     /// only ever passed for an element marker; then the reasons a package is still holding, most
     /// specific first; then whether it has arrived. Pure, for the self-check.
     /// </summary>
+    /// <param name="escortOnly">The sortie wants strike airframes, has none bound, and its escort IS
+    /// bound — so the only aeroplane the package owns is a fighter (user report, 2026-09-14). The
+    /// marker used to read the package's own phase in that state and printed
+    /// <c>CAS CROSSROADS 20 0/3 — Going in · +esc rotary</c> while nothing was going anywhere: the
+    /// one Compass bound to it was flying its own CAP. The label now reads from what is actually
+    /// bound.</param>
     internal static string AirMarkerPhase(
         bool lent,
         bool retasked,
         bool aradPending,
+        bool escortOnly,
         bool formingAtFormUp,
         int atFormUp,
         int casWanted,
@@ -913,6 +1009,11 @@ internal sealed partial class CommanderOperationsService
             return "Holding for ARAD";
         }
 
+        if (escortOnly)
+        {
+            return "Escort only, awaiting strike";
+        }
+
         if (formingAtFormUp)
         {
             return escortMissing
@@ -925,10 +1026,14 @@ internal sealed partial class CommanderOperationsService
 
     /// <summary>
     /// The marker's flags, appended behind the platoon marker's own <c> · </c> separator in a fixed
-    /// order, or nothing when none is set (Section 11). Pure, for the self-check.
+    /// order, or nothing when none is set (Section 11). The escort flag carries its COUNTS since
+    /// 2026-09-14 (<c>· CAP 1/3</c> rather than <c>· +esc</c>): a package reading
+    /// <c>0/4 — Escort only, awaiting strike</c> has to say how much escort it actually has, and the
+    /// bare flag was the half of the old label that hid it. Pure, for the self-check.
     /// </summary>
-    internal static string AirMarkerFlags(bool hasEscort, bool preemptive, bool rotary)
+    internal static string AirMarkerFlags(int escortBound, int escortWanted, bool preemptive, bool rotary)
     {
+        bool hasEscort = escortBound > 0;
         if (!hasEscort && !preemptive && !rotary)
         {
             return string.Empty;
@@ -937,7 +1042,7 @@ internal sealed partial class CommanderOperationsService
         System.Text.StringBuilder text = new();
         if (hasEscort)
         {
-            text.Append(" · +esc");
+            text.Append($" · CAP {escortBound}/{Mathf.Max(escortBound, escortWanted)}");
         }
 
         if (preemptive)
@@ -961,21 +1066,46 @@ internal sealed partial class CommanderOperationsService
         return $"{kind} {label} {bound}/{wanted} — {phase}{flags}";
     }
 
-    /// <summary>What one airframe's own marker calls its job in the package. Pure, for the
-    /// self-check.</summary>
-    internal static string AirMarkerElementRole(CommanderSortieKind kind, bool asCap)
+    /// <summary>
+    /// What one airframe's own marker calls its job in the package. A strike package flies two
+    /// ground-attack elements against a base, so <paramref name="bomber"/> separates them: the
+    /// design names a BOMBER marker, and an aeroplane sent to flatten a base reading the same word
+    /// as the jet beside it hides the one part of the package a player would want to see.
+    /// Pure, for the self-check.
+    /// </summary>
+    internal static string AirMarkerElementRole(CommanderSortieKind kind, bool asCap, bool bomber = false)
     {
         if (asCap)
         {
             return "escort";
         }
 
+        if (bomber)
+        {
+            return "bomber";
+        }
+
         return kind switch
         {
             CommanderSortieKind.Awacs => "radar",
             CommanderSortieKind.Arad => "ARAD",
+            CommanderSortieKind.Strike => "strike",
             _ => "CAS",
         };
+    }
+
+    /// <summary>
+    /// Whether this airframe is flying the strike package's BOMBER element: the package has one, and
+    /// this aeroplane is of the type that element pinned. The pin is the only thing that knows —
+    /// both elements sit in the same bound list, because both are ground attack and the wing's slot
+    /// rule counts them together.
+    /// </summary>
+    private static bool IsBomberElement(CommanderAirSortie sortie, Aircraft aircraft)
+    {
+        return sortie.Kind == CommanderSortieKind.Strike
+            && sortie.PackageBomberType != null
+            && aircraft != null
+            && ReferenceEquals(aircraft.definition, sortie.PackageBomberType);
     }
 
     /// <summary>
@@ -993,25 +1123,58 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "the radar airframe is the AWACS", AirMarkerKind(CommanderSortieKind.Awacs, false, 1), "AWACS");
         Expect(failures, "a suppression strike is ARAD", AirMarkerKind(CommanderSortieKind.Arad, false, 2), "ARAD");
         Expect(failures, "a suppression pair is still ARAD, not a package", AirMarkerKind(CommanderSortieKind.Arad, true, 2), "ARAD");
+        Expect(failures, "a deliberate strike package says STRIKE", AirMarkerKind(CommanderSortieKind.Strike, true, 2), "STRIKE");
+        Expect(failures, "a strike package of one airframe still says STRIKE", AirMarkerKind(CommanderSortieKind.Strike, false, 1), "STRIKE");
 
-        Expect(failures, "a package gathering says how much of it is there", AirMarkerPhase(false, false, false, true, 2, 3, false, false), "Forming at form-up (2/3)");
-        Expect(failures, "a package with no escort yet says what it waits for", AirMarkerPhase(false, false, false, true, 2, 3, true, false), "Holding for escort");
-        Expect(failures, "a package waiting on suppression says so first", AirMarkerPhase(false, false, true, true, 2, 3, true, false), "Holding for ARAD");
-        Expect(failures, "a released package on its way is going in", AirMarkerPhase(false, false, false, false, 0, 3, false, false), "Going in");
-        Expect(failures, "a package over its objective is on station", AirMarkerPhase(false, false, false, false, 0, 3, false, true), "On station");
-        Expect(failures, "a borrowed home-CAP fighter says where it came from", AirMarkerPhase(true, false, true, true, 0, 3, true, false), "Lent from home CAP");
-        Expect(failures, "an airframe pulled onto a contact says so", AirMarkerPhase(false, true, true, true, 0, 3, true, false), "Retasked");
+        Expect(failures, "a package gathering says how much of it is there", AirMarkerPhase(false, false, false, false, true, 2, 3, false, false), "Forming at form-up (2/3)");
+        Expect(failures, "a package with no escort yet says what it waits for", AirMarkerPhase(false, false, false, false, true, 2, 3, true, false), "Holding for escort");
+        Expect(failures, "a package waiting on suppression says so first", AirMarkerPhase(false, false, true, false, true, 2, 3, true, false), "Holding for ARAD");
+        Expect(failures, "a released package on its way is going in", AirMarkerPhase(false, false, false, false, false, 0, 3, false, false), "Going in");
+        Expect(failures, "a package over its objective is on station", AirMarkerPhase(false, false, false, false, false, 0, 3, false, true), "On station");
+        Expect(failures, "a borrowed home-CAP fighter says where it came from", AirMarkerPhase(true, false, true, false, true, 0, 3, true, false), "Lent from home CAP");
+        Expect(failures, "an airframe pulled onto a contact says so", AirMarkerPhase(false, true, true, false, true, 0, 3, true, false), "Retasked");
 
-        Expect(failures, "a quiet sortie carries no flags", AirMarkerFlags(false, false, false), string.Empty);
-        Expect(failures, "the flags appear in their fixed order", AirMarkerFlags(true, true, true), " · +esc · pre · rotary");
-        Expect(failures, "an escorted sortie says so alone", AirMarkerFlags(true, false, false), " · +esc");
-        Expect(failures, "a helicopter sortie says so alone", AirMarkerFlags(false, false, true), " · rotary");
+        // The escort-only case (user report, 2026-09-14): the only bound airframe is the escort, and
+        // the marker said "Going in" for a strike that did not exist.
+        Expect(
+            failures,
+            "a package whose only bound airframe is its escort says so instead of going in",
+            AirMarkerPhase(false, false, false, true, false, 0, 4, false, false),
+            "Escort only, awaiting strike");
+        Expect(
+            failures,
+            "an escort-only package that believes it is on station still says it has no strike",
+            AirMarkerPhase(false, false, false, true, false, 0, 4, false, true),
+            "Escort only, awaiting strike");
+        Expect(
+            failures,
+            "a suppression wait still outranks the escort-only reading",
+            AirMarkerPhase(false, false, true, true, false, 0, 4, false, false),
+            "Holding for ARAD");
+
+        Expect(failures, "a quiet sortie carries no flags", AirMarkerFlags(0, 0, false, false), string.Empty);
+        Expect(failures, "the flags appear in their fixed order", AirMarkerFlags(2, 3, true, true), " · CAP 2/3 · pre · rotary");
+        Expect(failures, "an escorted sortie says so alone", AirMarkerFlags(1, 3, false, false), " · CAP 1/3");
+        Expect(failures, "a helicopter sortie says so alone", AirMarkerFlags(0, 0, false, true), " · rotary");
+        Expect(failures, "an escort flag never reports more escort than it has", AirMarkerFlags(3, 1, false, false), " · CAP 3/3");
+
+        Expect(
+            failures,
+            "the escort-only package reads as the user asked for it",
+            AirMarkerLabel(
+                "CAS",
+                "CROSSROADS 20",
+                0,
+                4,
+                AirMarkerPhase(false, false, false, true, false, 0, 4, false, false),
+                AirMarkerFlags(1, 3, false, false)),
+            "CAS CROSSROADS 20 0/4 — Escort only, awaiting strike · CAP 1/3");
 
         Expect(
             failures,
             "the package line reads as the design writes it",
-            AirMarkerLabel("PKG", "CROSSROADS 14", 2, 3, "Forming at form-up (2/3)", " · +esc · rotary"),
-            "PKG CROSSROADS 14 2/3 — Forming at form-up (2/3) · +esc · rotary");
+            AirMarkerLabel("PKG", "CROSSROADS 14", 2, 3, "Forming at form-up (2/3)", " · CAP 1/2 · rotary"),
+            "PKG CROSSROADS 14 2/3 — Forming at form-up (2/3) · CAP 1/2 · rotary");
         Expect(
             failures,
             "a full sortie reads its counts equal",
@@ -1028,6 +1191,11 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "the radar airframe's own marker says radar", AirMarkerElementRole(CommanderSortieKind.Awacs, false), "radar");
         Expect(failures, "a suppression airframe's own marker says ARAD", AirMarkerElementRole(CommanderSortieKind.Arad, false), "ARAD");
         Expect(failures, "an escort on a suppression sortie is still an escort", AirMarkerElementRole(CommanderSortieKind.Arad, true), "escort");
+        Expect(failures, "a strike package's own airframe says strike", AirMarkerElementRole(CommanderSortieKind.Strike, false), "strike");
+        Expect(failures, "a strike package's fighter is an escort like any other", AirMarkerElementRole(CommanderSortieKind.Strike, true), "escort");
+        Expect(failures, "a strike package's bomber says so", AirMarkerElementRole(CommanderSortieKind.Strike, false, bomber: true), "bomber");
+        Expect(failures, "an escort is an escort even on a package that carries bombers", AirMarkerElementRole(CommanderSortieKind.Strike, true, bomber: true), "escort");
+        Expect(failures, "no other sortie kind ever reads as a bomber by accident", AirMarkerElementRole(CommanderSortieKind.Objective, false), "CAS");
 
         CheckAirframeMarkerLabels(failures);
     }
@@ -1047,6 +1215,21 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "an owned, missioned airframe nothing accounts for is untasked", (int)ClassifyAirframe(false, false, false, false, true), (int)CommanderAirframeTask.Untasked);
 
         Expect(failures, "an insertion names its point and its leg", AirframeMarkerLabel(CommanderAirframeTask.Insertion, "HILLTOP 12", -1, 0, "outbound", false), "INSERTION HILLTOP 12 — outbound");
+        Expect(
+            failures,
+            "a platoon lift names the platoon it is carrying and which load it is on",
+            AirframeMarkerLabel(CommanderAirframeTask.Insertion, "3RD PLATOON", -1, 0, "1/3, outbound", false, isLift: true),
+            "LIFT 3RD PLATOON — 1/3, outbound");
+        Expect(
+            failures,
+            "a construction lift names its site",
+            AirframeMarkerLabel(CommanderAirframeTask.Insertion, "FOB HILLTOP 9", -1, 0, "1/1, outbound", false, isLift: true),
+            "LIFT FOB HILLTOP 9 — 1/1, outbound");
+        Expect(
+            failures,
+            "an enemy lift is still only a transport on the player's screen",
+            AirframeMarkerLabel(CommanderAirframeTask.Insertion, "3RD PLATOON", -1, 0, "1/3, outbound", true, isLift: true),
+            "ENEMY TRANSPORT");
         Expect(failures, "an empty airframe going home says why", AirframeMarkerLabel(CommanderAirframeTask.Rtb, "Maris Airport", -1, 0, "Winchester", false), "RTB Maris Airport — Winchester");
         Expect(failures, "the patrol's lead fighter carries its strength", AirframeMarkerLabel(CommanderAirframeTask.HomeCap, "Maris Airport", 3, 4, "FS-12 Revoker", false), "HOME CAP Maris Airport — 3/4");
         Expect(failures, "the rest of the patrol names it without the count", AirframeMarkerLabel(CommanderAirframeTask.HomeCap, "Maris Airport", -1, 4, "FS-12 Revoker", false), "HOME CAP Maris Airport");
@@ -1064,6 +1247,7 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "an enemy sortie with no strike reads as a CAP", EnemySortieLabel(CommanderSortieKind.Objective, false, "CROSSROADS 14"), "ENEMY CAP");
         Expect(failures, "an enemy platoon CAP reads as a CAP", EnemySortieLabel(CommanderSortieKind.Cap, false, "3RD PLATOON"), "ENEMY CAP");
         Expect(failures, "an enemy radar airframe reads as an AWACS", EnemySortieLabel(CommanderSortieKind.Awacs, true, "HILLTOP 12"), "ENEMY AWACS");
+        Expect(failures, "an enemy strike package is named as one", EnemySortieLabel(CommanderSortieKind.Strike, true, "CROSSROADS 7"), "ENEMY STRIKE");
         Expect(failures, "an enemy suppression strike reads as ARAD", EnemySortieLabel(CommanderSortieKind.Arad, true, "HILLTOP 12"), "ENEMY ARAD");
 
         // Section 13: the aircraft the commander does NOT own. The user reported unlabelled
@@ -1111,5 +1295,23 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "a commander's own airframe is left to the walk that knows its sortie", LabelsInStatelessWalk(false, true), false);
         Expect(failures, "an aircraft already labelled this frame is never labelled twice", LabelsInStatelessWalk(true, false), false);
         Expect(failures, "an owned aircraft already labelled stays labelled once", LabelsInStatelessWalk(true, true), false);
+    }
+
+    /// <summary>Seconds between two "air markers" count lines for one commander — the review
+    /// cadence, so the log carries one per review like every other diagnostics line.</summary>
+    private const float MarkerCountLogSeconds = 30f;
+
+    private static readonly Dictionary<FactionHQ, float> markerCountLoggedAt = new();
+
+    private static bool MarkerCountLogDue(FactionHQ hq)
+    {
+        float now = Time.realtimeSinceStartup;
+        if (markerCountLoggedAt.TryGetValue(hq, out float last) && now - last < MarkerCountLogSeconds)
+        {
+            return false;
+        }
+
+        markerCountLoggedAt[hq] = now;
+        return true;
     }
 }

@@ -155,7 +155,7 @@ internal static class CommanderFreeCameraInputPatch
     {
         float longitudinal = Axis(CommanderSettings.CameraForward, CommanderSettings.CameraBackward);
         float lateral = Axis(CommanderSettings.CameraRight, CommanderSettings.CameraLeft);
-        float vertical = Axis(CommanderSettings.CameraUp, CommanderSettings.CameraDown);
+        float vertical = VerticalAxis();
         ApplyEdgeScroll(ref longitudinal, ref lateral);
 
         Vector3 flatForward = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
@@ -350,7 +350,7 @@ internal static class CommanderFreeCameraInputPatch
     {
         float longitudinal = Axis(CommanderSettings.CameraForward, CommanderSettings.CameraBackward);
         float lateral = Axis(CommanderSettings.CameraRight, CommanderSettings.CameraLeft);
-        float vertical = Axis(CommanderSettings.CameraUp, CommanderSettings.CameraDown);
+        float vertical = VerticalAxis();
         Vector3 direction = cam.transform.forward * longitudinal
             + cam.transform.right * lateral
             + Vector3.up * vertical;
@@ -441,6 +441,25 @@ internal static class CommanderFreeCameraInputPatch
     {
         return (CommanderShortcutInput.IsPressed(positive) ? 1f : 0f)
             - (CommanderShortcutInput.IsPressed(negative) ? 1f : 0f);
+    }
+
+    /// <summary>
+    /// Rise and descend, minus whichever of the two keys the armed build ghost has taken over. The
+    /// rotate keys default to Q and E, which are also these, and a player holding a building on the
+    /// cursor means "turn it" — so the camera stops climbing for as long as the placement is armed.
+    /// </summary>
+    private static float VerticalAxis()
+    {
+        return Axis(Unclaimed(CommanderSettings.CameraUp), Unclaimed(CommanderSettings.CameraDown));
+    }
+
+    /// <summary>The binding itself, or an unbound one while the build ghost is using that key.</summary>
+    private static BepInEx.Configuration.KeyboardShortcut Unclaimed(
+        BepInEx.Configuration.KeyboardShortcut shortcut)
+    {
+        return CommanderBuildPreview.IsPlacementRotationKey(shortcut)
+            ? new BepInEx.Configuration.KeyboardShortcut(UnityEngine.KeyCode.None)
+            : shortcut;
     }
 
     private static float GetAngle(FieldInfo? field, CameraFreeState state, float fallback)

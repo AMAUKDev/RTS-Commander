@@ -44,6 +44,16 @@ internal sealed partial class CommanderEconomyService
     private const float IncomeIntervalSeconds = 15f;
     private const float FactoryRefreshIntervalSeconds = 5f;
 
+    /// <summary>Income ticks between two per-faction income lines — eight ticks is two minutes
+    /// (diagnostic, 2026-09-14). The user's "we own half the map, income should be huge" could not
+    /// be answered from the 2026-09-14 log at all: the balance was visible on every ladder line and
+    /// the income behind it on none of them, so a side that is poor and a side that is spending
+    /// everything it earns read identically.</summary>
+    private const int IncomeReportEveryTicks = 8;
+
+    /// <summary>Income ticks since the last income line.</summary>
+    private int incomeReportTicks;
+
     /// <summary>Mines an enemy commander builds before it starts upgrading what it has.</summary>
     private const int EnemyMineTarget = 2;
 
@@ -91,7 +101,12 @@ internal sealed partial class CommanderEconomyService
         "HarborCrane",
         "TowerCrane",
         "Platform_large",
-        "VehicleDepot1",
+        // "VehicleDepot1" was the fourth key (removed 2026-09-14): on maps without the three
+        // cranes the dock CLAIMED the game's only vehicle depot prefab, and the catalogue drops
+        // the dock's prefab so a player cannot buy a harbour by accident — which is how the whole
+        // DEPOT category vanished from the build list, the FOB recipe and the captured-base wish
+        // ("No DEPOT structure in the encyclopedia" beside "Naval dock will be built from the
+        // 'VehicleDepot1' prefab" in the same log).
     };
 
     private readonly Dictionary<Unit, int> mineLevels = new();
@@ -147,7 +162,8 @@ internal sealed partial class CommanderEconomyService
             }
 
             return preview.SiteValid
-                ? $"Click to site the {PendingBuildLabel()}."
+                ? $"Click to site the {PendingBuildLabel()}, facing {preview.PlacementHeadingLabel}°, "
+                    + $"{preview.PlacementTiltLabel}."
                 : preview.BlockedReason;
         }
     }
@@ -342,6 +358,20 @@ internal sealed partial class CommanderEconomyService
     /// </summary>
     internal static void SelfCheck()
     {
+        if (!Mathf.Approximately(IncomeHandicapFor(true, 1.3f), 1f)
+            || !Mathf.Approximately(IncomeHandicapFor(false, 1.3f), 1.3f)
+            || !Mathf.Approximately(IncomeHandicapFor(false, -2f), 0f))
+        {
+            CommanderPlugin.Log.LogError("Economy self-check FAILED: the enemy income handicap no longer spares the player's faction or floors at zero.");
+        }
+
+        if (MayStandInForDock(BuildingType.DEP) || MayStandInForDock(BuildingType.HGR) || MayStandInForDock(BuildingType.RDR)
+            || !MayStandInForDock(BuildingType.CIV))
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: the naval dock may borrow a depot, hangar or radar prefab, which takes that category off the build list.");
+        }
+
         for (int level = 1; level < MaxLevel; level++)
         {
             if (GetMineUpgradeCost(level) <= GetMineUpgradeCost(level - 1)
@@ -378,6 +408,76 @@ internal sealed partial class CommanderEconomyService
         {
             CommanderPlugin.Log.LogError(
                 "Economy self-check FAILED: the naval dock ladder does not run from nothing to every ship.");
+        }
+
+        // The FOB's price (design.md, fob-construction_20260914 Section 5): the fixed recipe is
+        // every structure or none, so a catalogue short of one category must price the order at
+        // zero rather than at part of a base.
+        if (FobPrice(10f, 20f, 30f, 1) != 60f
+            || FobPrice(0f, 20f, 30f, 1) != 0f
+            || FobPrice(10f, 0f, 30f, 1) != 0f
+            || FobPrice(10f, 20f, 0f, 1) != 0f)
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: the FOB price is not the sum of its structures, "
+                    + "or a missing structure does not disable the order.");
+        }
+
+        // Every pad in the recipe is charged for (user instruction 2026-09-16, two helipads per
+        // FOB). A second pad that cost nothing would let the building rung order a base it cannot
+        // actually finish paying for.
+        if (FobPrice(10f, 20f, 30f, 2) != 90f
+            || FobPrice(10f, 20f, 30f, 0) != 0f)
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: the FOB price does not charge for every helipad in the "
+                    + "recipe, or a padless recipe is still priced.");
+        }
+
+        // The price and the recipe must agree about how many pads there are. The check above pins
+        // the arithmetic for a pad count handed to it; this one pins the count itself to the recipe
+        // array, so dropping a pad's price, or adding a pad to the recipe without paying for it,
+        // breaks a named line at load rather than quietly ordering a base the commander cannot
+        // finish paying for.
+        if (FobRecipePrice(10f, 20f, 30f) != 10f + 20f + (30f * FobHelipadCount)
+            || FobRecipePrice(10f, 20f, 30f) != 90f)
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: the FOB price and the FOB recipe disagree about how "
+                    + "many helipads a forward base has.");
+        }
+
+        // Base defences are counted PER BASE (fix, 2026-09-14). A captured airfield with nothing on
+        // it wants the whole target however many emplacements stand at the home field, and a base
+        // already over target never wants a negative one.
+        if (BuildingsStillWantedAtBase(0, EnemyDefenceBuildingTarget) != EnemyDefenceBuildingTarget
+            || BuildingsStillWantedAtBase(EnemyDefenceBuildingTarget, EnemyDefenceBuildingTarget) != 0
+            || BuildingsStillWantedAtBase(EnemyDefenceBuildingTarget + 9, EnemyDefenceBuildingTarget) != 0
+            || EnemyDefenceBuildingTarget < 1)
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: the per-base defence target no longer asks an undefended "
+                    + "base for its own buildings.");
+        }
+
+        // A coverage ring narrower than the ring the builds are dropped into would never count the
+        // building it just placed, so the commander would build at the same base for ever.
+        if (Mathf.Min(BaseBuildingCoverageMeters, RadarCoverageMeters) <= BaseSiteMaxMeters)
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: a base-building coverage ring is inside the siting ring, "
+                    + "so a structure the commander builds can never satisfy the base that wanted it.");
+        }
+
+        // The captured-base wish order (design Section 4): the depot comes before the pad, because a
+        // base that deploys nothing cannot hold the ground it stands on.
+        if (NextBaseFacility(true, true) != CommanderBaseFacility.Depot
+            || NextBaseFacility(true, false) != CommanderBaseFacility.Depot
+            || NextBaseFacility(false, true) != CommanderBaseFacility.Pad
+            || NextBaseFacility(false, false) != CommanderBaseFacility.None)
+        {
+            CommanderPlugin.Log.LogError(
+                "Economy self-check FAILED: a captured base's depot no longer outranks its landing pad.");
         }
 
         // The catalogue files every building under its own BuildingType, so a game patch that adds
@@ -457,6 +557,14 @@ internal sealed partial class CommanderEconomyService
             PayIncome();
         }
 
+        // Captured depots (design.md, fob-construction_20260914 Decision 6). On the depot rally's own
+        // five-second cadence, because it answers the same question — which depots does this faction
+        // actually own — and a base changing hands must not wait a 30 s review to start deploying.
+        if (CommanderScheduler.IsDue(ref nextCapturedDepotSweepAt, CapturedDepotSweepSeconds))
+        {
+            WatchCapturedDepots();
+        }
+
         // The enemy structure loop no longer spends on its own clock (user decision 2026-09-14, the
         // priority ladder): rung 4 is called from the enemy commander's review — the single spend
         // site — through SpendEnemyStructures, so income is this service's only clock-bound job.
@@ -497,6 +605,14 @@ internal sealed partial class CommanderEconomyService
         // Rung-4 savings (design.md, commander-priorities_20260914): a new mission starts a new
         // bank, like every other per-HQ state.
         structureSavings.Clear();
+        // FOB construction (fob-construction_20260914): the name counter and the helipad resolver
+        // are per-mission for the reason the other definition caches are — a new mission may load a
+        // different encyclopedia, and two missions must not share a base's unique name.
+        fobNameCounter = 0;
+        rotaryHangar = null;
+        rotaryHangarResolved = false;
+        depotOwners.Clear();
+        nextCapturedDepotSweepAt = CommanderScheduler.Stagger("economy.capturedDepots", CapturedDepotSweepSeconds);
         StatusText = string.Empty;
         nextIncomeAt = CommanderScheduler.Stagger("economy.income", IncomeIntervalSeconds);
     }
@@ -538,6 +654,7 @@ internal sealed partial class CommanderEconomyService
 
         pendingBuild = kind;
         pendingStructure = null;
+        preview.ResetRotation();
         StatusText = $"Select the {label} site in the 3D world.";
     }
 
@@ -573,6 +690,10 @@ internal sealed partial class CommanderEconomyService
         BuildingDefinition? structure = pendingStructure;
         BuildingDefinition? placed = PendingDefinition;
         float cost = PendingBuildCost;
+        // The rotation the ghost was showing when the click landed — the chosen heading, and the
+        // slope under it when ground-conforming is on. Taken before the disarm below so the
+        // building goes down sitting exactly as the player was looking at it.
+        Quaternion placedRotation = preview.PlacementRotation;
 
         // The ghost has already said whether this site is legal; the click obeys it rather than
         // building a refinery through the highway because the player was quick on the mouse.
@@ -605,7 +726,7 @@ internal sealed partial class CommanderEconomyService
 
         if (kind == CommanderBuildKind.Structure)
         {
-            if (structure == null || !PlaceStructure(hq, position, structure, cost))
+            if (structure == null || !PlaceStructure(hq, position, structure, cost, placedRotation))
             {
                 pendingBuild = CommanderBuildKind.None;
                 pendingStructure = null;
@@ -617,7 +738,7 @@ internal sealed partial class CommanderEconomyService
 
         if (kind == CommanderBuildKind.NavalDock)
         {
-            if (SpawnNavalDock(hq, position) == null)
+            if (SpawnNavalDock(hq, position, rotation: placedRotation) == null)
             {
                 pendingBuild = CommanderBuildKind.None;
                 preview.Hide();
@@ -634,7 +755,7 @@ internal sealed partial class CommanderEconomyService
 
         if (kind == CommanderBuildKind.Mine)
         {
-            if (SpawnMine(hq, position) == null)
+            if (SpawnMine(hq, position, rotation: placedRotation) == null)
             {
                 pendingBuild = CommanderBuildKind.None;
                 preview.Hide();
@@ -649,7 +770,7 @@ internal sealed partial class CommanderEconomyService
         }
 
         VehicleDefinition? production = SelectedProduction;
-        if (production == null || SpawnFactory(hq, position, production) == null)
+        if (production == null || SpawnFactory(hq, position, production, rotation: placedRotation) == null)
         {
             pendingBuild = CommanderBuildKind.None;
             preview.Hide();
@@ -756,12 +877,30 @@ internal sealed partial class CommanderEconomyService
     /// Pays every faction's mines. <c>factionFunds</c> is a server SyncVar, so this is a no-op on a
     /// pure multiplayer client — the host runs the economy for everyone.
     /// </summary>
+    /// <summary>The income multiplier this faction earns at: <c>EnemyIncomeMultiplier</c> for every
+    /// faction that is not the player's own, 1 for the player's. One definition for points, bases and
+    /// mines (Reuse rule 4). Pure core in <see cref="IncomeHandicapFor"/>.</summary>
+    internal static float IncomeHandicap(FactionHQ hq)
+    {
+        return IncomeHandicapFor(ReferenceEquals(hq, CommanderGameAccess.GetLocalHq()), CommanderSettings.EnemyIncomeMultiplier);
+    }
+
+    /// <summary>The handicap rule, pure: the player's own faction always earns at 1; another faction
+    /// earns at the multiplier, floored at 0 so a mistyped negative cannot drain a treasury.</summary>
+    internal static float IncomeHandicapFor(bool isLocal, float multiplier)
+    {
+        return isLocal ? 1f : Mathf.Max(0f, multiplier);
+    }
+
     private void PayIncome()
     {
         HoldFundsInTreasury();
         // Points pay first: a faction with no mines yet still holds bases, and the mine loop below
         // returns early when there are none.
         CommanderStrategicPointService.Instance?.PayPointIncome(IncomeIntervalSeconds / 60f);
+        // Before the early return below: a faction with no mines still earns from its points, and
+        // that is exactly the side whose income the reader needs to see.
+        ReportIncome();
         if (mineLevels.Count == 0)
         {
             return;
@@ -781,7 +920,7 @@ internal sealed partial class CommanderEconomyService
             FactionHQ hq = mine.NetworkHQ;
             if (hq != null && hq.IsServer)
             {
-                hq.AddFunds(GetMineIncomePerMinute(entry.Value) * share);
+                hq.AddFunds(GetMineIncomePerMinute(entry.Value) * share * IncomeHandicap(hq));
             }
         }
 
@@ -790,6 +929,50 @@ internal sealed partial class CommanderEconomyService
             mineLevels.Remove(staleUnits[i]);
         }
         staleUnits.Clear();
+    }
+
+    /// <summary>
+    /// Every server faction's income per minute and what is paying it, on the
+    /// <see cref="IncomeReportEveryTicks"/> cadence and behind <c>OperationsDebugLog</c> with the
+    /// rest of the commander diagnostics. The points half is the same read the COMMANDER LOG header
+    /// shows (Reuse rule 4), so the log and the window can never disagree about what a side earns.
+    /// </summary>
+    private void ReportIncome()
+    {
+        if (!CommanderSettings.OperationsDebugLog)
+        {
+            return;
+        }
+
+        incomeReportTicks++;
+        if (incomeReportTicks % IncomeReportEveryTicks != 1)
+        {
+            return;
+        }
+
+        CommanderStrategicPointService? points = CommanderStrategicPointService.Instance;
+        foreach (FactionHQ hq in FactionRegistry.GetAllHQs())
+        {
+            if (hq == null || !hq.IsServer || hq.faction == null)
+            {
+                continue;
+            }
+
+            float pointIncome = 0f;
+            CommanderStrategicPointService.PointCounts counts = default;
+            if (points != null)
+            {
+                pointIncome = points.GetPointIncomePerMinute(hq, out counts);
+            }
+
+            float mineIncome = GetMineIncomePerMinute(hq);
+            CommanderPlugin.Log.LogInfo(
+                $"Ops {CommanderPlayerCommanderService.CommanderLabel(hq)}: income "
+                    + $"{pointIncome + mineIncome:0}/min (points {pointIncome:0} from {counts.Bases} bases, "
+                    + $"{counts.Villages} villages, {counts.Hilltops} hilltops, {counts.Outposts} outposts, "
+                    + $"{counts.Crossroads} crossroads, {counts.Roadside} road points; "
+                    + $"mines {mineIncome:0}), balance {hq.factionFunds:0}.");
+        }
     }
 
     /// <summary>
@@ -821,7 +1004,8 @@ internal sealed partial class CommanderEconomyService
         }
     }
 
-    private Unit? SpawnMine(FactionHQ hq, GlobalPosition position, bool randomRotation = false)
+    private Unit? SpawnMine(
+        FactionHQ hq, GlobalPosition position, bool randomRotation = false, Quaternion? rotation = null)
     {
         // Every mine spawn path — the player's click and the enemy's build step alike — ends here,
         // so the site snap is enforced once, in the one place both of them call. A map with no
@@ -830,15 +1014,26 @@ internal sealed partial class CommanderEconomyService
         CommanderStrategicPointService? pointService = CommanderStrategicPointService.Instance;
         bool onSite = pointService != null && pointService.HasResourceSites;
         GlobalPosition site = position;
-        if (onSite && !pointService!.TrySnapMineSite(position, out site))
+        // The builder goes in too (user decision 2026-09-14): only the faction holding the site may
+        // put a mine on it, and this is the one place both the player's click and the enemy's build
+        // step end up.
+        if (onSite && !pointService!.TrySnapMineSite(position, out site, hq))
         {
             return null;
         }
 
         Unit? mine = SpawnBuilding(
-            hq, site, ResolveDefinition(CommanderBuildKind.Mine), MineDisplayName, randomRotation);
+            hq, site, ResolveDefinition(CommanderBuildKind.Mine), MineDisplayName, randomRotation, rotation);
         if (mine == null)
         {
+            // The usual refusal on a held site is the site's own garrison standing where the mine
+            // goes (user report 2026-09-14). Push it off the ring so the next attempt — the
+            // commander's next review, or the player's next click — lands.
+            if (onSite && pointService!.TryGetPointAt(site, out CommanderStrategicPoint? sitePoint) && sitePoint != null)
+            {
+                CommanderOperationsService.RequestSiteClearance(hq, sitePoint);
+            }
+
             return null;
         }
 
@@ -856,10 +1051,12 @@ internal sealed partial class CommanderEconomyService
     /// scenery — so everything it does lives in <see cref="GetNavalDockLevel(FactionHQ)"/>, which
     /// both the player's naval window and the enemy commander read before they buy a ship.
     /// </summary>
-    private Unit? SpawnNavalDock(FactionHQ hq, GlobalPosition position, bool randomRotation = false)
+    private Unit? SpawnNavalDock(
+        FactionHQ hq, GlobalPosition position, bool randomRotation = false, Quaternion? rotation = null)
     {
         Unit? dock = SpawnBuilding(
-            hq, position, ResolveDefinition(CommanderBuildKind.NavalDock), NavalDockDisplayName, randomRotation);
+            hq, position, ResolveDefinition(CommanderBuildKind.NavalDock), NavalDockDisplayName, randomRotation,
+            rotation);
         if (dock == null)
         {
             return null;
@@ -901,14 +1098,16 @@ internal sealed partial class CommanderEconomyService
         FactionHQ hq,
         GlobalPosition position,
         VehicleDefinition production,
-        bool randomRotation = false)
+        bool randomRotation = false,
+        Quaternion? rotation = null)
     {
         Unit? unit = SpawnBuilding(
             hq,
             position,
             ResolveDefinition(CommanderBuildKind.Factory),
             $"{production.code} Factory",
-            randomRotation);
+            randomRotation,
+            rotation);
         if (unit == null)
         {
             return null;
@@ -926,14 +1125,12 @@ internal sealed partial class CommanderEconomyService
     }
 
     /// <summary>
-    /// Spawns the building. The player's placements are unrotated so the ghost preview is exactly
-    /// what lands; the enemy commander still scatters its rotations, because nobody is watching a
-    /// ghost for those.
-    /// </summary>
-    /// <summary>
-    /// Spawns the building under <paramref name="displayName"/>. The player's placements are
-    /// unrotated so the ghost preview is exactly what lands; the enemy commander still scatters
-    /// its rotations, because nobody is watching a ghost for those.
+    /// Spawns the building under <paramref name="displayName"/>, sitting as
+    /// <paramref name="rotation"/> says. The player's placements pass the rotation the ghost was
+    /// showing when the click landed — chosen heading, and the slope under it when the placement was
+    /// conforming to the ground — so the preview is exactly what lands. The enemy commander still
+    /// scatters its rotations, because nobody is watching a ghost for those, and a caller that asks
+    /// for neither gets an upright building facing north as before.
     /// </summary>
     /// <remarks>
     /// The name is written twice on purpose. <c>UniqueName</c> is the id the game registers the
@@ -947,7 +1144,8 @@ internal sealed partial class CommanderEconomyService
         GlobalPosition position,
         BuildingDefinition? definition,
         string displayName,
-        bool randomRotation = false)
+        bool randomRotation = false,
+        Quaternion? rotation = null)
     {
         Spawner? spawner = NetworkSceneSingleton<Spawner>.i;
         if (definition == null || spawner == null)
@@ -962,15 +1160,17 @@ internal sealed partial class CommanderEconomyService
             return null;
         }
 
-        Quaternion rotation = randomRotation
+        // The spawn offset is turned with the building, so a tilted structure's offset follows the
+        // slope with it — the same product CommanderBuildPreview.Draw uses for the ghost.
+        Quaternion placement = randomRotation
             ? Quaternion.Euler(0f, Random.Range(0f, 360f), 0f)
-            : Quaternion.identity;
+            : rotation ?? Quaternion.identity;
         GlobalPosition ground = CommanderGameAccess.SnapToTerrain(position);
-        Vector3 local = ground.ToLocalPosition() + rotation * definition.spawnOffset;
+        Vector3 local = ground.ToLocalPosition() + placement * definition.spawnOffset;
         Unit? spawned = spawner.SpawnFromUnitDefinitionInEditor(
             definition,
             local.ToGlobalPosition(),
-            rotation,
+            placement,
             hq,
             $"{displayName} {++builtNameCounter}");
         if (spawned != null)
@@ -1116,19 +1316,19 @@ internal sealed partial class CommanderEconomyService
         }
 
         string label = CommanderGameAccess.GetUnitLabel(unit);
-        builtUnits.Remove(unit);
         mineLevels.Remove(unit);
         factoryLevels.Remove(unit);
         dockLevels.Remove(unit);
 
-        NetworkManagerNuclearOption? manager = NetworkManagerNuclearOption.i;
-        if (unit.Identity == null || manager?.ServerObjectManager == null)
+        // The despawn itself is DespawnUnit's (Economy/CommanderFobBuilder.cs) — extracted when the
+        // FOB abandonment became the second caller of this identical body (Reuse rule 5). This one
+        // keeps the level bookkeeping and the player's status line, which the AI path has no use for.
+        if (!DespawnUnit(unit))
         {
             StatusText = $"{label} could not be demolished.";
             return;
         }
 
-        manager.ServerObjectManager.Destroy(unit.Identity, !unit.Identity.IsSceneObject);
         RefreshFriendlyLists();
         StatusText = $"{label} demolished.";
     }
@@ -1293,16 +1493,28 @@ internal sealed partial class CommanderEconomyService
         return null;
     }
 
+    /// <summary>Any buildable prefab that is NOT a functional category the commanders need — a
+    /// depot, a hangar or a radar stand-in for a dock would take that category off the build list
+    /// (see <see cref="NavalDockPrefabKeys"/>). Pure test in <see cref="MayStandInForDock"/>.</summary>
     private static BuildingDefinition? FindAnyBuilding(Encyclopedia encyclopedia)
     {
         for (int i = 0; i < encyclopedia.buildings.Count; i++)
         {
-            if (encyclopedia.buildings[i] != null && encyclopedia.buildings[i].unitPrefab != null)
+            BuildingDefinition candidate = encyclopedia.buildings[i];
+            if (candidate != null && candidate.unitPrefab != null && MayStandInForDock(candidate.buildingType))
             {
-                return encyclopedia.buildings[i];
+                return candidate;
             }
         }
 
         return null;
+    }
+
+    /// <summary>Which building categories the naval dock may borrow a prefab from, pure: never a
+    /// depot, hangar or radar, because the catalogue hides the dock's prefab from the player and
+    /// the AI resolves each of those categories off the same catalogue.</summary>
+    internal static bool MayStandInForDock(BuildingType type)
+    {
+        return type is not (BuildingType.DEP or BuildingType.HGR or BuildingType.RDR);
     }
 }

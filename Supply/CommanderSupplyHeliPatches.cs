@@ -63,6 +63,15 @@ internal static class CommanderSupplyHeliPatches
         return !CommanderSupplyHeliService.ShouldDelayCargoTakeoff(__instance, state);
     }
 
+    /// <summary>The insertion shield (Supply/CommanderSupplyHeliShield.cs): a shielded vehicle's parts
+    /// take no damage of any kind — this is the one entry every kind passes through.</summary>
+    [HarmonyPatch(typeof(UnitPart), nameof(UnitPart.TakeDamage))]
+    [HarmonyPrefix]
+    private static bool UnitPartTakeDamagePrefix(UnitPart __instance)
+    {
+        return !CommanderSupplyHeliService.ShieldsDamage(__instance);
+    }
+
     [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.ReturnToInventory))]
     [HarmonyPostfix]
     private static void ReturnToInventoryPostfix(Aircraft __instance)

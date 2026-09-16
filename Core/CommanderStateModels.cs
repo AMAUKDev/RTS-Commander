@@ -36,6 +36,16 @@ internal sealed class CommanderStateSnapshot
 
     /// <summary>Naval dock upgrade levels, keyed by the dock building's <c>PersistentID</c>.</summary>
     public List<CommanderEconomyLevelRecord> DockLevels { get; set; } = new();
+
+    /// <summary>Every strategic point discovery found — sites, villages, hilltops, outposts,
+    /// crossroads, road points and bases — so a hot reload does not re-roll a randomly sampled map
+    /// and move every objective. Record type and the reasoning in
+    /// <c>Points/CommanderStrategicPointPersist.cs</c>.</summary>
+    public List<CommanderStrategicPointRecord> StrategicPoints { get; set; } = new();
+
+    /// <summary>The road polylines discovery retained, which the road-distance and insertion rules
+    /// read; restoring points without them would fail every road test.</summary>
+    public List<CommanderRoadPolylineRecord> StrategicRoads { get; set; } = new();
 }
 
 /// <summary>An upgrade level keyed by the building's stable, reload-surviving unit id.</summary>

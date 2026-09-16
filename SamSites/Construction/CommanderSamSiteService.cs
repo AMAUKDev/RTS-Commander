@@ -175,12 +175,15 @@ internal sealed partial class CommanderSamSiteService : ICommanderTickPersistent
 
     private static float FindFactionMunitionsTruckCapacity(FactionHQ hq)
     {
-        string faction = $"{hq.faction?.factionTag} {hq.faction?.factionName} {hq.faction?.factionExtendedName}";
-        string expectedName = faction.IndexOf("PALA", StringComparison.OrdinalIgnoreCase) >= 0
-            ? "MSV Munitions"
-            : faction.IndexOf("BDF", StringComparison.OrdinalIgnoreCase) >= 0
-                ? "HLT Munitions Truck"
-                : string.Empty;
+        // The side test lives in CommanderFactionRoster (Reuse rule 5: this expression and the one
+        // in GetFactionVehicleName were the first two instances, and the faction split needed a
+        // third). Behaviour-neutral: the same three name fields, the same two tags.
+        string expectedName = CommanderFactionRoster.SideOf(hq) switch
+        {
+            CommanderFactionSide.Primeva => "MSV Munitions",
+            CommanderFactionSide.Boscali => "HLT Munitions Truck",
+            _ => string.Empty,
+        };
 
         VehicleDefinition? definition = Resources.FindObjectsOfTypeAll<VehicleDefinition>()
             .FirstOrDefault(candidate =>
@@ -339,9 +342,9 @@ internal sealed partial class CommanderSamSiteService : ICommanderTickPersistent
         CommanderSamSiteAnalyzerService.SiteUnitRole role,
         FactionHQ hq)
     {
-        string faction = $"{hq.faction?.factionTag} {hq.faction?.factionName} {hq.faction?.factionExtendedName}";
-        bool pala = faction.IndexOf("PALA", StringComparison.OrdinalIgnoreCase) >= 0;
-        bool bdf = faction.IndexOf("BDF", StringComparison.OrdinalIgnoreCase) >= 0;
+        CommanderFactionSide side = CommanderFactionRoster.SideOf(hq);
+        bool pala = side == CommanderFactionSide.Primeva;
+        bool bdf = side == CommanderFactionSide.Boscali;
 
         if (pala)
         {

@@ -141,7 +141,19 @@ internal sealed partial class CommanderOverlayUi
             bool free = point.Mine == null || point.Mine.disabled;
             if (free)
             {
-                body = "FREE  —  build a gold mine here";
+                // Since 2026-09-14 a site is taken by presence before it can be mined, so the card
+                // says who holds it and how far off the garrison is rather than inviting a build
+                // that would be refused.
+                FactionHQ? siteOwner = point.GetOwner();
+                FactionHQ? siteLocal = CommanderGameAccess.GetLocalHq();
+                int siteGarrison = siteLocal != null
+                    ? CommanderStrategicPointService.Instance?.GetPresentCount(point, siteLocal) ?? 0
+                    : 0;
+                string siteContested = point.Hold.Contested ? "  CONTESTED" : string.Empty;
+                body = siteOwner == null
+                    ? $"FREE  —  hold it to build a gold mine   GARRISON {siteGarrison}/{CommanderSettings.PointsMinGarrison}{siteContested}"
+                    : $"HELD BY {siteOwner.faction.name.ToUpperInvariant()}  —  build a gold mine here   "
+                        + $"GARRISON {siteGarrison}/{CommanderSettings.PointsMinGarrison}{siteContested}";
             }
             else
             {

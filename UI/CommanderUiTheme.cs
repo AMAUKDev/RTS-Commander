@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -385,7 +386,72 @@ internal static class CommanderUiTheme
         GUI.DrawTexture(new Rect(x, y, width, height), Texture2D.whiteTexture);
     }
 
-    /// <summary>Label with a dark halo, bottom-centred on <paramref name="anchor"/>.</summary>
+    /// <summary>The colour of every logistics marker the local commander owns — transports,
+    /// construction and lift flights, FOB orders, convoy and supply trucks (user, 2026-09-15: "make
+    /// logistic mission markers green"). Green reads as "supply", apart from the faction colour of the
+    /// fighting units and the amber of an untasked airframe. Hostile logistics keep the hostile colour.</summary>
+    internal static readonly Color LogisticsMarkerColor = new(0.35f, 0.9f, 0.4f, 1f);
+
+    /// <summary>
+    /// Gap between two stacked labels: 2 px, the halo's own reach, so stacked lines touch without
+    /// their halos overwriting each other's letters (user, 2026-09-15: "when markers stack on a
+    /// point they become illegible, as the text is placed directly over each other").
+    /// </summary>
+    private const float LabelStackGapPixels = 2f;
+
+    /// <summary>How many places up a label will try before it gives up and overlaps: 12. A dozen
+    /// stacked lines is already a column the eye cannot read at a glance; past that the point is
+    /// overloaded and stacking further would put labels off the top of the screen.</summary>
+    private const int LabelStackMaxSteps = 12;
+
+    /// <summary>The label rectangles drawn so far this repaint. Every world label — units, points,
+    /// aircraft, orders — comes through <see cref="DrawWorldLabel"/>, so this one list is the whole
+    /// picture, and it is emptied when the frame number changes.</summary>
+    private static readonly List<Rect> placedLabels = new();
+
+    private static int placedLabelsFrame = -1;
+
+    /// <summary>
+    /// Where a label goes so it does not sit on one already drawn, pure: the rectangle is moved UP
+    /// by its own height plus the gap, one step at a time, until it overlaps nothing in
+    /// <paramref name="placed"/> or <paramref name="maxSteps"/> is spent. Up rather than down,
+    /// because every world label is anchored above its marker — stacking upward keeps the marker
+    /// itself clear and reads as a column rising off the point. Touching edges do not count as an
+    /// overlap.
+    /// </summary>
+    internal static Rect StackedLabelRect(Rect rect, IReadOnlyList<Rect> placed, float gap, int maxSteps)
+    {
+        for (int step = 0; step < maxSteps; step++)
+        {
+            bool overlaps = false;
+            for (int i = 0; i < placed.Count; i++)
+            {
+                if (RectsOverlap(rect, placed[i]))
+                {
+                    overlaps = true;
+                    break;
+                }
+            }
+
+            if (!overlaps)
+            {
+                return rect;
+            }
+
+            rect.y -= rect.height + gap;
+        }
+
+        return rect;
+    }
+
+    /// <summary>Strict overlap: two rectangles that merely touch along an edge do not overlap.</summary>
+    internal static bool RectsOverlap(Rect a, Rect b)
+    {
+        return a.xMin < b.xMax && a.xMax > b.xMin && a.yMin < b.yMax && a.yMax > b.yMin;
+    }
+
+    /// <summary>Label with a dark halo, bottom-centred on <paramref name="anchor"/> — or stacked
+    /// above whatever label already stands there (see <see cref="StackedLabelRect"/>).</summary>
     internal static void DrawWorldLabel(Vector2 anchor, string label, Color color)
     {
         if (string.IsNullOrEmpty(label))
@@ -396,6 +462,20 @@ internal static class CommanderUiTheme
         Ensure();
         Vector2 size = WorldLabel.CalcSize(new GUIContent(label));
         Rect rect = new(anchor.x - size.x * 0.5f, anchor.y - size.y, size.x, size.y);
+        // Only the repaint pass places labels: the layout pass draws nothing visible, and letting it
+        // register rectangles would make the repaint stack every label one step higher than needed.
+        if (Event.current != null && Event.current.type == EventType.Repaint)
+        {
+            if (placedLabelsFrame != Time.frameCount)
+            {
+                placedLabelsFrame = Time.frameCount;
+                placedLabels.Clear();
+            }
+
+            rect = StackedLabelRect(rect, placedLabels, LabelStackGapPixels, LabelStackMaxSteps);
+            placedLabels.Add(rect);
+        }
+
         Color previous = GUI.color;
         // Four-way halo instead of a plate: legible over sky, terrain or a unit, and it hides
         // nothing. ponytail: 4 offsets, go to 8 only if it still smears on bright terrain.
@@ -407,6 +487,33 @@ internal static class CommanderUiTheme
         GUI.color = color;
         GUI.Label(rect, label, WorldLabel);
         GUI.color = previous;
+    }
+
+    /// <summary>The stacking rule at its boundaries, run at plugin load beside the other services'
+    /// checks: a clear rectangle stays put, an overlapping one moves up by its height plus the gap,
+    /// a touching edge is not an overlap, and the step count is bounded.</summary>
+    internal static void SelfCheck()
+    {
+        List<Rect> placed = new() { new Rect(0f, 100f, 80f, 16f) };
+        Rect clear = StackedLabelRect(new Rect(200f, 100f, 80f, 16f), placed, 2f, 12);
+        Rect moved = StackedLabelRect(new Rect(10f, 100f, 80f, 16f), placed, 2f, 12);
+        Rect touching = StackedLabelRect(new Rect(80f, 100f, 80f, 16f), placed, 2f, 12);
+        List<Rect> column = new();
+        for (int i = 0; i < 12; i++)
+        {
+            column.Add(new Rect(0f, 100f - i * 18f, 80f, 16f));
+        }
+
+        Rect capped = StackedLabelRect(new Rect(0f, 100f, 80f, 16f), column, 2f, 12);
+        if (!Mathf.Approximately(clear.y, 100f)
+            || !Mathf.Approximately(moved.y, 82f)
+            || !Mathf.Approximately(touching.y, 100f)
+            || !Mathf.Approximately(capped.y, 100f - 12 * 18f))
+        {
+            CommanderPlugin.Log.LogError(
+                "UI theme self-check FAILED: world labels no longer stack upward off an occupied spot "
+                    + $"(clear {clear.y}, moved {moved.y}, touching {touching.y}, capped {capped.y}).");
+        }
     }
 
     internal static bool DrawHelpButton(float windowWidth, ref bool visible)

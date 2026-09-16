@@ -73,7 +73,25 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     private readonly HashSet<FactionHQ> loggedGroundRoster = new();
 
     /// <summary>Airframes the enemy has in the air, and when each entered it. See ReportLostAircraft.</summary>
-    private readonly Dictionary<Aircraft, float> airborneSince = new();
+    /// <summary>What the loss line needs about an airframe once the object is gone: when it was
+    /// first seen in the world, its type, and where it last was (updated every review), so a loss
+    /// can be placed — at its own deck, over the front, or somewhere in between (fix, 2026-09-15:
+    /// four enemy fighters "lost after 30 s in the air" with nothing to say where).</summary>
+    private sealed class TrackedAirframe
+    {
+        internal float Since;
+        internal string Name = string.Empty;
+        internal GlobalPosition LastPosition;
+        internal float LastRadarAlt;
+    }
+
+    private readonly Dictionary<Aircraft, TrackedAirframe> airborneSince = new();
+
+    /// <summary>Airframes that went back into stock or were written off on the deck — told to us by
+    /// the same hooks the attrition ledger reads (fix, 2026-09-15). The loss line used to call every
+    /// one of them "lost … 0.1 km from Sandrift Airbase at 0 m above ground" after a ten-minute
+    /// sortie, which read as a deck death and was a landing.</summary>
+    private readonly HashSet<Aircraft> recoveredAirframes = new();
     private readonly List<Aircraft> lostAircraft = new();
 
     private readonly List<FactionHQ> staleHqs = new();
@@ -188,6 +206,41 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         CheckAirBuyRules();
         CheckDefencePosture();
         CheckLadder();
+        CheckSpawnDepotPick();
+    }
+
+    /// <summary>
+    /// The nearest-depot pick at its named boundaries (reach-and-points Section 4). The live pick
+    /// walks live depots; <c>CommanderEconomyService.NearestUsableIndex</c> is that rule with the
+    /// objects taken out, so "nearer wins, a depot that cannot be used is skipped, none at all means
+    /// fall back to supply" is checked at load.
+    /// </summary>
+    private static void CheckSpawnDepotPick()
+    {
+        Expect(
+            "the nearer of two working depots spawns the vehicle",
+            CommanderEconomyService.NearestUsableIndex(
+                new List<float> { 9000f, 2000f, 30000f }, new List<bool> { true, true, true }),
+            1);
+        Expect(
+            "a depot that cannot be used is skipped however near it is",
+            CommanderEconomyService.NearestUsableIndex(
+                new List<float> { 100f, 5000f }, new List<bool> { false, true }),
+            1);
+        Expect(
+            "a commander with no usable depot at all falls back to supply",
+            CommanderEconomyService.NearestUsableIndex(
+                new List<float> { 100f, 5000f }, new List<bool> { false, false }),
+            -1);
+        Expect(
+            "a commander with no depot at all falls back to supply",
+            CommanderEconomyService.NearestUsableIndex(new List<float>(), new List<bool>()),
+            -1);
+        Expect(
+            "two depots the same distance away keep the first",
+            CommanderEconomyService.NearestUsableIndex(
+                new List<float> { 5000f, 5000f }, new List<bool> { true, true }),
+            0);
     }
 
     private static void CheckPlan(string name, in ForceRead force, EnemyPlan expected)
@@ -276,6 +329,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         loggedAirRoster.Clear();
         loggedGroundRoster.Clear();
         airborneSince.Clear();
+        groundLossRefunds.Clear();
         lostAircraft.Clear();
         staleHqs.Clear();
         catalog.Clear();
@@ -400,8 +454,10 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
     /// <summary>
     /// The priority ladder's spend walk (design.md, commander-priorities_20260914). Rung 1 — the home
-    /// CAP — draws first and is strict: while it is short, the review ends here and nothing
-    /// below it is bought. The survivors share the remainder by a weighted draw each review —
+    /// CAP — draws first and is strict, but only up to the BASELINE (user decision 2026-09-14,
+    /// revised): while fewer than <c>HomeCapBaseline</c> fighters are alive the review ends here and
+    /// nothing below it is bought; everything the formula wants above the baseline is ordinary CAP
+    /// demand inside rung 2. The survivors share the remainder by a weighted draw each review —
     /// platoons 60 / pickets 20 / buildings 20, with a floor for every rung with open demand.
     /// Returns how many vehicles it bought this review.
     /// </summary>
@@ -409,6 +465,12 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     {
         int boughtCount = 0;
         float pot = spendable;
+
+        // Last cycle's flights come off the bank before anything else (departure 2026-09-14): the
+        // operations review charges them on its own clock, so this is where the ladder learns what
+        // was spent — and the same number is what the line at the end of the review reports.
+        float picketSpent = CommanderOperationsService.TakeInsertionSpend(hq);
+        state.PicketSavings = Mathf.Max(0f, state.PicketSavings - picketSpent);
 
         // ---- Rung 1: home CAP, strict (design Section 2) ----
         HomeCapRead cap = ReviewHomeCap(hq, state, spendable);
@@ -426,13 +488,18 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
                 spendable,
                 $"home CAP impossible — no air-to-air-capable airframe can launch from {HeldBaseNames(hq)}");
         }
-        else if (LadderHoldsForCap(cap.Short, cap.CeilingBlocked))
+        else if (LadderHoldsForCap(cap.Alive, cap.Baseline, cap.CeilingBlocked))
         {
             // No draw ran, so the order list is last review's — empty it or the line would print a
             // draw that never happened.
             ladderOrder.Clear();
-            ReportHold(hq, state, spendable, $"home CAP short {cap.Short} (wanted {cap.Wanted}, alive {cap.Alive})");
-            ReportLadder(hq, in cap, ladderOrder, pot, cap.Spent, 0f, CommanderOperationsService.TakeInsertionSpend(hq), 0f, state.AirFund, state.AirFundCap);
+            ReportHold(
+                hq,
+                state,
+                spendable,
+                $"home CAP below its baseline: {cap.Alive}/{cap.Baseline} alive (the formula wants {cap.Wanted}, "
+                    + "the rest is rung 2's)");
+            ReportLadder(hq, in cap, ladderOrder, pot, cap.Spent, 0f, picketSpent, 0f, state.AirFund, state.AirFundCap, state.Rung2AirReserved, state.AwacsSavings, state.AwacsSavingsTarget, state.PicketSavings, state.PicketSavingsTarget, CommanderOperationsService.WantsAwacsPurchase(hq));
             return boughtCount;
         }
 
@@ -499,12 +566,33 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             float budget = LadderRungBudget(pool, floor, ladderOrder.Count - position - 1);
             if (rung == RungPickets)
             {
-                // The grant IS the rung's take (design Section 3): the operations review charges the
-                // flight against it and the consumption shows on the next ladder line. It is not
-                // earmarked out of this review's pool — the flight charges the balance on its own
-                // clock, and the next ladder review overwrites whatever was not consumed (plan.md,
-                // departure 3).
-                CommanderOperationsService.GrantInsertionAllowance(hq, budget);
+                // Rung 3 BANKS its allocation (departure 2026-09-14) rather than being handed a
+                // fresh share every review. An insertion flight is a transport hull plus two
+                // vehicles — around 134 on the 2026-09-14 match — while a 20 % rung of a post-CAP
+                // remainder near 100 grants 10 to 30, and the share used to be recomputed from
+                // nothing each review: every flight of that match was refused with "the ladder's
+                // picket share cannot cover the flight" and no picket was ever inserted. The bank
+                // stops at exactly one flight's price, the same shape as the radar airframe's
+                // slice and the building rung's savings, so a rung drawn first cannot hoard the
+                // remainder against the rungs below.
+                float target = PicketFlightPrice(hq);
+                state.PicketSavingsTarget = target;
+                float excess = PicketSavingsExcess(state.PicketSavings, target);
+                if (excess > 0f)
+                {
+                    // A cheaper transport, a strip lost, a roster that stopped fielding vehicle
+                    // cargo: what the bank may no longer hold goes back into this review's pool for
+                    // the rungs drawn after, exactly as the air fund's own overflow does.
+                    pool += excess;
+                    state.PicketSavings = target;
+                    budget = LadderRungBudget(pool, floor, ladderOrder.Count - position - 1);
+                }
+
+                // Unlike the old grant, what the bank takes IS withheld from the pool: it is money
+                // reserved for a flight that has not been ordered yet, and a later rung spending it
+                // as well would be the double-spend the ladder exists to prevent.
+                pool -= AccrueFund(ref state.PicketSavings, budget, target);
+                CommanderOperationsService.GrantInsertionAllowance(hq, state.PicketSavings, target);
                 continue;
             }
 
@@ -526,10 +614,12 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             }
         }
 
-        // A rung with no demand this cycle must not fly on a stale allowance from the last one.
+        // A rung with no demand this cycle must not fly on a stale allowance from the last one. The
+        // BANK survives — no demand this review is not money spent, and the next point that goes
+        // short finds the savings where the rung left them.
         if (!picketDemand)
         {
-            CommanderOperationsService.GrantInsertionAllowance(hq, 0f);
+            CommanderOperationsService.GrantInsertionAllowance(hq, 0f, state.PicketSavingsTarget);
         }
 
         // The review's hold line lives here now, not in Review: the strict path reports its own
@@ -540,7 +630,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             ReportHold(hq, state, Mathf.Max(0f, pot - cap.Spent - platoonSpent - buildingSpent), string.Empty);
         }
 
-        ReportLadder(hq, in cap, ladderOrder, pot, cap.Spent, platoonSpent, CommanderOperationsService.TakeInsertionSpend(hq), buildingSpent, state.AirFund, state.AirFundCap);
+        ReportLadder(hq, in cap, ladderOrder, pot, cap.Spent, platoonSpent, picketSpent, buildingSpent, state.AirFund, state.AirFundCap, state.Rung2AirReserved, state.AwacsSavings, state.AwacsSavingsTarget, state.PicketSavings, state.PicketSavingsTarget, CommanderOperationsService.WantsAwacsPurchase(hq));
         return boughtCount;
     }
 
@@ -584,7 +674,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             CommanderOperationsService.ReadAirDemandCounts(hq, out int capBound, out int capWanted, out int casBound, out int casWanted);
             CommanderPlugin.Log.LogInfo(
                 $"Ops {CommanderPlayerCommanderService.CommanderLabel(hq)}: air demand: CAP {capBound}/{capWanted}, "
-                    + $"CAS {casBound}/{casWanted}, ceiling {CountAirborne(hq)}/{CommanderSettings.AirborneCeiling}, "
+                    + $"CAS {casBound}/{casWanted}, ceiling {CountAirborne(hq)}/{CommanderOperationsService.EffectiveAirborneCeiling(hq)}, "
                     + $"budget {budget:0}.");
         }
 
@@ -593,7 +683,8 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         // existed because a flat per-review slice could never add up to an airframe while convoys
         // drained the balance, and the ladder's grant is the structural answer to the same
         // starvation. What it buys still flies the sorties the ground plan asked for, bounded by
-        // MaxAirBuysPerReview (user decision 2026-09-13) and the ceiling.
+        // the fund and the airborne ceiling (user decision 2026-09-14: money-limited, not
+        // count-limited — the three-buys-per-review cap of 2026-09-13 is superseded).
         // ... except that a per-review slice never reached the price of a strike airframe: the wing
         // asked for a 36-value Brawler or a 145-value Medusa out of whatever was left after the
         // home CAP's replacements, and logged "its air budget is short of the cheapest … airframe"
@@ -615,22 +706,133 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             state.AirFund = airCeiling;
         }
 
-        float airTaken = AccrueFund(ref state.AirFund, budget * AirBudgetShare, airCeiling);
-        budget -= airTaken;
-        for (int airBuy = 0; AirBuyContinues(airBuy) && state.AirFund > 0f; airBuy++)
+        // "Existing forces first" (user decision 2026-09-14): while a sortie over a platoon or point
+        // ACTUALLY FIGHTING is short of an airframe, a third of this rung's allocation is the wing's
+        // before the ground buyer sees any of it, and it banks across reviews like the rest of the
+        // fund until the airframe is affordable. The ordinary 40 % share is then taken out of the
+        // ground's two thirds as before, so a contact review gives the wing more than a quiet one
+        // without the quiet one changing at all.
+        bool inContactShort = CommanderOperationsService.HasInContactAirShortfall(hq);
+        Rung2Split(budget, inContactShort, out float airReserve, out float groundShare);
+        state.Rung2AirReserved = inContactShort;
+        // The reserve plus the ordinary share of what the ground keeps. Whatever the ceilings refuse
+        // flows back to the ground rather than evaporating — the same rule the ceiling overflow
+        // above follows, so a reserve the wing cannot use is never money nobody spends.
+        float airAsk = airReserve + (groundShare * AirBudgetShare);
+
+        // A quarter of the wing's own allocation is the radar airframe's (user decision
+        // 2026-09-14), banked where the fighters cannot reach it. Its ceiling is the price of the
+        // cheapest radar airframe the strips accept, so it stops the moment it can pay for one, and
+        // it is zero the moment one is owned — at which point whatever is banked is released to the
+        // rest of the wing rather than sitting there for the rest of the match.
+        bool wantsAwacs = CommanderOperationsService.WantsAwacsPurchase(hq);
+        float awacsTarget = wantsAwacs ? AffordablePrice(CheapestLaunchableValue(hq, state, AirRole.Awacs)) : 0f;
+        state.AwacsSavingsTarget = awacsTarget;
+        AirSplit(airAsk, wantsAwacs, out float awacsAsk, out float turnAsk);
+        if (state.AwacsSavings > awacsTarget)
+        {
+            turnAsk += state.AwacsSavings - awacsTarget;
+            state.AwacsSavings = awacsTarget;
+        }
+
+        float awacsTaken = AccrueFund(ref state.AwacsSavings, awacsAsk, awacsTarget);
+        // What the radar airframe's ceiling would not take is the wing's, not the ground's: it was
+        // the air side's allocation before it was ever earmarked.
+        float airTaken = AccrueFund(ref state.AirFund, turnAsk + (awacsAsk - awacsTaken), airCeiling);
+        budget = Mathf.Max(0f, budget - awacsTaken - airTaken);
+
+        // The ground's unspent share goes to the wing while the ground buyer is holding (user
+        // decision 2026-09-14). A commander whose vehicles are all bought to order and whose order
+        // book is empty is not going to spend this rung on anything: the 2026-09-14 match printed
+        // `holds: balance 491, unit budget 152` review after review while the wing reported
+        // thirteen unfilled CAS requests and a 214 budget it could not stretch to a strike airframe.
+        // The naval market keeps its own share out of this — a hull is the one ground thing an empty
+        // order book still wants — so its ask is priced here, before the hand-over, and paid from
+        // exactly that below.
+        float navalAsk = budget * NavalBudgetShare;
+        CommanderOperationsService.ReadAirDemandCounts(
+            hq, out int handoverCapBound, out int handoverCapWanted, out int handoverCasBound, out int handoverCasWanted);
+        int openAirRequests = Mathf.Max(0, handoverCapWanted - handoverCapBound)
+            + Mathf.Max(0, handoverCasWanted - handoverCasBound);
+        bool handsGroundShareToWing = GroundShareGoesToWing(bookOnly, hasOpenBook, openAirRequests > 0);
+        float handedToWing = 0f;
+        if (handsGroundShareToWing)
+        {
+            // Through the one accumulator, so the fund's ceiling bounds this exactly as it bounds
+            // the ordinary share: money the wing may not save stays on the ground's side of the
+            // rung and flows on to the rungs drawn after it.
+            handedToWing = AccrueFund(ref state.AirFund, Mathf.Max(0f, budget - navalAsk), airCeiling);
+            budget = Mathf.Max(0f, budget - handedToWing);
+        }
+
+        if (handsGroundShareToWing != state.GroundShareToWing)
+        {
+            state.GroundShareToWing = handsGroundShareToWing;
+            CommanderAiLog.Note(
+                hq,
+                handsGroundShareToWing
+                    ? $"hands the ground's unspent {handedToWing:0} to the wing: order book empty, "
+                        + $"{openAirRequests} air requests open."
+                    : "stops handing the ground's share to the wing: the order book has an open line "
+                        + "or the wing has asked for nothing.");
+        }
+        // A failed buy no longer ends the review's air buying outright (fix, 2026-09-14): the
+        // demand read advances the CAP/CAS turn whether or not the buy succeeded, so one more call
+        // asks the OTHER side of the wing. That is what makes "the ground-attack side still buys
+        // when the fighters are saving" true — the 2026-09-14 match refused nine buys in a row
+        // because the radar airframe was unaffordable, and every one of those refusals ended the
+        // review before any ground-attack demand was even read. Two failures in a row means both
+        // sides are stuck, and the review is genuinely over.
+        state.AirLastBuyOutcome = string.Empty;
+        int airFailures = 0;
+        // The savings count toward "the wing still has money": a fund emptied by a strike airframe
+        // must not end the review while the radar airframe's own slice is full.
+        // Money-limited, not count-limited (user decision 2026-09-14): the loop shops while the
+        // wing's money covers the cheapest airframe an open demand wants and the sky has room.
+        for (int airBuy = 0; AirBuyContinues(hq, state, airBuy) && airFailures < 2; airBuy++)
         {
             float airSpent = BuyAirframe(hq, state, state.AirFund, opponentForce);
             if (airSpent <= 0f)
             {
-                break;
+                airFailures++;
+                continue;
             }
 
-            state.AirFund -= airSpent;
+            airFailures = 0;
+            // A radar airframe is charged to its own savings first and to the wing's fund only for
+            // the remainder, which is what makes the slice a reservation rather than a label.
+            float fromAwacs = state.LastAirBuyWasAwacs ? Mathf.Min(state.AwacsSavings, airSpent) : 0f;
+            state.AwacsSavings = Mathf.Max(0f, state.AwacsSavings - fromAwacs);
+            state.AirFund = Mathf.Max(0f, state.AirFund - (airSpent - fromAwacs));
         }
 
-        budget -= ReviewNaval(hq, opponent, state, budget * NavalBudgetShare);
+        budget -= ReviewNaval(hq, opponent, state, navalAsk);
 
         if (bookOnly)
+        {
+            return grant - budget;
+        }
+
+        // The pool-full hold (user decision 2026-09-15, fix A): the depot loop already refuses to
+        // deploy while the idle pool is at PoolIdleCap (Depot/CommanderFactionVehicleService.cs,
+        // ShouldBlockAutomaticDeployment), but nothing told the buyer, so every buy banked supply
+        // that flooded out as vehicles the moment platoons formed and the pool drained. Same rule,
+        // same numbers, one definition (DeploymentHeldForFullPool); logged once per change the way
+        // the order-book hold above is.
+        int idle = CommanderOperationsService.PoolCount(hq);
+        bool poolFull = CommanderFactionVehicleService.DeploymentHeldForFullPool(
+            CommanderOperationsService.OwnsGroundForce(hq), idle, CommanderSettings.PoolIdleCap);
+        if (poolFull != state.GroundPoolFull)
+        {
+            state.GroundPoolFull = poolFull;
+            CommanderAiLog.Note(
+                hq,
+                poolFull
+                    ? $"holds ground buying: {idle} vehicles idle in the pool (cap {CommanderSettings.PoolIdleCap})."
+                    : "resumes ground buying: pool below the cap.");
+        }
+
+        if (poolFull)
         {
             return grant - budget;
         }
@@ -659,7 +861,7 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
                 // first affordable one. Falling back to the plan on the first unaffordable role
                 // bought a cheap vehicle the recipe could not use, and the truck line never won
                 // "largest" so no forward base ever got its truck.
-                CommanderOperationsService.OpenRolesByPriority(hq, boughtThisReview, openRoles);
+                CommanderOperationsService.OpenRolesByPriority(hq, catalog, boughtThisReview, openRoles);
                 for (int r = 0; r < openRoles.Count && choice == null; r++)
                 {
                     choice = ChooseForRole(budget, openRoles[r]);
@@ -698,14 +900,53 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
             }
 
             float cost = Mathf.Max(0f, choice.value);
+            // Where the vehicle is wanted decides where it appears (reach-and-points Section 4,
+            // user decision 2026-09-14: "for objectives further than this, MUST set up a FOB with a
+            // vehicle depot closer to the objective, and spawn from there"). Adding supply and
+            // letting the game's own deployment loop place it put every vehicle at whichever depot
+            // that loop reached first, which on a big map was routinely an airfield an hour's drive
+            // from the point the order book had asked for. A commander with no order book line for
+            // this role — an undiscovered one buying off its plan — aims at its own territory centre.
+            GlobalPosition objective = role != null
+                && CommanderOperationsService.TryGetOldestRequisitionObjective(
+                    hq, role.Value, out GlobalPosition lineObjective)
+                ? lineObjective
+                : CommanderCaptureService.GetTerritoryCenter(hq);
+            string where;
+            bool haveDepot = CommanderEconomyService.TryNearestOwnedDepot(hq, objective, out VehicleDepot depot, out _);
+            if (haveDepot && depot.TrySpawnVehicle(choice))
+            {
+                // The player's own build queue spawns exactly this way and settles payment after
+                // (Depot/CommanderSpawnService.cs, then CommitAcquisition), so a direct spawn with no
+                // supply banked is a plain spawn and the charge below is the whole price.
+                where = $" at {CommanderEconomyService.NearestHeldBaseLabel(hq, depot.transform.GlobalPosition())}";
+            }
+            else if (haveDepot)
+            {
+                // The nearest depot exists but refused the spawn (its pad is occupied): the vehicle
+                // is banked as supply AND reserved for that depot, so the game's deployment loop
+                // places it there when the pad frees rather than at the first depot it reaches
+                // (fix, 2026-09-15: 1,046 of 1,534 buys in one match went to "whichever depot",
+                // most of them an airfield an hour's drive from the objective).
+                hq.ModifyUnitSupply(choice, 1);
+                CommanderFactionVehicleService.Instance?.ReserveDeployment(hq, choice, depot);
+                where = $" (queued at {CommanderEconomyService.NearestHeldBaseLabel(hq, depot.transform.GlobalPosition())}; its pad is busy)";
+            }
+            else
+            {
+                // No working depot at all: bank the supply and let the game's deployment loop place
+                // the vehicle whenever a depot appears, which is the old behaviour.
+                hq.ModifyUnitSupply(choice, 1);
+                where = " (supply; no depot could spawn it)";
+            }
+
             hq.AddFunds(-cost);
-            hq.ModifyUnitSupply(choice, 1);
             budget -= cost;
             boughtCount++;
             RecordPurchase(hq);
             CommanderAiLog.Note(
                 hq,
-                $"bought {CommanderGameAccess.GetVehicleLabel(choice)} for {cost:0}.",
+                $"bought {CommanderGameAccess.GetVehicleLabel(choice)} for {cost:0}{where}.",
                 role == null ? GetPlanLabel(buyPlan) : $"{GetPlanLabel(buyPlan)}, for {GetRoleLabel(role.Value)}");
         }
 
@@ -975,34 +1216,65 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         };
     }
 
+    /// <summary>
+    /// What this commander may buy on the ground. The inline convoy walk that used to live here was
+    /// replaced by the shared collector on 2026-09-16 (Reuse rule 4: the player's depot window, the
+    /// factory production choice, the repair-vehicle lookup and this buyer now all ask
+    /// <see cref="CommanderFactionRoster.MayFieldVehicle"/> exactly once, through one function, so
+    /// the player and the computer can never be offered different kit).
+    /// </summary>
     private void CollectCatalog(FactionHQ hq)
     {
-        catalog.Clear();
-        bool logRoster = loggedGroundRoster.Add(hq);
-        List<Faction.ConvoyGroup> convoyGroups = hq.faction.GetConvoyGroups();
-        for (int groupIndex = 0; groupIndex < convoyGroups.Count; groupIndex++)
+        CommanderGameAccess.CollectFactionVehicleDefinitions(catalog, hq);
+        if (!loggedGroundRoster.Add(hq))
         {
-            List<Faction.ConvoyUnit> constituents = convoyGroups[groupIndex].Constituents;
-            for (int unitIndex = 0; unitIndex < constituents.Count; unitIndex++)
-            {
-                if (constituents[unitIndex].Type is VehicleDefinition definition
-                    && CommanderGameAccess.IsSpawnableVehicleDefinition(definition)
-                    && !catalog.Contains(definition))
-                {
-                    catalog.Add(definition);
-                    if (logRoster)
-                    {
-                        // Once per HQ, like LogAirRosterOnce: which vehicles exist, what the game
-                        // types them as and which platoon role that maps to — the only way to tell
-                        // from the log why a recipe slot stays empty (no LCV in this faction's list).
-                        CommanderPlugin.Log.LogInfo(
-                            $"Ground roster ({hq.faction.name}): {CommanderGameAccess.GetVehicleLabel(definition)} "
-                                + $"[{definition.vehicleType}] role {GetRoleLabel(CommanderPlatoonRoles.Of(definition))}, "
-                                + $"capture {definition.captureStrength:0.##}, value {definition.value:0}");
-                    }
-                }
-            }
+            return;
         }
+
+        for (int i = 0; i < catalog.Count; i++)
+        {
+            VehicleDefinition definition = catalog[i];
+            // Once per HQ, like LogAirRosterOnce: which vehicles exist, what the game types them as
+            // and which platoon role that maps to — the only way to tell from the log why a recipe
+            // slot stays empty (no LCV in this faction's list).
+            CommanderPlugin.Log.LogInfo(
+                $"Ground roster ({hq.faction.name}): {CommanderGameAccess.GetVehicleLabel(definition)} "
+                    + $"[{definition.vehicleType}] role {GetRoleLabel(CommanderPlatoonRoles.Of(definition))}, "
+                    + $"capture {definition.captureStrength:0.##}, value {definition.value:0}");
+        }
+
+        LogRosterCoverage(hq);
+    }
+
+    /// <summary>
+    /// One verdict line per faction per mission: what this side can actually do once the roster
+    /// predicate has been applied, read from the LIVE definitions rather than from the split's
+    /// tables. The tables' own properties are checked at plugin load
+    /// (<see cref="CommanderFactionRoster.SelfCheck"/>); this is the half that cannot be — whether
+    /// the game's convoy groups and the aircraft cargo manifests still carry what the axes need.
+    /// A missing axis is logged as a FAILED line, because a side that cannot capture, cannot clear
+    /// an air-defence belt or cannot lift cargo has something in the mod broken for it.
+    /// </summary>
+    private void LogRosterCoverage(FactionHQ hq)
+    {
+        // The ground half is walked live, because the convoy groups belong to the game. The air half
+        // is the mod's own table, so its axes are read from the split rather than from the sky.
+        CommanderRosterAxis covered = CommanderFactionRoster.DescribeLiveCoverage(catalog)
+            | (CommanderFactionRoster.ModDecidedAxesFor(CommanderFactionRoster.SideOf(hq))
+                & (CommanderRosterAxis.SuppressRadar | CommanderRosterAxis.GroundAttack
+                    | CommanderRosterAxis.CargoLift | CommanderRosterAxis.Scout));
+
+        string missing = CommanderFactionRoster.DescribeMissingAxes(covered, CommanderFactionRoster.RequiredAxes);
+        if (missing.Length == 0)
+        {
+            CommanderPlugin.Log.LogInfo(
+                $"Ground roster ({hq.faction.name}): {catalog.Count} buyable types cover every capability axis.");
+            return;
+        }
+
+        CommanderPlugin.Log.LogError(
+            $"Faction roster self-check FAILED: {hq.faction.name} covers no {missing} "
+                + $"({catalog.Count} buyable types).");
     }
 
     /// <summary>Drops state for HQs that went away with a scene the reset did not catch, and for the
@@ -1170,6 +1442,47 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         /// alone.</summary>
         internal float AirFundCap;
 
+        /// <summary>Whether rung 2 set a third of its allocation aside for the wing this review
+        /// because something already in contact was short of an airframe (user decision
+        /// 2026-09-14). Reported on the ladder line, so a review in which the ground bought little
+        /// because the front was calling for air reads differently from one in which it simply had
+        /// no money.</summary>
+        internal bool Rung2AirReserved;
+
+        /// <summary>
+        /// Savings toward a radar airframe, kept apart from <see cref="AirFund"/> so the fighters
+        /// and the strike airframes cannot spend it (user decision 2026-09-14). Banked at
+        /// <see cref="AwacsSliceShare"/> of the air side's allocation while
+        /// <c>CommanderOperationsService.WantsAwacsPurchase</c> is true, capped at the cheapest
+        /// radar airframe the commander's strips accept, and released back to the wing the moment
+        /// one is owned.
+        /// </summary>
+        internal float AwacsSavings;
+
+        /// <summary>The price the AWACS savings are aiming at — the cheapest launchable radar
+        /// airframe, or zero when none is wanted or none can launch. Reported beside the savings on
+        /// the ladder line.</summary>
+        internal float AwacsSavingsTarget;
+
+        /// <summary>
+        /// What rung 3 has banked toward its next picket insertion (departure 2026-09-14). A flight
+        /// is a transport hull plus two vehicles and the rung's per-review share is a fraction of
+        /// that, so the allocation accumulates here instead of being recomputed from scratch every
+        /// review — the same shape as <see cref="AwacsSavings"/> and the building rung's
+        /// <c>StructureSavings</c>. Capped at <see cref="PicketSavingsTarget"/>; spent down by the
+        /// flights the operations review charges.
+        /// </summary>
+        internal float PicketSavings;
+
+        /// <summary>The price the picket savings are aiming at — one whole insertion flight, or the
+        /// cheapest road picket pair when no transport can launch. Reported beside the savings on
+        /// the ladder line and handed to the operations side as the request's money gate.</summary>
+        internal float PicketSavingsTarget;
+
+        /// <summary>Whether the last air buy of this review was the radar airframe, so the charge
+        /// comes out of <see cref="AwacsSavings"/> before <see cref="AirFund"/>.</summary>
+        internal bool LastAirBuyWasAwacs;
+
         /// <summary>Consecutive buy reviews that bought nothing; drives the "holds" log line.</summary>
         internal int SkippedBuyReviews;
 
@@ -1177,6 +1490,16 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         /// GroundBuyingBookOnly), so the hold/resume log line fires once per transition rather than
         /// every review.</summary>
         internal bool GroundBookOnly;
+
+        /// <summary>Whether the last review found ground buying held to a full idle pool (see
+        /// <c>DeploymentHeldForFullPool</c>), so the hold/resume log line fires once per transition
+        /// rather than every review — the same cadence <see cref="GroundBookOnly"/> uses.</summary>
+        internal bool GroundPoolFull;
+
+        /// <summary>Whether the last review handed the ground's unspent share of rung 2 to the wing
+        /// (see <c>GroundShareGoesToWing</c>), so the log line fires once per transition rather than
+        /// every review — the same cadence <see cref="GroundBookOnly"/> uses.</summary>
+        internal bool GroundShareToWing;
 
         /// <summary>Short of a radar vehicle for the overwatch screen.</summary>
         internal bool WantsReconUnit;
@@ -1214,6 +1537,22 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         /// <see cref="LastAirDenial"/> — the re-log cadence's counter.</summary>
         internal int AirDenialReviews;
 
+        /// <summary>Which side of the wing the air buy currently running is serving — "CAP" for the
+        /// fighters and the radar airframe, "CAS" for suppression and ground attack, empty when
+        /// nothing asked. The denial line names it, so a reader can tell which half of the wing the
+        /// commander is stuck on (fix, 2026-09-14).</summary>
+        internal string AirBuySide = string.Empty;
+
+        /// <summary>What the PREVIOUS air buy of this same review did, in words, or empty for the
+        /// first buy of a review. With the two sides alternating, that is normally the other side,
+        /// which is exactly what a reader needs to judge a "saves for one" refusal: whether the
+        /// other half of the wing got its aircraft or was stuck too.</summary>
+        internal string AirLastBuyOutcome = string.Empty;
+
+        /// <summary>The same thing, copied in for the duration of ONE buy so the denial line can
+        /// quote it without the reporter having to be handed it through six call sites.</summary>
+        internal string AirDenialContext = string.Empty;
+
         /// <summary>Per airframe, the AIR window's AIR SUPERIORITY score of the best air-to-air
         /// loadout its own picker can build for it (0 = no A/A-capable option at all), memoized for
         /// the mission (user decision 2026-09-14: CAP and escort candidates are chosen by what the
@@ -1233,16 +1572,15 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         /// whole loadout to answer.</summary>
         internal readonly Dictionary<AircraftDefinition, bool> AwacsCapable = new();
 
-        /// <summary>Sortie labels whose rotary CAS request has already been reported as falling back
-        /// to a jet, so the line is printed once per objective rather than once per 30 s review
-        /// (design.md, smarter-air-wing_20260914 Section 2; the <c>ReportAirDenial</c>
-        /// convention).</summary>
-        internal readonly HashSet<string> RotaryFallbackLogged = new();
+        // The rotary CAS fallback's once-per-objective set lived here. It is gone (fix,
+        // 2026-09-14): the line now prints every time the fallback happens, with the distance to
+        // the nearest pad, because how OFTEN a rotary sortie is refused is the thing the reader is
+        // being asked to judge. See CommanderEnemyCommanderAir.BuyAirframe.
 
         /// <summary>Role-and-tier pairs whose "the tier above cannot launch from these strips" note
         /// has already been printed, so the line appears once per commander per fallback rather than
-        /// once per 30 s review (design.md, airframe-selection_20260914 Section 4; the same
-        /// convention as <see cref="RotaryFallbackLogged"/>). Cleared with the rest of the state at
+        /// once per 30 s review (design.md, airframe-selection_20260914 Section 4; the
+        /// <c>ReportAirDenial</c> convention). Cleared with the rest of the state at
         /// session reset, so capturing an airbase mid-match re-announces the tier it unlocked.</summary>
         internal readonly HashSet<string> TierFallbackLogged = new();
     }

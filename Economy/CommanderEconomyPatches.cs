@@ -11,10 +11,24 @@ internal static class CommanderEconomyPatches
     /// lever that moves is the batch size, so an upgraded factory tops up the reserve here, right
     /// after the Basegame added its single unit.
     /// </summary>
+    /// <summary>Factories switched off produce nothing (user, 2026-09-14): the Basegame's own
+    /// production tick is skipped outright, so no supply is added for the depot loop to spawn.</summary>
+    [HarmonyPatch(typeof(Factory), "ProduceUnit")]
+    [HarmonyPrefix]
+    private static bool ProduceUnitPrefix()
+    {
+        return CommanderSettings.FactoriesEnabled;
+    }
+
     [HarmonyPatch(typeof(Factory), "ProduceUnit")]
     [HarmonyPostfix]
     private static void ProduceUnitPostfix(Factory __instance)
     {
+        if (!CommanderSettings.FactoriesEnabled)
+        {
+            return;
+        }
+
         Unit attached = __instance.attachedUnit;
         if (attached == null || __instance.ProductionUnit == null)
         {

@@ -6,7 +6,9 @@ namespace GroundControlRts;
 /// <summary>
 /// The commander priority ladder (design.md, commander-priorities_20260914; user decision
 /// 2026-09-14): one pot per review, spent in a fixed order. Rung 1 is the home CAP and it is
-/// <b>strict</b> — while it is short, nothing below it is bought. Rungs 2–4 (platoons and their air,
+/// <b>strict up to the baseline only</b> (revised 2026-09-14) — while fewer than
+/// <c>HomeCapBaseline</c> fighters are alive, nothing below it is bought; the threat and loss growth
+/// above the baseline is ordinary CAP demand inside rung 2. Rungs 2–4 (platoons and their air,
 /// air-delivered pickets, buildings) share the post-CAP remainder through a weighted draw each review,
 /// with a floor for every rung that has open demand so the heavy platoon weight cannot starve the
 /// other two. This partial holds the ladder's arithmetic; the review in
@@ -41,6 +43,69 @@ internal sealed partial class CommanderEnemyCommanderService
     /// live weights (zeroed as rungs are drawn) and the resulting order.</summary>
     private readonly float[] ladderWeights = new float[3];
     private readonly List<int> ladderOrder = new();
+
+    /// <summary>Scratch for the road-pair fallback price, reused across reviews rather than
+    /// allocated each time: the commander's own vehicle catalog put through the insertion chooser.</summary>
+    private readonly List<CommanderPlatoonRole> picketPairRoles = new();
+    private readonly List<float> picketPairValues = new();
+    private readonly List<int> picketPairPicks = new();
+
+    /// <summary>
+    /// What rung 3 is saving toward this review, with the live inputs: the cheapest complete
+    /// insertion flight the supply side can price, falling back to the cheapest pair of ground
+    /// vehicles this faction sells when no held airbase will launch a vehicle-carrying transport.
+    /// The pure rule is <see cref="PicketSavingsTarget"/>'s; this reads the two prices.
+    /// </summary>
+    private float PicketFlightPrice(FactionHQ hq)
+    {
+        float flight = CommanderSupplyHeliService.Instance?.CheapestInsertionFlightValue(
+            hq, CommanderOperationsService.MaxInsertionCargoVehicles) ?? float.MaxValue;
+        // A launch refused with the bank at its target has proved the estimate low; the bank aims
+        // at that flight's price until one gets away (pure rule PicketSavingsTargetWithFeedback).
+        return PicketSavingsTargetWithFeedback(
+            PicketSavingsTarget(flight, CheapestPicketPairValue()),
+            CommanderOperationsService.RefusedInsertionFlightPrice(hq));
+    }
+
+    /// <summary>The bank's target with the refusal feedback folded in, pure: the estimate, or the
+    /// refused flight's price when that is higher and the estimate is not "bank nothing" (zero — a
+    /// commander that can fly nothing must not start banking on a stale refusal).</summary>
+    internal static float PicketSavingsTargetWithFeedback(float estimate, float refusedPrice)
+    {
+        return estimate > 0f ? Mathf.Max(estimate, AffordablePrice(refusedPrice)) : 0f;
+    }
+
+    /// <summary>
+    /// The cheapest pair of vehicles a picket could be built from at the depot, through the SAME
+    /// chooser the insertion's cargo goes through (Reuse rule 4 — one
+    /// <c>PickInsertionCargo</c>, three callers: the flight, the flight's price and this). Zero
+    /// when the catalog cannot field a pair at all. The catalog is this review's, collected by
+    /// <c>CollectCatalog</c> before the ladder walks.
+    /// </summary>
+    private float CheapestPicketPairValue()
+    {
+        picketPairRoles.Clear();
+        picketPairValues.Clear();
+        for (int i = 0; i < catalog.Count; i++)
+        {
+            picketPairRoles.Add(CommanderPlatoonRoles.Of(catalog[i]));
+            picketPairValues.Add(Mathf.Max(0f, catalog[i].value));
+        }
+
+        CommanderOperationsService.PickInsertionCargo(
+            picketPairRoles,
+            picketPairValues,
+            float.MaxValue,
+            CommanderOperationsService.MaxInsertionCargoVehicles,
+            picketPairPicks);
+        float total = 0f;
+        for (int i = 0; i < picketPairPicks.Count; i++)
+        {
+            total += picketPairValues[picketPairPicks[i]];
+        }
+
+        return total;
+    }
 
     /// <summary>The weights' total — the draw's denominator. Pure, for the self-check.</summary>
     internal static float LadderWeightTotal(float[] weights)
@@ -128,6 +193,99 @@ internal sealed partial class CommanderEnemyCommanderService
     }
 
     /// <summary>
+    /// The share of rung 2's allocation set aside for the wing before any ground vehicle is bought
+    /// (user decision 2026-09-14, "existing forces first"): one third while a sortie over something
+    /// actually fighting is short of an airframe, nothing otherwise. The reserve is what makes
+    /// "air support for what is already in contact comes first" true in money rather than only in
+    /// intent — the wing's fund used to take its 40 % share of whatever the ground buyer LEFT, so a
+    /// review that spent the rung on replacements left nothing for the platoon calling for help.
+    /// </summary>
+    internal const float Rung2AirReserveShare = 1f / 3f;
+
+    /// <summary>
+    /// How rung 2's allocation splits this review: <paramref name="airReserve"/> is set aside for
+    /// the wing and <paramref name="groundShare"/> is what the order book and the platoon buyer may
+    /// spend. Pure, for the self-check. Neither is ever negative, they always sum to the
+    /// allocation, and with nothing in contact the whole allocation stays on the ground — the wing
+    /// then takes its ordinary share out of it exactly as it does today.
+    /// </summary>
+    internal static void Rung2Split(
+        float allocation, bool inContactShort, out float airReserve, out float groundShare)
+    {
+        float pot = Mathf.Max(0f, allocation);
+        airReserve = inContactShort ? pot * Rung2AirReserveShare : 0f;
+        groundShare = pot - airReserve;
+    }
+
+    /// <summary>
+    /// Whether the ground's unspent share of rung 2 goes to the wing this review (user decision
+    /// 2026-09-14). All three have to be true: the ground buyer is holding because every vehicle it
+    /// fields is bought to order, its order book is empty, and the wing has an open request. Money
+    /// nobody is going to spend is worth more in the air than in the bank — but a ground buyer that
+    /// still has a line open is spending it, and a wing that has asked for nothing has no use for
+    /// it. Pure, for the self-check; what the wing may actually keep is bounded by the fund's own
+    /// ceiling at the call site (Reuse rule 4, one accumulator).
+    /// </summary>
+    internal static bool GroundShareGoesToWing(bool groundHoldsToBook, bool hasOpenBook, bool airDemandOpen)
+    {
+        return groundHoldsToBook && !hasOpenBook && airDemandOpen;
+    }
+
+    /// <summary>
+    /// The share of the air side's own per-review allocation set aside for a radar airframe (user
+    /// decision 2026-09-14): one quarter while the commander owns none and the loss cooldown is
+    /// over, nothing otherwise. The counterweight to the turn-order fix of the same day — the radar
+    /// airframe no longer outranks the fighters, so without a slice of its own it would simply never
+    /// be bought on a front that always has fighter demand open.
+    /// </summary>
+    internal const float AwacsSliceShare = 0.25f;
+
+    /// <summary>
+    /// How the air side's allocation splits this review: <paramref name="awacsSlice"/> banks toward
+    /// the radar airframe and <paramref name="turnShare"/> goes to the fighter/strike turn order.
+    /// Pure, for the self-check. Neither is ever negative, they always sum to the allocation, and
+    /// the slice is exactly zero once a radar airframe is owned — that is the whole of "it still
+    /// arrives, and then it stops costing anything".
+    /// </summary>
+    internal static void AirSplit(
+        float allocation, bool wantsAwacs, out float awacsSlice, out float turnShare)
+    {
+        float pot = Mathf.Max(0f, allocation);
+        awacsSlice = wantsAwacs ? pot * AwacsSliceShare : 0f;
+        turnShare = pot - awacsSlice;
+    }
+
+    /// <summary>
+    /// The price rung 3 banks toward (departure 2026-09-14): one complete insertion flight — the
+    /// cheapest launchable transport hull plus the vehicles the shared chooser loads for it — or,
+    /// when no held airbase will launch a vehicle-carrying transport at all, the cheapest pair of
+    /// ground vehicles the faction's own depot ladder offers, so a roster that cannot fly today is
+    /// still saving something toward the picket it owes. Zero when neither is priceable, which
+    /// reads as "bank nothing" everywhere it is used.
+    /// <para>Both halves go through <see cref="AffordablePrice"/> (Reuse rule 4, one definition):
+    /// an unlaunchable role reports <c>float.MaxValue</c>, and a ceiling of <c>float.MaxValue</c>
+    /// would bank the whole remainder forever.</para>
+    /// Pure, for the self-check; the caller prices the flight and the pair.
+    /// </summary>
+    internal static float PicketSavingsTarget(float flightPrice, float roadPairPrice)
+    {
+        float flight = AffordablePrice(flightPrice);
+        return flight > 0f ? flight : AffordablePrice(roadPairPrice);
+    }
+
+    /// <summary>
+    /// What a bank above its cap hands back to the pot this review, pure: everything past the cap,
+    /// never negative. The rung's ceiling moves — a cheaper transport appears, a strip is lost, the
+    /// roster stops fielding vehicle cargo — and money the bank may no longer hold must reach the
+    /// rungs drawn after it rather than sit there for the rest of the match. The rule the air
+    /// fund's own overflow follows, at rung 3.
+    /// </summary>
+    internal static float PicketSavingsExcess(float savings, float target)
+    {
+        return Mathf.Max(0f, savings - Mathf.Max(0f, target));
+    }
+
+    /// <summary>
     /// One pick of the weighted draw: <paramref name="t"/> in <c>[0, total)</c> lands on the rung whose
     /// weight range contains it, first index winning a tie. -1 when no weight is positive — a rung
     /// with no weight (or no demand: the caller zeroes both together) is never drawn. Pure, for the
@@ -173,21 +331,44 @@ internal sealed partial class CommanderEnemyCommanderService
     }
 
     /// <summary>
-    /// Whether a short home CAP ends the review (user decision 2026-09-14: strict — while the CAP is
-    /// short, nothing below it is bought, so the balance climbs toward the next fighter). It does NOT
-    /// hold while the CAP cannot be filled this review, for either known cause: the airborne ceiling
-    /// (it counts every faction aircraft, the player's included, so a strict hold under it would let
-    /// the player park their own wing at the cap and starve the enemy commander's entire economy), or
-    /// no air-to-air-capable airframe any held base will launch (2026-09-14: a strict hold on a CAP
-    /// nothing can ever fill is a deadlock — the first build sat on a 400+ fund all match because a
-    /// highway-strip commander had no Fighter-identity candidate, while its strips would happily have
-    /// launched a Compass with Scythes). An unfillable CAP reads as satisfied for the ladder; the
-    /// <c>ladder:</c> line still shows the true count and the periodic holds line says why. Pure, for
-    /// the self-check.
+    /// Whether a short home CAP ends the review. The strict hold applies to the BASELINE ONLY (user
+    /// decision 2026-09-14, revised): while fewer than <paramref name="baseline"/> fighters are
+    /// alive, nothing below rung 1 is bought, so the balance climbs toward the next fighter.
+    /// Everything the formula wants ABOVE the baseline — the threat and loss terms, up to
+    /// <c>HomeCapMax</c> — is ordinary CAP-type demand in rung 2 and holds nothing.
+    /// <para>
+    /// The revision is the whole point of this change (user report, 2026-09-14). The hold used to
+    /// fire on the grown total, and the grown total includes a loss term that climbs all match:
+    /// <c>CAP 2/4 (2 base +2 air +6 losses, capped at 4), home CAP short 2 — nothing below it is
+    /// bought</c> printed on every review for many minutes, balance 3–44, and not one CAS airframe,
+    /// helicopter or truck was bought in all that time. A commander that has lost six fighters is
+    /// exactly the commander that must still be allowed to buy ground.
+    /// </para>
+    /// It does NOT hold while the CAP cannot be filled this review, for either known cause: the
+    /// airborne ceiling (it counts every faction aircraft, the player's included, so a strict hold
+    /// under it would let the player park their own wing at the cap and starve the enemy commander's
+    /// entire economy), or no air-to-air-capable airframe any held base will launch (2026-09-14: a
+    /// strict hold on a CAP nothing can ever fill is a deadlock — the first build sat on a 400+ fund
+    /// all match because a highway-strip commander had no Fighter-identity candidate, while its
+    /// strips would happily have launched a Compass with Scythes). An unfillable CAP reads as
+    /// satisfied for the ladder; the <c>ladder:</c> line still shows the true count and the periodic
+    /// holds line says why. Pure, for the self-check.
     /// </summary>
-    internal static bool LadderHoldsForCap(int capShort, bool unfillable)
+    internal static bool LadderHoldsForCap(int alive, int baseline, bool unfillable)
     {
-        return capShort > 0 && !unfillable;
+        return alive < Mathf.Max(0, baseline) && !unfillable;
+    }
+
+    /// <summary>
+    /// The home CAP rung 2 is allowed to buy: everything the formula wants above the strict baseline
+    /// rung 1 owns, never negative (user decision 2026-09-14). This is the half that goes through the
+    /// wing's ordinary CAP/CAS turn alternation, so a threat-grown or loss-grown CAP competes with
+    /// the ground attack for the same buys instead of pre-empting the whole ladder. Pure, for the
+    /// self-check; the demand walk reads it with the live counts.
+    /// </summary>
+    internal static int HomeCapExtraWanted(int wanted, int alive, int baseline)
+    {
+        return Mathf.Max(0, wanted - Mathf.Max(alive, Mathf.Max(0, baseline)));
     }
 
     /// <summary>
@@ -197,10 +378,20 @@ internal sealed partial class CommanderEnemyCommanderService
     private readonly struct HomeCapRead
     {
         internal HomeCapRead(
-            int wanted, int alive, int trackedAircraft, int losses, int capShort, bool ceilingBlocked, bool impossible, float spent, int buys)
+            int wanted,
+            int alive,
+            int baseline,
+            int trackedAircraft,
+            int losses,
+            int capShort,
+            bool ceilingBlocked,
+            bool impossible,
+            float spent,
+            int buys)
         {
             Wanted = wanted;
             Alive = alive;
+            Baseline = baseline;
             TrackedAircraft = trackedAircraft;
             Losses = losses;
             Short = capShort;
@@ -215,6 +406,10 @@ internal sealed partial class CommanderEnemyCommanderService
 
         /// <summary>Home-CAP fighters alive (airborne or parked on deck).</summary>
         internal readonly int Alive;
+
+        /// <summary>The strict baseline this review ran against — the only part of the CAP that can
+        /// hold the ladder (<see cref="LadderHoldsForCap"/>).</summary>
+        internal readonly int Baseline;
 
         /// <summary>Hostile aircraft tracked within <see cref="HomeCapThreatRadiusMeters"/> of the commander's airbases.</summary>
         internal readonly int TrackedAircraft;
@@ -241,40 +436,48 @@ internal sealed partial class CommanderEnemyCommanderService
     }
 
     /// <summary>
-    /// Rung 1: size the home CAP from the formula, then buy toward it out of this review's pot — up
-    /// to <see cref="MaxAirBuysPerReview"/> launches, while the budget and the airborne ceiling allow.
-    /// When NO air-to-air-capable airframe can launch from any base this commander holds, the rung
-    /// is impossible: nothing is bought, the strict hold is skipped (a CAP nothing can ever fill is
-    /// a deadlock, 2026-09-14), and the lower rungs proceed. Whatever is left of the pot is the
-    /// lower rungs' remainder; the strict hold itself is the caller's
+    /// Rung 1: size the home CAP from the formula, then buy toward THE BASELINE out of this review's
+    /// pot, while the shortfall, the budget and the airborne ceiling allow (the three-launch cap
+    /// this rung used to carry is retired — user decision 2026-09-14, air buying is money-limited;
+    /// <see cref="MaxAirBuysPerReviewSafety"/> is only a runaway guard). Only the baseline is rung 1's (user decision 2026-09-14, revised): the
+    /// threat and loss terms above it are handed to rung 2 as ordinary CAP demand
+    /// (<see cref="HomeCapExtraWanted"/>), bought through the wing's own CAP/CAS alternation out of
+    /// the same pot. When NO air-to-air-capable airframe can launch from any base this commander
+    /// holds, the rung is impossible: nothing is bought, the strict hold is skipped (a CAP nothing
+    /// can ever fill is a deadlock, 2026-09-14), and the lower rungs proceed. Whatever is left of
+    /// the pot is the lower rungs' remainder; the strict hold itself is the caller's
     /// (<see cref="ReviewPurchases"/>), decided through <see cref="LadderHoldsForCap"/>.
     /// </summary>
     private HomeCapRead ReviewHomeCap(FactionHQ hq, CommanderState state, float spendable)
     {
         int tracked = CountTrackedEnemyAircraftNearBases(hq);
         int losses = CommanderOperationsService.HomeCapLosses(hq);
+        int baseline = Mathf.Max(0, CommanderSettings.HomeCapBaseline);
         int wanted = WantedHomeCap(
             CommanderSettings.HomeCapBaseline, CommanderSettings.HomeCapPerEnemyAircraft, tracked, losses,
             CommanderSettings.HomeCapMax);
         // A lent fighter is still held (design.md, smarter-air-wing_20260914 Section 9): the loan is
-        // deliberately invisible to the shortfall, or the rung would buy a replacement for an
-        // airframe that is already flying and about to be recalled anyway.
-        int capShort = CommanderOperationsService.HomeCapShortfall(
-            wanted, CommanderOperationsService.CountHomeCapFighters(hq), CommanderOperationsService.CountLentHomeCap(hq));
+        // deliberately invisible to the count, or the rung would buy a replacement for an airframe
+        // that is already flying and about to be recalled anyway — which is exactly what
+        // CountHomeCapFighters already does, so the loan needs no subtraction here.
+        int alive = CommanderOperationsService.CountHomeCapFighters(hq);
+
+        // What rung 1 itself may buy: the strict baseline and nothing more.
+        int strictShort = Mathf.Max(0, baseline - alive);
 
         // The deadlock valve (user follow-up, 2026-09-14): after the capability test (a loadout
         // that can fight air) and the strip test (the window's own acceptance pair), is there any
         // CAP candidate at all? Last resort included — a Cricket CAP beats a deadlocked ladder.
-        bool impossible = capShort > 0 && !HasAnyCapCandidate(hq);
+        bool impossible = strictShort > 0 && !HasAnyCapCandidate(hq);
 
         float spent = 0f;
         int buys = 0;
         bool ceilingBlocked = false;
-        for (int buy = 0; capShort > 0 && !impossible && AirBuyContinues(buy) && spendable - spent > 0f; buy++)
+        for (int buy = 0; buys < strictShort && !impossible && AirBuyContinues(buy) && spendable - spent > 0f; buy++)
         {
             // Checked per buy, not once: the wing's other launches this same review (rung 2's sortie
             // buys run after this) and the player's own launches all eat the same ceiling.
-            if (CountAirborne(hq) >= CommanderSettings.AirborneCeiling)
+            if (CountAirborne(hq) >= CommanderOperationsService.EffectiveAirborneCeiling(hq))
             {
                 ceilingBlocked = true;
                 break;
@@ -288,10 +491,21 @@ internal sealed partial class CommanderEnemyCommanderService
 
             spent += cost;
             buys++;
-            capShort--;
         }
 
-        return new HomeCapRead(wanted, wanted - capShort, tracked, losses, capShort, ceilingBlocked, impossible, spent, buys);
+        alive += buys;
+        return new HomeCapRead(
+            wanted,
+            alive,
+            baseline,
+            tracked,
+            losses,
+            CommanderOperationsService.HomeCapShortfall(
+                wanted, alive, CommanderOperationsService.CountLentHomeCap(hq)),
+            ceilingBlocked,
+            impossible,
+            spent,
+            buys);
     }
 
     /// <summary>
@@ -328,15 +542,27 @@ internal sealed partial class CommanderEnemyCommanderService
             true);
         Expect("one aircraft per one tracked when the knob is turned to one, under a high cap", WantedHomeCap(2, 1, 3, 0, 9), 5);
 
-        // The strict hold, its ceiling carve-out and its deadlock valve (departures 1 and the
-        // 2026-09-14 follow-up in plan.md): an unfillable CAP must not freeze the ladder.
-        Expect("a short CAP ends the review", LadderHoldsForCap(1, unfillable: false), true);
-        Expect("a full CAP does not hold", LadderHoldsForCap(0, unfillable: false), false);
-        Expect("a surplus never holds", LadderHoldsForCap(-1, unfillable: false), false);
-        Expect("a short CAP blocked by the airborne ceiling does not hold the whole economy",
-            LadderHoldsForCap(2, unfillable: true), false);
-        Expect("a short CAP no launchable airframe can fill does not hold the whole economy",
-            LadderHoldsForCap(3, unfillable: true), false);
+        // The strict hold is BASELINE-ONLY (user decision 2026-09-14, revised), plus its ceiling
+        // carve-out and its deadlock valve (departures 1 and the 2026-09-14 follow-up in plan.md):
+        // an unfillable CAP must not freeze the ladder, and neither may a CAP grown by losses.
+        Expect("a CAP below its baseline ends the review", LadderHoldsForCap(1, 2, unfillable: false), true);
+        Expect("an empty CAP ends the review", LadderHoldsForCap(0, 2, unfillable: false), true);
+        Expect("a CAP at its baseline does not hold, however much the formula wants above it",
+            LadderHoldsForCap(2, 2, unfillable: false), false);
+        Expect("a CAP above its baseline never holds", LadderHoldsForCap(3, 2, unfillable: false), false);
+        Expect("a zero baseline can never hold the ladder", LadderHoldsForCap(0, 0, unfillable: false), false);
+        Expect("a CAP below its baseline blocked by the airborne ceiling does not hold the whole economy",
+            LadderHoldsForCap(0, 2, unfillable: true), false);
+        Expect("a CAP below its baseline no launchable airframe can fill does not hold the whole economy",
+            LadderHoldsForCap(1, 4, unfillable: true), false);
+
+        // The half rung 2 serves: everything above the baseline, and nothing the baseline owns.
+        Expect("a CAP at its baseline hands the growth to rung 2", HomeCapExtraWanted(4, 2, 2), 2);
+        Expect("one fighter above the baseline leaves one for rung 2", HomeCapExtraWanted(4, 3, 2), 1);
+        Expect("a full CAP asks rung 2 for nothing", HomeCapExtraWanted(4, 4, 2), 0);
+        Expect("a surplus CAP asks rung 2 for nothing", HomeCapExtraWanted(2, 4, 2), 0);
+        Expect("rung 2 never counts the baseline rung 1 still owes", HomeCapExtraWanted(4, 1, 2), 2);
+        Expect("an ungrown CAP is entirely rung 1's", HomeCapExtraWanted(2, 0, 2), 0);
 
         // Floors (design Section 3): ten percent of the post-CAP remainder, never more, never less
         // than zero, and a rung owed no floor leaves the pool whole.
@@ -353,6 +579,85 @@ internal sealed partial class CommanderEnemyCommanderService
             LadderRungBudget(15f, 10f, 2), 0f);
         Expect("the floor is subtracted once per rung still owed, not once per rung alive",
             LadderRungBudget(60f, 10f, 1), 50f);
+
+        // Rung 2's air reserve (user decision 2026-09-14, "existing forces first").
+        Rung2Split(90f, inContactShort: true, out float contactAir, out float contactGround);
+        Expect("a contact review reserves exactly a third of the rung for the wing", contactAir, 30f);
+        Expect("the ground keeps the other two thirds", contactGround, 60f);
+        Expect("the split always adds back up to the allocation", contactAir + contactGround, 90f);
+        Rung2Split(90f, inContactShort: false, out float quietAir, out float quietGround);
+        Expect("a quiet review reserves nothing", quietAir, 0f);
+        Expect("a quiet review leaves the whole allocation on the ground", quietGround, 90f);
+        Rung2Split(-40f, inContactShort: true, out float negativeAir, out float negativeGround);
+        Expect("a negative allocation reserves nothing", negativeAir, 0f);
+        Expect("a negative allocation never hands the ground a negative share", negativeGround, 0f);
+        Rung2Split(0f, inContactShort: true, out float emptyAir, out float emptyGround);
+        Expect("an empty allocation splits into nothing at all", emptyAir + emptyGround, 0f);
+
+        // The radar airframe's reserved slice (user decision 2026-09-14).
+        AirSplit(80f, wantsAwacs: true, out float awacsSlice, out float turnShare);
+        Expect("a commander with no radar airframe banks a quarter of the wing's allocation", awacsSlice, 20f);
+        Expect("the fighters and strike airframes get the other three quarters", turnShare, 60f);
+        Expect("the air split always adds back up to the allocation", awacsSlice + turnShare, 80f);
+        AirSplit(80f, wantsAwacs: false, out float ownedSlice, out float ownedTurn);
+        Expect("a commander that already owns a radar airframe banks nothing toward one", ownedSlice, 0f);
+        Expect("and the whole allocation goes to the turn order instead", ownedTurn, 80f);
+        AirSplit(-30f, wantsAwacs: true, out float negativeSlice, out float negativeTurn);
+        Expect("a negative allocation banks nothing toward a radar airframe", negativeSlice, 0f);
+        Expect("a negative allocation never hands the turn order a negative share", negativeTurn, 0f);
+
+        // The savings target: a price to aim at, or nothing to aim at at all.
+        Expect("the savings aim at the cheapest launchable radar airframe", AffordablePrice(145f), 145f);
+        Expect("strips that launch no radar airframe bank nothing toward one", AffordablePrice(float.MaxValue), 0f);
+        Expect("a zero price is not a target either", AffordablePrice(0f), 0f);
+
+        // Rung 3's savings cap (departure 2026-09-14): one whole insertion flight, with the road
+        // pair as the fallback when nothing can fly. These are the numbers that decide whether a
+        // picket flight is ever affordable — the 2026-09-14 match refused every one of them.
+        Expect("the picket bank aims at one whole flight", PicketSavingsTarget(134f, 40f), 134f);
+        Expect("a refused flight dearer than the estimate raises the bank's target", PicketSavingsTargetWithFeedback(31f, 34f), 34f);
+        Expect("a refused flight cheaper than the estimate changes nothing", PicketSavingsTargetWithFeedback(31f, 20f), 31f);
+        Expect("no refusal leaves the estimate", PicketSavingsTargetWithFeedback(31f, 0f), 31f);
+        Expect("a commander that can fly nothing banks nothing whatever was refused", PicketSavingsTargetWithFeedback(0f, 34f), 0f);
+        Expect("the picket bank aims at the dearer of landing and airdrop flights",
+            CommanderSupplyHeliService.InsertionSavingsTargetPrice(31f, 34f), 34f);
+        Expect("an unlaunchable airdrop leaves the landing price as the target",
+            CommanderSupplyHeliService.InsertionSavingsTargetPrice(31f, float.MaxValue), 31f);
+        Expect("an unlaunchable landing leaves the airdrop price as the target",
+            CommanderSupplyHeliService.InsertionSavingsTargetPrice(float.MaxValue, 34f), 34f);
+        Expect(
+            "a commander that can launch no transport banks toward the road pair instead",
+            PicketSavingsTarget(float.MaxValue, 40f), 40f);
+        Expect(
+            "a commander with neither a flight nor a pair to price banks nothing",
+            PicketSavingsTarget(float.MaxValue, 0f), 0f);
+        Expect("an unpriced flight is not a target", PicketSavingsTarget(0f, 40f), 40f);
+
+        // The bank itself, through the one accumulator (Reuse rule 4): it fills to the cap and
+        // stops, it never overshoots on a rich review, and a cap that has fallen releases the rest.
+        float picketBank = 0f;
+        Expect("a lean review banks its whole share", AccrueFund(ref picketBank, 30f, 134f), 30f);
+        Expect("and the bank holds it across reviews", picketBank, 30f);
+        Expect("a rich review banks only up to the flight's price", AccrueFund(ref picketBank, 400f, 134f), 104f);
+        Expect("a full bank covers exactly one flight, never more", picketBank, 134f);
+        Expect("a full bank takes nothing further", AccrueFund(ref picketBank, 80f, 134f), 0f);
+        Expect(
+            "a full bank pays for the flight it saved for",
+            CommanderOperationsService.PicketSavingsCover(picketBank, 134f), true);
+        Expect(
+            "a bank one short of the price still refuses the flight",
+            CommanderOperationsService.PicketSavingsCover(133f, 134f), false);
+        Expect(
+            "an empty bank refuses the flight",
+            CommanderOperationsService.PicketSavingsCover(0f, 134f), false);
+        Expect(
+            "a flight with no price is never covered, however full the bank",
+            CommanderOperationsService.PicketSavingsCover(400f, 0f), false);
+        // The excess a fallen cap releases — what the rung hands back to the pot the same review.
+        Expect("a cheaper flight releases the difference back to the pot", PicketSavingsExcess(picketBank, 90f), 44f);
+        Expect("a bank at its cap releases nothing", PicketSavingsExcess(134f, 134f), 0f);
+        Expect("a bank below its cap releases nothing", PicketSavingsExcess(30f, 134f), 0f);
+        Expect("a cap that fell to nothing releases the whole bank", PicketSavingsExcess(134f, 0f), 134f);
 
         // The weighted draw: first index wins the boundary, zero weights are never drawn.
         Expect("the draw at zero lands on the first weighted rung", LadderDrawPick(new[] { 60f, 20f, 20f }, 0f), 0);
@@ -430,7 +735,13 @@ internal sealed partial class CommanderEnemyCommanderService
         float picketSpent,
         float buildingSpent,
         float airSaved,
-        float airSavingsCap)
+        float airSavingsCap,
+        bool airReserved,
+        float awacsSaved,
+        float awacsTarget,
+        float picketSaved,
+        float picketTarget,
+        bool wantsAwacs = false)
     {
         float saved = Mathf.Max(0f, pot - capSpent - platoonSpent - buildingSpent);
         // Reported as computed, never derived back out of the clamped total (see HomeCapAirTerm).
@@ -441,9 +752,9 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             draw = "home CAP impossible — the rung is skipped and the lower rungs proceed";
         }
-        else if (cap.Short > 0 && LadderHoldsForCap(cap.Short, cap.CeilingBlocked))
+        else if (LadderHoldsForCap(cap.Alive, cap.Baseline, cap.CeilingBlocked))
         {
-            draw = $"home CAP short {cap.Short} — nothing below it is bought this review";
+            draw = $"home CAP below its baseline ({cap.Alive}/{cap.Baseline}) — nothing below it is bought this review";
         }
         else if (drawOrder.Count == 0)
         {
@@ -469,7 +780,9 @@ internal sealed partial class CommanderEnemyCommanderService
         int lent = CommanderOperationsService.CountLentHomeCap(hq);
         CommanderAiLog.Note(
             hq,
-            $"ladder: CAP {cap.Alive}/{cap.Wanted} ({CommanderSettings.HomeCapBaseline} base +{airTerm} air +{cap.Losses} losses"
+            $"ladder: CAP {cap.Alive}/{cap.Wanted} (strict {Mathf.Min(cap.Alive, cap.Baseline)}/{cap.Baseline}, "
+                + $"+{HomeCapExtraWanted(cap.Wanted, cap.Alive, cap.Baseline)} wanted; "
+                + $"{CommanderSettings.HomeCapBaseline} base +{airTerm} air +{cap.Losses} losses"
                 + (clamped ? $", capped at {CommanderSettings.HomeCapMax}" : string.Empty)
                 + (lent > 0 ? $", {lent} lent" : string.Empty) + "), "
                 + $"{draw}, spent CAP {capSpent:0} / platoons {platoonSpent:0} / pickets {picketSpent:0} / buildings {buildingSpent:0}, "
@@ -477,6 +790,24 @@ internal sealed partial class CommanderEnemyCommanderService
                 // airframe it has actually asked for, a wing far below it is simply poor, and the
                 // two used to look identical in the log.
                 + (airSaved > 0f ? $"air saved {airSaved:0} (cap {airSavingsCap:0}), " : string.Empty)
+                // Says WHY the ground got less this review (user decision 2026-09-14): a third of
+                // rung 2 went to the wing because something in contact was calling for air.
+                + (airReserved
+                    ? $"rung2: air {Rung2AirReserveShare * 100f:0}% reserved (contact), "
+                    : string.Empty)
+                // The radar airframe's own slice against the price it is aiming at (user decision
+                // 2026-09-14). Printed only while it is actually saving: a commander that owns one
+                // banks nothing, and a zero target means its strips launch none at all.
+                + (awacsTarget > 0f
+                    ? $"awacs saved {awacsSaved:0}/{awacsTarget:0}, "
+                    : (wantsAwacs ? "awacs: no held strip can launch one, nothing banked, " : string.Empty))
+                // Rung 3's bank against the price of one flight (departure 2026-09-14). Printed
+                // whenever there is a price to save toward, whether or not the rung was drawn: a
+                // commander whose pickets are waiting for money and one whose pickets are waiting
+                // for a landing zone used to read identically.
+                + (picketTarget > 0f
+                    ? $"pickets saved {picketSaved:0}/{picketTarget:0}, "
+                    : string.Empty)
                 + $"saved {saved:0}.");
 
         if (CommanderSettings.OperationsDebugLog && hq.faction != null)

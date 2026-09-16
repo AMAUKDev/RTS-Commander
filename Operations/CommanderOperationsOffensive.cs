@@ -644,6 +644,12 @@ internal sealed partial class CommanderOperationsService
         state.Missions.Add(mission);
         state.Pressure = 0f;
         CommanderAiLog.Note(hq, $"{logVerb} {label} with {wanted} platoon(s) on {axes.Count} axis/axes.");
+        // Source A (design.md, strike-packages_20260915 Section 1): every planned ground attack has a
+        // strike package ahead of it, on the same target, and the attack's go-in waits for it. Opened
+        // after the mission is in the list so the strike's own target read sees the attack that asked
+        // for it. A strike already open — the clock's — is left alone rather than replaced: one
+        // strike sortie per commander.
+        OpenStrikeSortie(hq, state, targetPoint, targetAirbase, label);
         return true;
     }
 
@@ -851,7 +857,24 @@ internal sealed partial class CommanderOperationsService
                     // uses — one bounded wait, no second clock. The moment the hold ends for any
                     // reason (CAS overhead, CAS unreachable in time, wait run out) the attack goes
                     // in exactly as before.
-                    if (HoldsForCas(state, hq, mission))
+                    // The strike ahead of the attack (design.md, strike-packages_20260915
+                    // Section 5) is read first, on the same bounded clock the CAS hold already
+                    // uses: an attack whose strike has gone in follows it onto the target, and one
+                    // whose strike was abandoned or never opened waits for the CAS hold and the
+                    // timeout exactly as it did before.
+                    float forming = Time.time - mission.FirstGroupArrivedAt;
+                    bool strikeDelivered = StrikeDeliveredFor(state, mission);
+                    bool strikeAbandoned = !strikeDelivered && FindStrikeFor(state, mission) == null;
+                    if (!AttackMayGoIn(strikeDelivered, strikeAbandoned, forming, AssaultFormUpTimeoutSeconds))
+                    {
+                        if (!mission.StrikeHoldLogged)
+                        {
+                            mission.StrikeHoldLogged = true;
+                            CommanderAiLog.Note(
+                                hq, $"{mission.Label}: holding at the release point until the strike has gone in.");
+                        }
+                    }
+                    else if (HoldsForCas(state, hq, mission))
                     {
                         if (!mission.CasHoldLogged)
                         {
@@ -862,7 +885,13 @@ internal sealed partial class CommanderOperationsService
                     else
                     {
                         mission.Launched = true;
-                        CommanderAiLog.Note(hq, $"{mission.Label}: every axis is up; going in.");
+                        CommanderAiLog.Note(
+                            hq,
+                            strikeDelivered
+                                ? $"{mission.Label}: goes in behind the strike."
+                                : forming >= AssaultFormUpTimeoutSeconds
+                                    ? $"{mission.Label}: goes in after {AssaultFormUpTimeoutSeconds:0} s without the strike."
+                                    : $"{mission.Label}: every axis is up; going in.");
                     }
                 }
                 else
@@ -1110,5 +1139,331 @@ internal sealed partial class CommanderOperationsService
             "the pressure clock can still reach its threshold; check the Operations section of the config",
             interval * rate > 0f,
             true);
+    }
+
+    // ---- Deliberate strikes (design.md, strike-packages_20260915 Section 1) ----
+
+    /// <summary>
+    /// Whether the strike clock is due to open a deliberate strike (design Section 1, source B).
+    /// Never while a ground attack is open: that attack opens a strike of its own, and two strike
+    /// sorties at once is the one thing the design forbids. A negative
+    /// <paramref name="minutesSinceLast"/> means the commander has never struck at all, which is due
+    /// immediately — a match should not have to wait six minutes for the wing's first deliberate
+    /// act. Exactly at the interval counts as due, the convention the rest of the mod uses. Pure,
+    /// for the self-check.
+    /// </summary>
+    internal static bool StrikeDue(float minutesSinceLast, float intervalMinutes, bool attackOpen)
+    {
+        if (attackOpen)
+        {
+            return false;
+        }
+
+        return minutesSinceLast < 0f || minutesSinceLast >= intervalMinutes;
+    }
+
+    /// <summary>Whether one strike target beats the best found so far — strictly greater, so the
+    /// first of two equally valuable points wins and the choice never flickers between them review
+    /// after review. Pure, for the self-check.</summary>
+    internal static bool StrikeTargetBeats(float value, float bestValue)
+    {
+        return value > bestValue;
+    }
+
+    /// <summary>
+    /// The enemy-held point worth striking (design Section 1): the highest-ranked one
+    /// (<c>RankPoints</c>'s income-times-closeness value, the same ranking every other planner reads)
+    /// that is within <c>StrikeRangeMeters</c> of an airbase this commander holds and is not still on
+    /// its post-strike cooldown. False when nothing qualifies — the clock keeps running and the next
+    /// review asks again.
+    /// </summary>
+    private bool TryChooseStrikeTarget(FactionHQ hq, OperationsState state, out CommanderStrategicPoint? point)
+    {
+        point = null;
+
+        // Nothing on the roster can attack ground from a strip this commander holds: a strike sortie
+        // opened here could never be flown, and an unfillable sortie in the demand queue is exactly
+        // what starves the rest of the wing (the ARAD gate's own rule).
+        if (!CommanderEnemyCommanderService.HasRoleCandidate(hq, CommanderEnemyCommanderService.AirRole.Strike))
+        {
+            return false;
+        }
+
+        float bestValue = float.MinValue;
+        for (int i = 0; i < state.RankedPoints.Count; i++)
+        {
+            CommanderRankedPoint ranked = state.RankedPoints[i];
+            FactionHQ? owner = ranked.Point.GetOwner();
+            if (owner == null || ReferenceEquals(owner, hq))
+            {
+                continue;
+            }
+
+            if (state.StrikeCooldownUntil.TryGetValue(ranked.Point, out float until) && Time.time < until)
+            {
+                continue;
+            }
+
+            if (NearestHeldAirbaseMeters(hq, ranked.Point.Position) > CommanderSettings.StrikeRangeMeters)
+            {
+                continue;
+            }
+
+            if (StrikeTargetBeats(ranked.Value, bestValue))
+            {
+                bestValue = ranked.Value;
+                point = ranked.Point;
+            }
+        }
+
+        return point != null;
+    }
+
+    /// <summary>How far the nearest airbase this commander holds is from a position, or
+    /// <c>float.MaxValue</c> when it holds none. The form-up point's own base walk
+    /// (<c>TryFindFormUpPoint</c>) answering "how far" instead of "which one".</summary>
+    private static float NearestHeldAirbaseMeters(FactionHQ hq, GlobalPosition position)
+    {
+        float best = float.MaxValue;
+        foreach (Airbase airbase in hq.GetAirbases())
+        {
+            if (airbase == null || airbase.disabled || airbase.center == null)
+            {
+                continue;
+            }
+
+            float distance = CommanderGameAccess.HorizontalDistance(
+                airbase.center.GlobalPosition().AsVector3(), position.AsVector3());
+            if (distance < best)
+            {
+                best = distance;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Steps the strike clock once per review — <see cref="StepPressure"/>'s shape, one clock per
+    /// commander — and opens a deliberate strike when it is due (design Section 1, source B). Called
+    /// straight after <see cref="UpdatePressure"/>, so the attack the pressure clock may have just
+    /// forced already counts as open and the two sources never both fire on one review.
+    /// </summary>
+    private void UpdateStrikeClock(FactionHQ hq, OperationsState state)
+    {
+        CloseFinishedStrike(hq, state);
+
+        float deltaMinutes = ReviewIntervalSeconds / 60f;
+        state.StrikeClockMinutes += deltaMinutes;
+
+        bool attackOpen = false;
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            if (state.Missions[i].Kind == CommanderMissionKind.Attack)
+            {
+                attackOpen = true;
+                break;
+            }
+        }
+
+        float interval = Mathf.Max(0f, CommanderSettings.StrikeIntervalMinutes);
+        float sinceLast = state.LastStrikeAt < 0f ? -1f : state.StrikeClockMinutes;
+        if (state.StrikeSortie != null
+            || !StrikeDue(sinceLast, interval, attackOpen)
+            || !TryChooseStrikeTarget(hq, state, out CommanderStrategicPoint? point))
+        {
+            ReportStrikeClock(hq, state, attackOpen, interval);
+            return;
+        }
+
+        OpenStrikeSortie(hq, state, point, targetAirbase: null, point!.Label);
+    }
+
+    /// <summary>One line, at most once a minute and only when the whole number changes, saying how
+    /// long the wing is from its next deliberate strike (design Section 6). Silent while a ground
+    /// attack is open — that attack's own strike is the next one, and a countdown beside it would
+    /// say the opposite.</summary>
+    private static void ReportStrikeClock(FactionHQ hq, OperationsState state, bool attackOpen, float intervalMinutes)
+    {
+        if (attackOpen || state.StrikeSortie != null)
+        {
+            state.StrikeClockReported = -1;
+            return;
+        }
+
+        int remaining = Mathf.Max(0, Mathf.CeilToInt(intervalMinutes - state.StrikeClockMinutes));
+        if (remaining == state.StrikeClockReported)
+        {
+            return;
+        }
+
+        state.StrikeClockReported = remaining;
+        CommanderAiLog.Note(hq, $"strike clock: next deliberate strike in {remaining} min.");
+    }
+
+    /// <summary>
+    /// Opens the one strike sortie (design Section 1). Reads the target ONCE — defenders, tracked
+    /// air defence, tracked hostile air, whether it is a base, whether the roster holds a bomber —
+    /// and sizes the package from <see cref="StrikePackageFor"/> off those numbers. Nothing re-reads
+    /// them afterwards: the package that was ordered is the package that flies.
+    /// </summary>
+    private void OpenStrikeSortie(
+        FactionHQ hq,
+        OperationsState state,
+        CommanderStrategicPoint? point,
+        Airbase? targetAirbase,
+        string label)
+    {
+        if (state.StrikeSortie != null || (point == null && targetAirbase == null))
+        {
+            return;
+        }
+
+        GlobalPosition center = point != null
+            ? point.Position
+            : CommanderCaptureService.GetHoldPointFor(targetAirbase!);
+
+        int defenders = EffectiveObserved(
+            CountObserved(hq, center), GetObservedFloor(state, ObservedFloorKey(point, targetAirbase)));
+        // The same ring the ARAD clustering reads a belt in, so "air defence near the target" means
+        // one thing in both places.
+        bool airDefence = CountObservedAirDefence(hq, center) > 0;
+        int hostileAir = CountHostileAirInRing(hq, center, ObservedRadiusMeters);
+        bool hasBomber = CommanderEnemyCommanderService.HasBomberCandidate(hq);
+        StrikePackage package = StrikePackageFor(defenders, airDefence, hostileAir, targetAirbase != null, hasBomber);
+
+        // The escort is capped by what the sky has room for: the floor is a demand, not a licence to
+        // exceed the airborne ceiling (design Section 2).
+        int headroom = Mathf.Max(
+            0, EffectiveAirborneCeiling(hq) - CommanderEnemyCommanderService.CountAirborne(hq));
+        int escort = Mathf.Min(package.Escort, Mathf.Max(0, headroom));
+
+        CommanderAirSortie sortie = new()
+        {
+            Kind = CommanderSortieKind.Strike,
+            Point = point,
+            TargetAirbase = targetAirbase,
+            Center = center,
+            StrikeWanted = package.Strike,
+            EscortWanted = escort,
+            EscortFloor = package.EscortFloor,
+            AradWanted = package.Arad,
+            BomberWanted = package.Bomber,
+            StrikeScale = package.Scale,
+            DefendersAtOrder = defenders,
+            OpenedAt = Time.time,
+            Wanted = package.Strike + package.Bomber,
+            CapsWanted = escort,
+            LastObserved = defenders,
+            LastHostileAir = hostileAir,
+            LastAirDefence = CountObservedAirDefence(hq, center),
+            // A deliberate strike forms up like every other package: it is not answering a platoon
+            // that is being shot at now.
+            NoCapWait = false,
+            GoneIn = false,
+            // Never in contact, by kind (fix, 2026-09-15): the flag is a claim on the ground's
+            // funding reserve, and a strike package would have held a third of the rung for the
+            // whole twelve minutes it lives. See the kinded SortieIsInContact.
+            InContact = SortieIsInContact(
+                CommanderSortieKind.Strike,
+                objectiveInContact: false,
+                attackGoneIn: false,
+                defenders,
+                hostileAir),
+            Label = label,
+        };
+        // The rotation band, straight (fix, 2026-09-15). It used to take the rotation's answer and
+        // step it up one, clamped, for the design's "escorts take their strike element's band plus
+        // one step" — but the strike element flies a CAS mission, which the game gives no station
+        // height at all, so there was no band to stand above and the step was applied to the
+        // package's own rotation slot. That mapped three slots onto two bands (0 and 1 both became
+        // the top two) and never produced the low band: the 2026-09-15 match logged four strike
+        // orders in a row at 7,500 m from both commanders. The escorts now take their turn in the
+        // rotation like every other patrol, which is what makes the variety visible.
+        AssignCapBand(ref state.StrikeCapBandCursor, sortie);
+
+        state.StrikeSortie = sortie;
+        state.StrikeClockMinutes = 0f;
+        state.StrikeClockReported = -1;
+        CommanderAiLog.Note(
+            hq,
+            $"orders a strike on {label} ({DescribeStrikeScale(package.Scale)}: {defenders} defenders, "
+                + $"{hostileAir} hostile air): {package.Strike} strike"
+                + (package.Bomber > 0 ? $", {package.Bomber} bomber" : string.Empty)
+                + $", {escort} escort"
+                + (package.Arad > 0 ? ", suppression first" : string.Empty)
+                + $"; CAP band {CapBandMetersFor(sortie.CapBand):0} m.");
+    }
+
+    /// <summary>The scale in the plain words the log line uses.</summary>
+    private static string DescribeStrikeScale(CommanderStrikeScale scale)
+    {
+        return scale switch
+        {
+            CommanderStrikeScale.Hard => "hard",
+            CommanderStrikeScale.Defended => "defended",
+            _ => "light",
+        };
+    }
+
+    /// <summary>
+    /// Whether an attack that has formed up may go in (design Section 5). The strike ahead of it is
+    /// what it waits for — but never past the form-up timeout it already waited under, and never at
+    /// all when that strike was abandoned: one bounded clock, no second one, exactly as the CAS hold
+    /// it sits beside. Pure, for the self-check.
+    /// </summary>
+    internal static bool AttackMayGoIn(
+        bool strikeDelivered, bool strikeAbandoned, float secondsForming, float timeoutSeconds)
+    {
+        if (secondsForming >= timeoutSeconds)
+        {
+            return true;
+        }
+
+        return strikeDelivered && !strikeAbandoned;
+    }
+
+    /// <summary>The strike clock and the attack's go-in hold. Both are retunable into nonsense — an
+    /// interval of zero opens a strike every review, a go-in rule that reads the wrong way holds an
+    /// attack at its release point for ever — and neither says anything in the running game until a
+    /// match has already been lost to it.</summary>
+    private static void CheckStrikeClock(List<string> failures)
+    {
+        Expect(failures, "six minutes since the last strike is due", StrikeDue(6f, 6f, attackOpen: false), true);
+        Expect(failures, "five minutes fifty-four seconds is not yet due", StrikeDue(5.9f, 6f, attackOpen: false), false);
+        Expect(failures, "a commander that has never struck is due at once", StrikeDue(-1f, 6f, attackOpen: false), true);
+        Expect(failures, "an open ground attack never lets the clock fire", StrikeDue(60f, 6f, attackOpen: true), false);
+        Expect(failures, "an open attack holds even the first strike", StrikeDue(-1f, 6f, attackOpen: true), false);
+        Expect(failures, "a higher-valued point beats the best so far", StrikeTargetBeats(10f, 9f), true);
+        Expect(failures, "an equally valued point never displaces the one already chosen", StrikeTargetBeats(9f, 9f), false);
+        Expect(failures, "a lower-valued point loses", StrikeTargetBeats(8f, 9f), false);
+        Expect(failures, "the first candidate always beats the empty best", StrikeTargetBeats(0f, float.MinValue), true);
+
+        Expect(failures, "an attack goes in behind its delivered strike", AttackMayGoIn(true, false, 10f, AssaultFormUpTimeoutSeconds), true);
+        Expect(failures, "an attack whose strike was abandoned waits out the timeout", AttackMayGoIn(false, true, 10f, AssaultFormUpTimeoutSeconds), false);
+        Expect(failures, "an abandoned strike still goes in at the timeout", AttackMayGoIn(false, true, AssaultFormUpTimeoutSeconds, AssaultFormUpTimeoutSeconds), true);
+        Expect(failures, "an attack with no strike delivered yet waits", AttackMayGoIn(false, false, 10f, AssaultFormUpTimeoutSeconds), false);
+        Expect(failures, "an attack with no strike at all still goes in at the timeout", AttackMayGoIn(false, false, AssaultFormUpTimeoutSeconds, AssaultFormUpTimeoutSeconds), true);
+        Expect(
+            failures,
+            "a strike that was delivered and then abandoned does not hold the attack past the timeout",
+            AttackMayGoIn(true, true, AssaultFormUpTimeoutSeconds, AssaultFormUpTimeoutSeconds),
+            true);
+
+        float interval = CommanderSettings.StrikeIntervalMinutes;
+        float cooldown = CommanderSettings.StrikePointCooldownMinutes;
+        float range = CommanderSettings.StrikeRangeMeters;
+        Expect(failures, "the strike interval is positive; check the Operations section of the config", interval > 0f, true);
+        Expect(
+            failures,
+            "the strike interval outlasts a review, or a strike would open every 30 s; check the Operations section of the config",
+            interval * 60f > ReviewIntervalSeconds,
+            true);
+        Expect(
+            failures,
+            "a struck point rests longer than the gap between strikes, or the wing would bomb one point all match; check the Operations section of the config",
+            cooldown >= interval,
+            true);
+        Expect(failures, "the strike range is positive; check the Operations section of the config", range > 0f, true);
     }
 }

@@ -21,7 +21,13 @@ internal static class CommanderSettings
     // Key renamed from PersistStateAcrossReload when the default flipped to on: BepInEx keeps the
     // value already in the cfg, so a default change under the old key would never reach anyone.
     internal static bool PersistStateAcrossReload { get => Get("Developer", "KeepStateAcrossHotReload", true); set => Set("Developer", "KeepStateAcrossHotReload", value); }
-    internal static bool LimitToFactoryVehicles { get => Get("Gameplay", "LimitToFactoryVehicles", false); set => Set("Gameplay", "LimitToFactoryVehicles", value); }
+    // On by default, and the key is renamed from LimitToFactoryVehicles because both the meaning
+    // and the default changed: it now narrows the depot window to the FACTION ROSTER
+    // (CommanderFactionRoster.MayFieldVehicle), the same question every computer commander is
+    // asked, rather than to whatever the nearest factories happened to be producing. BepInEx
+    // keeps whatever value is already in the cfg, so a default change under the old key would
+    // never reach anyone who has run the mod before (the same reason MapDragSpeed was renamed).
+    internal static bool LimitToFactionRoster { get => Get("Gameplay", "LimitToFactionRoster", true); set => Set("Gameplay", "LimitToFactionRoster", value); }
     internal static bool ShowCommandButton { get => Get("UI", "ShowCommandButton", true); set => Set("UI", "ShowCommandButton", value); }
     internal static bool ShowFactionMoney { get => Get("UI", "ShowFactionMoney", true); set => Set("UI", "ShowFactionMoney", value); }
     internal static bool ShowTacticalMap { get => Get("UI", "ShowTacticalMap", true); set => Set("UI", "ShowTacticalMap", value); }
@@ -76,6 +82,13 @@ internal static class CommanderSettings
     internal static float FormationCohesionMeters { get => Get("Gameplay", "FormationCohesionMeters", 300f); set => Set("Gameplay", "FormationCohesionMeters", value); }
     internal static bool CombatAlerts { get => Get("Gameplay", "CombatAlerts", true); set => Set("Gameplay", "CombatAlerts", value); }
     internal static int EnemyCommanderMode { get => Get("Gameplay", "EnemyCommanderMode", 0); set => Set("Gameplay", "EnemyCommanderMode", value); }
+
+    /// <summary>Multiplier on every income the AI enemy commander earns (points, bases and mines):
+    /// 1.0 is a fair fight, 1.3 hands the enemy a third more money a minute. The handicap knob for a
+    /// map or a player that leaves the enemy losing every match (user, 2026-09-15: "BDF are winning too
+    /// handsomely and its not because of my actions - need to buff the PALA somehow"). Never applied to
+    /// the player's own faction, whoever commands it.</summary>
+    internal static float EnemyIncomeMultiplier { get => Get("Gameplay", "EnemyIncomeMultiplier", 1f); set => Set("Gameplay", "EnemyIncomeMultiplier", value); }
     // Off by default: the same commander AI that runs the enemy also runs your own faction, which
     // is a different game from the one the player opened the mission expecting. You keep command
     // while it is on - see CommanderPlayerCommanderService.
@@ -90,6 +103,11 @@ internal static class CommanderSettings
     internal static float GoldMineIncomePerMinute { get => Get("Economy", "GoldMineIncomePerMinute", 20f); set => Set("Economy", "GoldMineIncomePerMinute", value); }
     internal static float FactoryUpgradeCost { get => Get("Economy", "FactoryUpgradeCost", 300f); set => Set("Economy", "FactoryUpgradeCost", value); }
     internal static float FactoryBuildCost { get => Get("Economy", "FactoryBuildCost", 500f); set => Set("Economy", "FactoryBuildCost", value); }
+    // Factories off by default (user, 2026-09-14: "I'd actually quite like factories disabled"):
+    // with the order book and depot reach deciding what is bought, a factory's free stream of
+    // vehicles only fills the idle pool. Off means no commander builds one and no factory — the
+    // player's included — produces; a factory standing on the map stays as scenery.
+    internal static bool FactoriesEnabled { get => Get("Economy", "FactoriesEnabled", false); set => Set("Economy", "FactoriesEnabled", value); }
     internal static float FactoryProductionSeconds { get => Get("Economy", "FactoryProductionSeconds", 240f); set => Set("Economy", "FactoryProductionSeconds", value); }
     // A catalogue building is priced off its own encyclopedia value, so a radar costs what a
     // radar is worth without the mod carrying a price table that a game patch would invalidate.
@@ -155,13 +173,17 @@ internal static class CommanderSettings
     // A road-network junction node needs at least this many roads meeting (or passing through) it
     // to be worth calling a crossroads rather than an ordinary bend or a dead end.
     internal static int PointsCrossroadsMinRoads { get => Get("Points", "CrossroadsMinRoads", 3); set => Set("Points", "CrossroadsMinRoads", value); }
+    // Retuned and renamed for the 48-point cap (reach-and-points, 2026-09-14): at 24 crossroads
+    // and a 30-slot road-point reserve the old ceilings filled all 48 slots before the hilltop
+    // stage ran, and the first restart produced a map with no hilltops at all. 12 + 12 + 8 leaves
+    // the hilltops at least 16 slots on a full map. Keys renamed so the new defaults take effect.
     // Per-kind ceilings inside MaxControlPoints. Without them the first stage ate the whole
     // allowance: the duel map has 263 road junctions, so crossroads took 44 slots, hilltops got 15
     // and road points none. Hilltops take whatever these leave; a kind with few candidates on a map
     // simply hands its share on.
-    internal static int PointsMaxCrossroads { get => Get("Points", "MaxCrossroads", 24); set => Set("Points", "MaxCrossroads", value); }
-    internal static int PointsMaxOutposts { get => Get("Points", "MaxOutposts", 24); set => Set("Points", "MaxOutposts", value); }
-    internal static int PointsMaxRoadPoints { get => Get("Points", "MaxRoadPoints", 30); set => Set("Points", "MaxRoadPoints", value); }
+    internal static int PointsMaxCrossroads { get => Get("Points", "CrossroadsCap", 12); set => Set("Points", "CrossroadsCap", value); }
+    internal static int PointsMaxOutposts { get => Get("Points", "OutpostCap", 8); set => Set("Points", "OutpostCap", value); }
+    internal static int PointsMaxRoadPoints { get => Get("Points", "RoadPointCap", 12); set => Set("Points", "RoadPointCap", value); }
     // Junctions are dense wherever roads are, so crossroads keep a wider spacing than other control
     // points or every hamlet's T-junction becomes one; 2.5 km reads as "the next crossroads along".
     internal static float PointsCrossroadsSpacingMeters { get => Get("Points", "CrossroadsSpacingMeters", 2500f); set => Set("Points", "CrossroadsSpacingMeters", value); }
@@ -169,6 +191,21 @@ internal static class CommanderSettings
     // other merge into the same junction node — wide enough that a junction authored as two
     // close-together forks in the road data still merges into one crossroads candidate.
     internal static float PointsRoadJunctionMergeMeters { get => Get("Points", "RoadJunctionMergeMeters", 60f); set => Set("Points", "RoadJunctionMergeMeters", value); }
+    // Levelness of the ground under a point (2026-09-14). Every non-road point — resource site,
+    // village, hilltop, outpost — is probed on a ring this wide before it is accepted; roads and
+    // crossroads are exempt, because a road goes where the level authored it, up a hillside
+    // included. 60 m is the footprint the things that stand on a point actually need: a mine
+    // building plus the two vehicles of a minimum garrison parked around it.
+    internal static float PointsLevelnessProbeRadiusMeters { get => Get("Points", "LevelnessProbeRadiusMeters", 60f); set => Set("Points", "LevelnessProbeRadiusMeters", value); }
+    // Highest minus lowest terrain height across that ring (and its centre). 6 m over a 120 m span
+    // is the most a mine foundation and a picket ring can straddle and still read as one level
+    // patch of ground; past it the point sits on a slope, and the vehicles sent to hold it slide
+    // off it or lose line of sight to half their own ring.
+    internal static float PointsMaxPointHeightSpreadMeters { get => Get("Points", "MaxPointHeightSpreadMeters", 6f); set => Set("Points", "MaxPointHeightSpreadMeters", value); }
+    // …and the mean of the slopes from the centre out to each probe. The spread rule alone accepts
+    // a consistent 6 m tilt across a narrow ring; 8 degrees is roughly the steepest ground a ground
+    // vehicle holds station on without creeping downhill.
+    internal static float PointsMaxPointSlopeDegrees { get => Get("Points", "MaxPointSlopeDegrees", 8f); set => Set("Points", "MaxPointSlopeDegrees", value); }
     // Cap on control points (villages, hilltops, outposts, crossroads, roadside points) per map, so
     // a huge map does not drown the tactical map (or the AI's garrison review) in markers. Resource
     // sites have their own cap below: one shared cap let 30 sites use up the whole allowance and
@@ -178,13 +215,33 @@ internal static class CommanderSettings
     // Key renamed from MaxNonBasePoints (and ControlPointSpacingMeters, HilltopMinProminenceMeters
     // likewise) on 2026-09-13 so the new defaults reach existing installs: BepInEx keeps whatever
     // value is already in the file, and a hot reload was re-saving the old numbers over hand edits.
-    internal static int PointsMaxNonBasePoints { get => Get("Points", "MaxControlPoints", 120); set => Set("Points", "MaxControlPoints", value); }
+    // Cut from 120 to 48 and renamed again to ControlPointCap (reach-and-points, user decision
+    // 2026-09-14, "reduce number of control points but raise their funding impact"): a 2026-09-14
+    // match discovered 148 points and the player side ended it holding 22 forward bases, 43 pickets
+    // and 36 platoons, most of them sitting on ground no enemy would ever come near. Forty-eight is
+    // about one point per two kilometres of front on the duel map, which is as many as one
+    // commander's ground force can actually garrison. The income rates below are tripled to match,
+    // so a full map pays about what it paid before.
+    internal static int PointsMaxNonBasePoints { get => Get("Points", "ControlPointCap", 48); set => Set("Points", "ControlPointCap", value); }
     internal static int PointsMaxResourceSites { get => Get("Points", "MaxResourceSites", 30); set => Set("Points", "MaxResourceSites", value); }
     // No two non-base points closer than this; the earlier one in discovery order wins. Lowered
     // from 1500 to 800 (2026-09-13, alongside outposts/crossroads/roadside points): the old spacing
     // was tuned for a map with only villages and hilltops on it, and left flat farmland almost as
     // empty as before once three more kinds were competing for the same allowance.
-    internal static float PointsPointMinSpacingMeters { get => Get("Points", "ControlPointSpacingMeters", 800f); set => Set("Points", "ControlPointSpacingMeters", value); }
+    // Raised to 3000 and renamed to ControlPointMinSpacingMeters (reach-and-points, user decision
+    // 2026-09-14): at 800 m the cut-down cap above would have spent its whole allowance inside the
+    // first few valleys discovery walked. Three kilometres spreads forty-eight points over a whole
+    // 82 km map, which is what makes each one worth a platoon's drive. The key changed with the
+    // default because BepInEx keeps the value already saved in the config file.
+    internal static float PointsPointMinSpacingMeters { get => Get("Points", "ControlPointMinSpacingMeters", 3000f); set => Set("Points", "ControlPointMinSpacingMeters", value); }
+
+    // How far a control point may stand from the nearest road and still be worth having: 2 km (user
+    // decision 2026-09-14, "limit to within some km of a road"). A point farther than this from any
+    // road cannot be reached by a road picket or a driving platoon at all, so it is dead weight on
+    // the map and in the commander's review — the only way to staff it would be a helicopter, and
+    // a commander that spends flights on unreachable ground has none left for the fighting. Applied
+    // at discovery, alongside the woodland test, before the cap picks among what is left.
+    internal static float PointsMaxRoadDistanceMeters { get => Get("Points", "PointMaxRoadDistanceMeters", 2000f); set => Set("Points", "PointMaxRoadDistanceMeters", value); }
     // No non-base point within this of an airbase centre — a base is already worth holding on its
     // own and a point crowding it would be redundant and hard to read on the map.
     internal static float PointsAirbaseExclusionMeters { get => Get("Points", "AirbaseExclusionMeters", 2000f); set => Set("Points", "AirbaseExclusionMeters", value); }
@@ -196,23 +253,31 @@ internal static class CommanderSettings
     // flips; short enough to reward a fast platoon, long enough that a driving-through raid does
     // not flip it by accident.
     internal static float PointsHoldSeconds { get => Get("Points", "HoldSeconds", 60f); set => Set("Points", "HoldSeconds", value); }
+    // The six income rates below were all tripled on 2026-09-14 (reach-and-points, user decision:
+    // "reduce number of control points but raise their funding impact") because the control-point
+    // cap above was cut from 120 to 48 at the same time. A map with roughly two fifths as many
+    // points paying three times as much per point pays a commander about what it used to, so the
+    // retune is a change to what each point is WORTH, not to how rich the match is. Every key
+    // gained the shared Income prefix at the same time: BepInEx keeps whatever number is already in
+    // a player's config file, so the only way a changed default reaches an existing install is a
+    // changed key.
     // Per airbase held, paid on the shared 15 s income tick.
-    internal static float PointsBaseIncomePerMinute { get => Get("Points", "BaseIncomePerMinute", 30f); set => Set("Points", "BaseIncomePerMinute", value); }
+    internal static float PointsBaseIncomePerMinute { get => Get("Points", "IncomeBasePerMinute", 90f); set => Set("Points", "IncomeBasePerMinute", value); }
     // Per village held. Below a base's rate: a village is worth less than the airbase that lets you
     // build there, but still worth a platoon's time.
-    internal static float PointsVillageIncomePerMinute { get => Get("Points", "VillageIncomePerMinute", 10f); set => Set("Points", "VillageIncomePerMinute", value); }
+    internal static float PointsVillageIncomePerMinute { get => Get("Points", "IncomeVillagePerMinute", 30f); set => Set("Points", "IncomeVillagePerMinute", value); }
     // Per hilltop held; lowest of the three because a hilltop has no buildings to defend, only the
     // ground itself.
-    internal static float PointsHilltopIncomePerMinute { get => Get("Points", "HilltopIncomePerMinute", 5f); set => Set("Points", "HilltopIncomePerMinute", value); }
+    internal static float PointsHilltopIncomePerMinute { get => Get("Points", "IncomeHilltopPerMinute", 15f); set => Set("Points", "IncomeHilltopPerMinute", value); }
     // Per outpost held; same rate as a hilltop — a cluster too small to be a village has no more to
     // defend than open ground does.
-    internal static float PointsOutpostIncomePerMinute { get => Get("Points", "OutpostIncomePerMinute", 5f); set => Set("Points", "OutpostIncomePerMinute", value); }
+    internal static float PointsOutpostIncomePerMinute { get => Get("Points", "IncomeOutpostPerMinute", 15f); set => Set("Points", "IncomeOutpostPerMinute", value); }
     // Per crossroads held; same rate as a village — a junction is worth fighting over on its own,
     // not merely as a shortcut through it.
-    internal static float PointsCrossroadsIncomePerMinute { get => Get("Points", "CrossroadsIncomePerMinute", 10f); set => Set("Points", "CrossroadsIncomePerMinute", value); }
+    internal static float PointsCrossroadsIncomePerMinute { get => Get("Points", "IncomeCrossroadsPerMinute", 30f); set => Set("Points", "IncomeCrossroadsPerMinute", value); }
     // Per roadside point held; the lowest rate of the six — a generated waypoint with nothing else
     // to recommend it, there only so an empty stretch of road is not empty of anything to fight over.
-    internal static float PointsRoadsideIncomePerMinute { get => Get("Points", "RoadsideIncomePerMinute", 3f); set => Set("Points", "RoadsideIncomePerMinute", value); }
+    internal static float PointsRoadsideIncomePerMinute { get => Get("Points", "IncomeRoadsidePerMinute", 9f); set => Set("Points", "IncomeRoadsidePerMinute", value); }
     // How far the mine-placement ghost snaps to the nearest free resource site. Design (§2) does
     // not give a number for this; without one the ghost could jump to a site many kilometres away.
     // 1 km keeps the snap feeling local while still forgiving imprecise clicking near a site.
@@ -257,6 +322,16 @@ internal static class CommanderSettings
     // Minutes of pressure before the commander attacks with whatever it has. Guards against a
     // commander that never attacks.
     internal static float OperationsPressureIntervalMinutes { get => Get("Operations", "PressureIntervalMinutes", 12f); set => Set("Operations", "PressureIntervalMinutes", value); }
+    // How many platoons under way may hold a PRE-EMPTIVE air sortie at once, the ones nearest the
+    // enemy first. Pre-emptive cover opens one sortie per marching platoon, so a ten-platoon front
+    // asked for more air in one review than a whole match's income could buy: the 2026-09-14
+    // `Ground Control Duel Far` log shows CAS demand running to 15 sorties and CAP to 28 against a
+    // wing that could afford one or two airframes a review, so every objective got a fraction of an
+    // aeroplane and none got cover. Contact and attack sorties are never capped by this.
+    // Bound as a float on both sides (fix, 2026-09-15): the setter used to bind the same key as an
+    // int, and the cast of the float entry threw InvalidCastException on every frame the settings
+    // window was open — 17,030 exceptions and 16,000 unbalanced-GUI errors in one night's Player.log.
+    internal static int OperationsMaxPreemptiveAirObjectives { get => (int)Get("Operations", "MaxPreemptiveAirObjectives", 4f); set => Set("Operations", "MaxPreemptiveAirObjectives", (float)value); }
     // Share of the pot the buy review spends while an attack requisition is open, in place of the
     // 0.25 / 0.45 tempo knob the buyer normally uses.
     internal static float OperationsOffensiveSpendFraction { get => Get("Operations", "OffensiveSpendFraction", 0.5f); set => Set("Operations", "OffensiveSpendFraction", value); }
@@ -273,7 +348,45 @@ internal static class CommanderSettings
     // does not fit under eight once three objectives are live.
     // 20 (user decision 2026-09-13): a safety stop, not the limiter — the air fund, hull prices and
     // rearm cycles are what should size the wing. Counts every live aircraft of the faction.
-    internal static int AirborneCeiling { get => Get("Operations", "AirborneCeiling", 20); set => Set("Operations", "AirborneCeiling", value); }
+    // Floor raised 20 -> 30 and key renamed (user, 2026-09-14: "raise that ceiling to 30+"); the
+    // income scaling above it is unchanged, so a rich commander still climbs toward AirborneCeilingMax.
+    internal static int AirborneCeiling { get => Get("Operations", "AirborneFloor", 30); set => Set("Operations", "AirborneFloor", value); }
+    // "Economy limited, not a hard cap" (user, 2026-09-13 and 2026-09-14): the ceiling above is the
+    // FLOOR of what a commander may keep airborne; every AirborneIncomePerAirframe of income per
+    // minute allows one more, up to AirborneCeilingMax. Fifteen per minute per airframe puts a
+    // 460/min commander at 30 aircraft and a 130/min one at the floor. Sixty is the point past which
+    // the scheduler and the strips, not the money, are what limit a wing.
+    internal static float AirborneIncomePerAirframe { get => Get("Operations", "AirborneIncomePerAirframe", 15f); set => Set("Operations", "AirborneIncomePerAirframe", value); }
+    internal static int AirborneCeilingMax { get => Get("Operations", "AirborneCeilingMax", 60); set => Set("Operations", "AirborneCeilingMax", value); }
+    // Frame-rate guards (user report 2026-09-14: "frame-rate has slowly decayed"; the enemy pool
+    // held 238 idle vehicles and the ground was littered with pilots waiting for rescue).
+    // PoolIdleCap: the game's own depot loop turns factory supply into vehicles whether or not
+    // anything wants them; past this many idle vehicles in a commander's pool the loop is held and
+    // the supply banks at the depot instead. Twelve is two platoons' worth of instant replacements.
+    internal static int PoolIdleCap { get => Get("Operations", "PoolIdleCap", 12); set => Set("Operations", "PoolIdleCap", value); }
+    // The idle-pool sale (user, 2026-09-14: "heaps of idle units around the airbase — we need a
+    // periodic task that either re-assigns them, re-tasks them, or sells them"). Every review, pool
+    // vehicles past PoolIdleCap that have stood idle for PoolIdleSellMinutes are sold back at
+    // PoolSellRefundFraction of their price. Five minutes is ten reviews of nobody wanting the
+    // vehicle; half price is the game's own sell convention for a unit that never fought.
+    // One minute (user, 2026-09-14: "run that on a minute basis"); key renamed from PoolIdleSellMinutes so the new default takes.
+    internal static float PoolIdleSellMinutes { get => Get("Operations", "PoolIdleSellAfterMinutes", 1f); set => Set("Operations", "PoolIdleSellAfterMinutes", value); }
+    internal static float PoolSellRefundFraction { get => Get("Operations", "PoolSellRefundFraction", 0.5f); set => Set("Operations", "PoolSellRefundFraction", value); }
+    // PlatoonReseatSavingMinutes (user instruction 2026-09-16: a platoon bought at a far depot and
+    // still driving when a forward base opens closer to the enemy is despawned and re-raised from
+    // that base; extended the same day to "pickets travelling by ground", which read this same
+    // margin — one rule, two callers). How many minutes of driving the re-raise must actually save
+    // before it is worth dissolving a group: fifteen. A five-minute gain is not worth taking six
+    // vehicles off the road, and anything below the review interval would churn. The key keeps the
+    // name the user asked for even though a picket detachment is not a platoon.
+    internal static float PlatoonReseatSavingMinutes { get => Get("Operations", "PlatoonReseatSavingMinutes", 15f); set => Set("Operations", "PlatoonReseatSavingMinutes", value); }
+    // DownedPilotRescueMinutes: an AI pilot on the ground this long is recovered by the game's own
+    // rescue path; two minutes still leaves time for a real helicopter pickup first. 0 disables.
+    // Key renamed from DownedPilotRescueMinutes when the default fell from 5 to 2 (user decision
+    // 2026-09-15): about a hundred downed pilots stood on the map at any moment at 5 min, each a live
+    // physics object, and the frame rate paid for them; BepInEx keeps a saved value under the old key,
+    // so the new default needs a new key.
+    internal static float DownedPilotRescueMinutes { get => Get("Gameplay", "DownedPilotPickupMinutes", 2f); set => Set("Gameplay", "DownedPilotPickupMinutes", value); }
 
     // The smarter air wing (design.md, smarter-air-wing_20260914; user decision 2026-09-14).
     // Config-file-only: doctrine knobs, not player taste, so there is no slider for them.
@@ -284,15 +397,87 @@ internal static class CommanderSettings
     // that is holding for CAS standing at its release point past its own 240 s form-up timeout.
     internal static float PackageFormUpSeconds { get => Get("Operations", "PackageFormUpSeconds", 180f); set => Set("Operations", "PackageFormUpSeconds", value); }
     // How far from an objective a pad or strip may be and still launch the attack helicopters that
-    // cover it. 40 km (user decision 2026-09-14): at the rotary transit speed the wing already uses
-    // (80 m/s) that is about eight minutes each way, which a helicopter's fuel and a forward base's
-    // patience both carry. Past it the sortie falls back to a jet.
-    internal static float RotaryCasRangeMeters { get => Get("Operations", "RotaryCasRangeMeters", 40000f); set => Set("Operations", "RotaryCasRangeMeters", value); }
+    // cover it. 90 km (user decision 2026-09-14, raised from 40 km): the playable maps are around
+    // 80 km across, so at 40 km most front-line objectives had no pad in range at all and every
+    // rotary sortie fell back to a jet — a whole match ran `CAS 0/4 rotary` without one attack
+    // helicopter. 90 km covers the diagonal of an 80 km map, which is about nineteen minutes each
+    // way at the rotary transit speed the wing already uses (80 m/s). Past it the sortie falls back
+    // to a jet. The key was RENAMED with the new default: BepInEx keeps a value already written
+    // under the old `RotaryCasRangeMeters` key, so a config carrying the old 40 km would otherwise
+    // have silently overridden this.
+    internal static float HeliCasRangeMeters { get => Get("Operations", "HeliCasRangeMeters", 90000f); set => Set("Operations", "HeliCasRangeMeters", value); }
     // Tracked hostile air-defence vehicles that have to sit inside one 5 km cluster before the wing
     // opens an anti-radiation sortie on it. 3 (user decision 2026-09-14): one or two vehicles is the
     // ordinary air-defence a platoon carries and CAS is expected to survive; three together is a
     // prepared belt, which is what kills CAS one airframe at a time.
     internal static int AradClusterMinimum { get => Get("Operations", "AradClusterMinimum", 3); set => Set("Operations", "AradClusterMinimum", value); }
+    // How near anything hostile the radar airframe's orbit is ever allowed to come. 15 km (user
+    // report, 2026-09-14: "an AWACS was just tasked straight into the enemy and killed because the
+    // front-line was close to the airbase"). The station used to be the main airbase offset 15 km
+    // toward the front with no check on what was in front of it, so on a map where the fighting
+    // reaches the airbase that offset walked the orbit into the fight. The whole orbit is measured,
+    // not its centre: the station has to sit at least this far plus its own orbit radius from every
+    // enemy-held point or base and every tracked hostile ground unit or aircraft. 15 km is outside
+    // the reach of the medium surface-to-air belts a front line carries, and an airborne radar sees
+    // 150 km and more past it, so nothing is lost from the picture by standing that far back.
+    internal static float AwacsMinEnemyDistanceMeters { get => Get("Operations", "AwacsMinEnemyDistanceMeters", 15000f); set => Set("Operations", "AwacsMinEnemyDistanceMeters", value); }
+
+    // Strike packages (design.md, strike-packages_20260915; user decision 2026-09-15: "we need
+    // multi-aircraft type packages, strike on enemy held control points"). Config-file-only:
+    // doctrine knobs, not player taste, so there is no slider for them.
+    // Minutes between deliberate strikes while no ground attack is open. 6: a package takes about
+    // three minutes to form up (PackageFormUpSeconds) and a few more to fly its leg and get home, so
+    // a shorter interval would open the next strike before the last one had landed, and a longer one
+    // leaves a quiet commander doing nothing in the air but reacting — which is the whole complaint
+    // this feature answers. A strike ahead of a ground attack ignores this clock entirely.
+    internal static float StrikeIntervalMinutes { get => Get("Operations", "StrikeIntervalMinutes", 6f); set => Set("Operations", "StrikeIntervalMinutes", value); }
+    // Minutes a point that has just been struck is left alone. 10: long enough that the wing works
+    // its way across the enemy's points instead of bombing the nearest one every six minutes, and
+    // short enough that a point which has been reinforced since is struck again inside one match.
+    internal static float StrikePointCooldownMinutes { get => Get("Operations", "StrikePointCooldownMinutes", 10f); set => Set("Operations", "StrikePointCooldownMinutes", value); }
+    // How far from a held airbase a deliberate strike target may be. 80 km: the playable maps are
+    // about 80 km across, so this is "anywhere on the map a strip we hold can reach", and it is the
+    // same reasoning that raised HeliCasRangeMeters to 90 km. Past it the package spends more of the
+    // sortie in transit than over the target and arrives with no fuel for a second pass.
+    internal static float StrikeRangeMeters { get => Get("Operations", "StrikeRangeMeters", 80000f); set => Set("Operations", "StrikeRangeMeters", value); }
+    // Minutes the escorts hold over the target after the package goes in, before they are released
+    // back to the wing. 4: two passes' worth for the strike element underneath them, which is what
+    // the escort is there to cover, and short enough that a pair of fighters is not parked over a
+    // dead point while a platoon in contact goes bare.
+    internal static float StrikeLoiterMinutes { get => Get("Operations", "StrikeLoiterMinutes", 4f); set => Set("Operations", "StrikeLoiterMinutes", value); }
+    // The longest a strike sortie lives before it is closed whatever has happened. 12: form-up (3),
+    // transit across half a map (about 4 at the jet transit speed), the attack, and the leg home. A
+    // package still open past that is one nothing is going to finish, and it is holding airframes the
+    // rest of the wing is asking for.
+    internal static float StrikeSortieMaxMinutes { get => Get("Operations", "StrikeSortieMaxMinutes", 12f); set => Set("Operations", "StrikeSortieMaxMinutes", value); }
+    // The largest share of one side's airborne airframes any single TYPE may make up before the buy
+    // starts skipping it (user decision 3, 2026-09-15: "a diversity cap so one type cannot make up
+    // the whole side"). 0.6: a majority is allowed — the best airframe for the job SHOULD be the
+    // commonest — but two thirds of the sky being one aeroplane is the Revoker monoculture the whole
+    // track exists to break. Below about 0.5 the cap would fight the tier rule every buy.
+    internal static float TypeShareCap { get => Get("Operations", "TypeShareCap", 0.6f); set => Set("Operations", "TypeShareCap", value); }
+    // Whether a sortie whose work reads as EASY is flown by the cheap bottom-tier airframe rather
+    // than by the aeroplane built for the job (user instruction 2026-09-16, "i also want to see
+    // increased use of the cheap aircraft"). On: the trainers are rated 0.64 against the ground where
+    // the dedicated fighter is rated 0.46, at a third of the price, so a picket with nothing tracked
+    // over it and no air defence near it is work they are good enough for. Off restores the rule that
+    // the bottom tier flies only when nothing else can fill the role. See
+    // CommanderEnemyCommanderService.AirJobIsEasy for where the line between easy and not is drawn.
+    internal static bool CheapAirframeEasyJobs { get => Get("Operations", "CheapAirframeEasyJobs", true); set => Set("Operations", "CheapAirframeEasyJobs", value); }
+    // Whether an element the allocation cannot cover at full strength fills its remaining slots with
+    // the cheapest airframe that can do the job instead of buying nothing at all (the second half of
+    // the same instruction). It never displaces an airframe the sortie could otherwise have afforded:
+    // the proper airframes are bought first, and this spends only what is left over. Off restores the
+    // whole-element-or-nothing rule of 2026-09-14.
+    internal static bool CheapAirframePadding { get => Get("Operations", "CheapAirframePadding", true); set => Set("Operations", "CheapAirframePadding", value); }
+    // The three CAP station bands, in metres above ground (user decision 5, 2026-09-15: "current CAP
+    // mission generations needs height variety too"). 1500 is below the medium surface-to-air belts
+    // and where a fighter can see and reach something on the deck; 4000 is the ordinary patrol height
+    // the game's own AI settles at; 7500 is high enough to look down on both and to give a diving
+    // intercept the energy it needs. Consecutive CAP sorties take them in turn.
+    internal static float CapBandLowMeters { get => Get("Operations", "CapBandLowMeters", 1500f); set => Set("Operations", "CapBandLowMeters", value); }
+    internal static float CapBandMidMeters { get => Get("Operations", "CapBandMidMeters", 4000f); set => Set("Operations", "CapBandMidMeters", value); }
+    internal static float CapBandHighMeters { get => Get("Operations", "CapBandHighMeters", 7500f); set => Set("Operations", "CapBandHighMeters", value); }
 
     // Picket insertion by transport helicopter (design.md, heli-picket-insertion_20260913).
     // Master toggle: visible AI spend, killable like every doctrine feature.
@@ -307,12 +492,242 @@ internal static class CommanderSettings
     // now the capture mechanic on every point away from the front, and a mountain map has more
     // roadless hilltops than one flight at a time can ever garrison — a lift takes minutes, so at
     // one flight the commander was still on its second hilltop when the match turned.
-    // Key renamed from HeliInsertionLimit when the default rose 1 -> 3 (pickets-first, 2026-09-14), same reason as ReservePlatoonCount.
-    internal static int OperationsHeliInsertionLimit { get => Get("Operations", "HeliInsertionFlights", 3); set => Set("Operations", "HeliInsertionFlights", value); }
+    // Six since picket reinforcement (2026-09-14): a picket that LOSES a vehicle now asks for a
+    // flight of its own carrying just the replacement, so the limit has to cover holding the line
+    // and topping it up at the same time, not only the opening land-grab.
+    // Key renamed from HeliInsertionLimit when the default rose 1 -> 3 (pickets-first, 2026-09-14),
+    // and again to HeliInsertionFlightsMax when it rose 3 -> 6 (2026-09-14), same reason as
+    // ReservePlatoonCount: BepInEx keeps a player's old value under the old key, so a rename is how
+    // a raised default actually reaches an existing config file.
+    // How far from a held airbase a transport will carry a picket (reach-and-points follow-up,
+    // 2026-09-14): a point beyond depot reach gets an air-only picket mission only within this
+    // range. 60 km is a helicopter's comfortable radius on the 82 km map and covers all of a small one.
+    // A picket transport never flies to a point nearer the enemy's assets than this (user,
+    // 2026-09-14: "aerial picket insertions are not generated for points near enemy unless heavily
+    // escorted" — the escort is a follow-up; until it exists, the flight is simply not made). 25 km
+    // is the front range plus a fighter's dash; the 2026-09-14 match lost seven of nineteen flights
+    // inside it.
+    internal static float OperationsHeliInsertionEnemyStandoffMeters { get => Get("Operations", "HeliInsertionEnemyStandoffMeters", 25000f); set => Set("Operations", "HeliInsertionEnemyStandoffMeters", value); }
+
+    /// <summary>How far from the nearest tracked enemy a flown-in FOB site must be: 40 km (user,
+    /// 2026-09-15: "FOB bird got shot down just before drop-off... we need to be even further from
+    /// the enemy"). Wider than the 25 km an unescorted picket flight keeps, because a FOB is a
+    /// one-shot 75-fund order and its site is chosen, not given.</summary>
+    internal static float FobEnemyStandoffMeters { get => Get("Operations", "FobEnemyStandoffMeters", 40000f); set => Set("Operations", "FobEnemyStandoffMeters", value); }
+    internal static float OperationsHeliInsertionRangeMeters { get => Get("Operations", "HeliInsertionRangeMeters", 60000f); set => Set("Operations", "HeliInsertionRangeMeters", value); }
+    internal static int OperationsHeliInsertionLimit { get => Get("Operations", "HeliInsertionFlightsMax", 6); set => Set("Operations", "HeliInsertionFlightsMax", value); }
     // Minutes after losing an insertion flight before the same point asks again (config-only;
     // confirmed by the user, 2026-09-13). An identical loss on retry a minute later is a waste;
     // an hour is cowardice.
     internal static float OperationsHeliInsertionCooldownMinutes { get => Get("Operations", "HeliInsertionCooldownMinutes", 10f); set => Set("Operations", "HeliInsertionCooldownMinutes", value); }
+    // How wide a circle around a candidate landing zone has to be free of woodland and scenery
+    // before a transport is sent to land in it (user report 2026-09-14: "air insertion of pickets
+    // sometimes is sent to land in tree covered areas - it cannot land"). 40 m is roughly twice the
+    // rotor span of the transports in the catalog plus the room two vehicles need to roll off the
+    // ramp and clear it. Config-only.
+    internal static float OperationsLzClearRadiusMeters { get => Get("Operations", "LzClearRadiusMeters", 40f); set => Set("Operations", "LzClearRadiusMeters", value); }
+    // How far from the chosen post the clear-ground search may move a landing zone before the
+    // insertion is declined instead. 400 m is inside a typical control ring, so a relocated landing
+    // still puts the vehicles on the point rather than on the next hill; past that the drive from
+    // the landing to the posts costs more than driving the whole way would have. Config-only.
+    internal static float OperationsLzSearchRadiusMeters { get => Get("Operations", "LzSearchRadiusMeters", 400f); set => Set("Operations", "LzSearchRadiusMeters", value); }
+    // Seconds a bound insertion flight may sit within 500 m of its landing zone without dropping
+    // anything before it is treated as unable to land: 120. Two minutes covers the game's own
+    // touchdown search (which re-tries every 3 s) plus a slow vertical descent with room to spare,
+    // and is short enough that a stuck transport is turned into an airdrop or recalled inside four
+    // operations reviews. Zero disables the check. Config-only.
+    internal static float OperationsInsertionStallTimeoutSeconds { get => Get("Operations", "InsertionStallTimeoutSeconds", 120f); set => Set("Operations", "InsertionStallTimeoutSeconds", value); }
+
+    // How far from one of its own vehicle depots a commander will send ground vehicles at all:
+    // 20 km (reach-and-points, user decision 2026-09-14, "only spawn units for objectives closer
+    // than some km"). Past this a control point gets no forward base, no road picket and no platoon
+    // — a helicopter insertion is the only way to staff it until a depot comes within reach, which
+    // is what makes a forward operating base worth building. Twenty kilometres is roughly twenty
+    // minutes of cross-country driving for the slowest vehicle in a platoon, which is as long as a
+    // commander can spend moving a unit before the reason it was sent has changed.
+    internal static float DepotReachMeters { get => Get("Operations", "DepotReachMeters", 20000f); set => Set("Operations", "DepotReachMeters", value); }
+
+    // Forward operating bases (design.md, fob-construction_20260914; user decision 2026-09-14,
+    // DECISION-014).
+    // Master toggle: a commander that may not build FOBs simply never opens the order, and every
+    // other rung is untouched. Visible AI spend, killable like every other doctrine feature.
+    internal static bool FobEnabled { get => Get("Operations", "FobEnabled", true); set => Set("Operations", "FobEnabled", value); }
+    // How far a FOB site must stand from every vehicle depot this commander already owns: 5 km
+    // (user request 2026-09-15: FOB placement was too restrictive and few candidate sites qualified;
+    // halved from the 10 km of the reach-and-points decision of 2026-09-14). That 10 km replaced the
+    // old FobMinBaseDistanceMeters rule, which asked for 15 km from ANY airfield on the map and
+    // refused every FOB of a whole 82 km match because no held point was ever that far from an
+    // airbase. A FOB is for extending the ground the commander can drive to, so the distance that
+    // matters is the distance to the depots it already has. At 5 km — a quarter of the 20 km depot
+    // reach below — the new depot's circle still overlaps the old one heavily, but the site score
+    // (how many stranded points it brings in reach) is what decides whether it is worth building;
+    // this distance only keeps a FOB off the doorstep of a depot the commander already owns.
+    // Key renamed from FobMinDepotDistanceMeters when the default dropped 10 -> 5 km: BepInEx keeps
+    // the value already in the cfg, so a default change under the old key never lands.
+    // Both FobMinBaseDistanceMeters and FobMaxPerCommander were deleted here on 2026-09-14. Their
+    // keys, like FobMinDepotDistanceMeters, are left orphaned in existing config files on purpose;
+    // nothing reads them.
+    internal static float FobMinDepotDistanceMeters { get => Get("Operations", "FobMinOwnedDepotDistanceMeters", 5000f); set => Set("Operations", "FobMinOwnedDepotDistanceMeters", value); }
+    // How far apart two forward operating bases must stand: 5 km (user request 2026-09-15: FOB
+    // placement was too restrictive; cut from 20 km). A FOB becomes an airbase the moment it comes
+    // online. With the FOB cap retired (reach-and-points, 2026-09-14) this spacing and the site
+    // score are what limit how many a commander builds; the user's "we don't want EVERY capturable
+    // point turning into a FOB" is now carried by the score, which refuses any site that brings no
+    // stranded point within depot reach. 5 km matches the depot distance above so the two halves of
+    // the placement rule refuse at the same range and the log reason reads as one number.
+    // Key renamed from FobMinSpacingMeters when the default dropped 20 -> 5 km, same BepInEx reason
+    // as the depot distance above.
+    internal static float FobMinSpacingMeters { get => Get("Operations", "FobSpacingMeters", 5000f); set => Set("Operations", "FobSpacingMeters", value); }
+    // Minutes after a commander LOSES a forward operating base — destroyed or captured — before it
+    // will build another anywhere: 15. Longer than the ten-minute cooldown a failed delivery puts on
+    // one site, because losing a finished base says the ground was wrong, not that one convoy was
+    // unlucky. A base the commander abandons on purpose does not start this clock.
+    internal static float FobLossCooldownMinutes { get => Get("Operations", "FobLossCooldownMinutes", 15f); set => Set("Operations", "FobLossCooldownMinutes", value); }
+
+    // Air-mobile platoons and protected lifts (design.md, air-mobile-platoons_20260915; user
+    // decision 2026-09-15, DECISION-032). Config-file-only: doctrine knobs, not player taste.
+    // Minutes of driving from the nearest usable depot to an objective past which a NEW platoon for
+    // that objective is raised air-mobile instead of at the depot: 10. On the 82 km map a platoon
+    // raised at the home depot drives 15-20 km to an in-reach objective at about 15 m/s, so first
+    // contact was twenty minutes and more after the vehicles were bought; ten minutes is the point
+    // past which the flight is worth its hull rental and its escort. Below it the platoon drives, as
+    // it always has.
+    internal static float AirMobileDriveMinutes { get => Get("Operations", "AirMobileDriveMinutes", 10f); set => Set("Operations", "AirMobileDriveMinutes", value); }
+    // How much longer a road route is than the straight line it is measured along: 1.3. Roads bend
+    // round hills and water, and the drive-time gate measures a straight line because the road
+    // network the mod indexes gives distances to the nearest road, not routes along it. A third
+    // again is the usual planning figure and is what the 34 km / 23 min example in the design was
+    // computed with. Raise it on a map with few roads; 1.0 makes the gate measure crow-flight time.
+    internal static float RoadDetourFactor { get => Get("Operations", "RoadDetourFactor", 1.3f); set => Set("Operations", "RoadDetourFactor", value); }
+    // How fast a loaded tracked vehicle covers ground on a road, in metres per second: 15 (54 km/h),
+    // measured off the game's own platoon marches. It is the divisor of the drive-time gate, so
+    // setting it faster raises the distance at which a platoon still drives.
+    internal static float GroundSpeedMetersPerSecond { get => Get("Operations", "GroundSpeedMetersPerSecond", 15f); set => Set("Operations", "GroundSpeedMetersPerSecond", value); }
+    // Loads one air-mobile platoon is flown in: 3. A load is two vehicles (the insertion chain's own
+    // cargo maximum), so three loads are the six vehicles of a platoon — four carriers and two
+    // air-defence vehicles, the roles the transports can actually carry. Fewer loads would land a
+    // platoon too small to hold a point; more would fly vehicles the establishment has no room for.
+    internal static int LiftLoadsPerPlatoon { get => Get("Operations", "LiftLoadsPerPlatoon", 3); set => Set("Operations", "LiftLoadsPerPlatoon", value); }
+    // Fighters every lift's cover sortie flies whatever is tracked over the landing zone: 2, the
+    // same floor a transport escort and a defended strike package already carry, and for the same
+    // reason — one fighter alone is the first thing a pair of raiders kills, and the 2026-09-15 logs
+    // lost construction flights to fighters nobody had tracked.
+    internal static int LiftEscortMinimum { get => Get("Operations", "LiftEscortMinimum", 2); set => Set("Operations", "LiftEscortMinimum", value); }
+    // How many times a lift's flight price the balance must hold before the lift launches: 2. The
+    // flight charges its hull and its cargo up front and refunds the hull on recovery, so a balance
+    // at twice the price absorbs the float without emptying the treasury; below it the commander
+    // waits rather than spending its last funds on a transport.
+    internal static float LiftFundsMultiple { get => Get("Operations", "LiftFundsMultiple", 2f); set => Set("Operations", "LiftFundsMultiple", value); }
+    // How far short of an enemy-held objective a lift may put its platoon down, in metres: 10,000.
+    // A transport cannot land on ground the enemy is standing on, and the 2026-09-15 match cancelled
+    // most platoon lifts with `the enemy holds the point` and then drove the platoon for an hour —
+    // the very problem the lift exists to solve. The lift now lands on the nearest point the
+    // commander owns or nobody holds within this distance (the "forward landing zone") and the
+    // platoon drives the last leg. Ten kilometres is about eleven minutes of driving at the ground
+    // speed above — a few minutes against the twenty-plus the whole drive would have been, which is
+    // the point; much further and the lift has only moved the long drive rather than removed it.
+    internal static float LiftAirheadMaxMeters { get => Get("Operations", "LiftAirheadMaxMeters", 10000f); set => Set("Operations", "LiftAirheadMaxMeters", value); }
+    // How long a spotted hostile ground unit still counts as "the enemy is there" when a point's
+    // distance to the enemy is measured, in seconds: 300. Until 2026-09-15 that distance counted only
+    // control points and bases another faction HELD, so a point with an enemy column sitting five
+    // kilometres away read as rear and 40 km clear, and the commander sited forward bases and flew
+    // picket insertions straight into it (user report: "its choosing FOB sites and air insertion of
+    // pickets etc way too close to the enemy"). Five minutes rather than the 45 s the home-defence
+    // memory uses: that shorter window is for reacting to a raid, where a contact nobody has seen for
+    // a minute is probably gone, while this one is for deciding where to put a base or land a
+    // transport — and a column seen five minutes ago is still somewhere near that ground.
+    internal static float StandoffContactMemorySeconds { get => Get("Operations", "StandoffContactMemorySeconds", 300f); set => Set("Operations", "StandoffContactMemorySeconds", value); }
+    // How near a spotted hostile ground unit a platoon lift's landing zone may be before the lift
+    // moves it, in metres: 10,000. A lift flies under escort and a sweep, which is what lets it cross
+    // ground a lone picket flight may not — but no escort excuses setting six vehicles down on top of
+    // an enemy column, which is what the 2026-09-15 match did. Ten kilometres is the same figure the
+    // forward landing zone may sit from its objective, so a lift never moves its landing zone to
+    // ground it would refuse for the same reason.
+    internal static float LiftAbortStandoffMeters { get => Get("Operations", "LiftAbortStandoffMeters", 10000f); set => Set("Operations", "LiftAbortStandoffMeters", value); }
+    // How near the enemy may come to a flown-in FOB's site while its construction flight is in the
+    // AIR before the flight is re-routed to another site, in metres: 20,000. Half the 40 km the site
+    // picker demands: the picker's figure is about where a base belongs for the rest of the match,
+    // this one is about whether a load already flying can still be put down. Re-asking the full 40 km
+    // in flight turned nearly every long construction flight round the moment one enemy unit came
+    // within 39 km (user decision 2026-09-16: "2" — a middle abort radius — "and upon abortion a
+    // check should be made for an alternative site and be re-routed rather than RTB").
+    internal static float FobAbortStandoffMeters { get => Get("Operations", "FobAbortStandoffMeters", 20000f); set => Set("Operations", "FobAbortStandoffMeters", value); }
+    // Seconds between logistics watches, the clock that re-checks deliveries already under way: 5,
+    // the movement tick's own cadence and a sixth of the mission review's (user, 2026-09-16:
+    // "FOB/insertion re-calculating needs to happen more regularly - enemy presence can change
+    // rapidly and we need to redirect or abandon missions if there's little hope of a successful
+    // delivery"). A transport crosses about 400 m in five seconds, so a threat spotted between two
+    // watches is still tens of kilometres from the landing zone. The watch does only the cheap
+    // in-flight re-checks — route, landing zone, escort — never the whole review, which stays at 30 s
+    // because re-planning missions six times as often would buy nothing and cost a great deal.
+    internal static float LogisticsWatchSeconds { get => Get("Operations", "LogisticsWatchSeconds", 5f); set => Set("Operations", "LogisticsWatchSeconds", value); }
+    // Minutes a delivery with no safe route waits on the deck before it is given up: 6. The wait is
+    // what makes a spotted belt a delay rather than a cancelled order — air defence is suppressed,
+    // columns drive on, and a route that is shut now is often open two minutes later. Six minutes is
+    // about one sortie's life; past it the order has spent longer waiting than flying and the
+    // commander is better off putting the platoon on the road or the base somewhere else.
+    internal static float LiftHopelessMinutes { get => Get("Operations", "LiftHopelessMinutes", 6f); set => Set("Operations", "LiftHopelessMinutes", value); }
+
+    // Air fallback posture (design.md, air-fallback-posture_20260916; user decision 2026-09-16: "too
+    // often we see a CAP escort fly straight at 5x enemy aircraft, rather than retreating and calling
+    // for help and then re-engaging"). Config-file-only doctrine knobs, like the ground tactics below.
+    // How many more fixed-wing combat aircraft the enemy must have tracked within the sizing ring of
+    // a sortie than the sortie has fighters up before those fighters fall back: 2 (the user's own
+    // threshold, 2026-09-16: "hostiles exceed ours by 2+"). One more is an even fight the game's own
+    // bravery rule already weighs; two more is the point at which a fighter that presses on dies
+    // one at a time while the review's reinforcements are still being bought. Zero or less turns the
+    // posture off.
+    // How far a tracked hostile fixed-wing aircraft may be from a sortie's objective OR from any of the
+    // sortie's own fighters and still count in the outnumbered check, in metres: 20,000 (user decision
+    // 2026-09-16: "we need a far bigger range for the outnumbered check - 20km of aircraft and 20km of
+    // objective"). The 8 km contact ring the rest of the review uses is the distance at which a fight
+    // is already joined; a fighter must decide to fall back before that, while the raid is still
+    // closing.
+    internal static float AirPostureRingMeters { get => Get("Operations", "AirPostureRingMeters", 20000f); set => Set("Operations", "AirPostureRingMeters", value); }
+    internal static int AirFallbackMargin { get => Get("Operations", "AirFallbackMargin", 2); set => Set("Operations", "AirFallbackMargin", value); }
+    // How many more fighters than tracked hostiles a sortie that has fallen back must have before it
+    // goes back in: 1 (user decision 2026-09-16: "re-engage only when we OUTNUMBER"). Parity would
+    // send the fighters back into the fight they just left; one more is the smallest superiority
+    // there is. It is also what the call for help asks for on top of the hostile count.
+    internal static int AirReengageMargin { get => Get("Operations", "AirReengageMargin", 1); set => Set("Operations", "AirReengageMargin", value); }
+    // How far a falling-back sortie's fighters move from the sortie centre toward the commander's
+    // nearest own airbase, in metres: 15,000. Nearly twice the 8 km sizing ring, so the fighters
+    // leave the ring the hostiles were counted in rather than orbiting on its edge, and short enough
+    // that they are back over the objective within a minute or two of the reinforcements arriving.
+    // The point never passes the base itself (a base 10 km away yields the base).
+    internal static float AirFallbackDistanceMeters { get => Get("Operations", "AirFallbackDistanceMeters", 15000f); set => Set("Operations", "AirFallbackDistanceMeters", value); }
+    // (The self-defence radius setting was removed on 2026-09-16, design.md air-survival-layer_20260916
+    // Section 4: the leash is now the closing-hostile rule plus a class constant,
+    // CommanderAirCommandService.SelfDefenceCloseMeters, so one number with its reason lives beside the
+    // rule that reads it rather than in a config file nobody retunes.)
+    // Minutes a sortie waits, falling back, for enough fighters to arrive before it stands down: 5.
+    // A review runs every 30 s and a bought fighter takes two or three minutes to launch and transit,
+    // so five minutes is one full round of retask and buy with a margin for a second; past it the
+    // reinforcement is not coming (the brake is holding fighters, or the fund is empty) and the
+    // fighters are better used elsewhere. Zero or less waits for ever.
+    internal static float AirFallbackGiveUpMinutes { get => Get("Operations", "AirFallbackGiveUpMinutes", 5f); set => Set("Operations", "AirFallbackGiveUpMinutes", value); }
+
+    // Air survival layer (design.md, air-survival-layer_20260916; user decision 2026-09-16: "insert
+    // some sense of self-preservation into our aircraft"). Config-file-only doctrine knobs, like the
+    // posture above.
+    // The share of its fuel below which a commanded airframe turns for home of its own accord: 0.25.
+    // The game's own pilot switches itself into the landing state at 0.20 (FuelChecker), and when it
+    // does so the commander's books are left wrong — the sortie still counts the aeroplane as on
+    // station. Acting one twentieth of a tank earlier means the commander gives the order, the sortie
+    // frees the slot cleanly and the replacement is bought while the aeroplane is still flying home.
+    // Zero or less turns the fuel rule off.
+    internal static float AirSurvivalFuelFraction { get => Get("Operations", "AirSurvivalFuelFraction", 0.25f); set => Set("Operations", "AirSurvivalFuelFraction", value); }
+    // How far from a sortie's objective a tracked hostile air-defence vehicle counts as "a belt
+    // ahead", in metres: 20,000. The same reach as the posture ring, and for the same reason: the
+    // decision to hold has to be taken while the formation is still outside the belt's own envelope,
+    // not once it is inside it. A long-range SAM covers a good part of that circle.
+    internal static float AirBeltHoldRadiusMeters { get => Get("Operations", "AirBeltHoldRadiusMeters", 20000f); set => Set("Operations", "AirBeltHoldRadiusMeters", value); }
+    // How far from every enemy asset and tracked hostile a package's form-up point must stand, in
+    // metres: 20,000. Split off AirPostureRingMeters on 2026-09-16 (audit
+    // conductor/designs/2026-09-16-air-self-preservation-audit.md Section 2): one setting was doing
+    // two unrelated jobs, so retuning the outnumbered retreat trigger silently moved every package's
+    // orbit. Same shipped number, so the split changes nothing by itself.
+    internal static float PackageFormUpStandoffMeters { get => Get("Operations", "PackageFormUpStandoffMeters", 20000f); set => Set("Operations", "PackageFormUpStandoffMeters", value); }
 
     // Ground tactics (design.md, ground-tactics_20260914; user decision 2026-09-14, DECISION-012).
     // Config-file-only: doctrine knobs, not player taste, so there is no slider for them.
@@ -387,6 +802,14 @@ internal static class CommanderSettings
     internal static KeyboardShortcut CameraBoost { get => GetShortcut("CameraBoost", KeyCode.LeftShift, "Hold for faster RTS camera movement."); set => Set("Keybinds", "CameraBoost", value); }
     internal static KeyboardShortcut MapBoxSelect { get => GetShortcut("MapBoxSelect", KeyCode.LeftControl, "Hold while dragging on the map to draw a selection box; a plain drag pans the map."); set => Set("Keybinds", "MapBoxSelect", value); }
     internal static KeyboardShortcut TogglePlayerCommander { get => GetShortcut("TogglePlayerCommander", KeyCode.None, "Toggle the AI commander for your own faction."); set => Set("Keybinds", "TogglePlayerCommander", value); }
+    // Q and E on purpose, the RTS convention, even though they are also the camera's rise and
+    // descend: while a building is on the cursor the ghost takes the keys and the camera stands
+    // down (CommanderBuildPreview.IsPlacementRotationKey), and gets them straight back afterwards.
+    internal static KeyboardShortcut PlacementRotateLeft { get => GetShortcut("PlacementRotateLeft", KeyCode.Q, "Turn the building being placed anti-clockwise. Only while a placement is armed."); set => Set("Keybinds", "PlacementRotateLeft", value); }
+    internal static KeyboardShortcut PlacementRotateRight { get => GetShortcut("PlacementRotateRight", KeyCode.E, "Turn the building being placed clockwise. Only while a placement is armed."); set => Set("Keybinds", "PlacementRotateRight", value); }
+    // R for "rest it on the ground". Free in RTS mode, and like the rotate keys it is only read
+    // while a placement is armed.
+    internal static KeyboardShortcut PlacementConformGround { get => GetShortcut("PlacementConformGround", KeyCode.R, "Toggle laying the building being placed flat on the slope instead of standing it upright."); set => Set("Keybinds", "PlacementConformGround", value); }
 
     internal static string AirCommandMode { get => Get("Air Command", "MissionMode", "AirGuard"); set => Set("Air Command", "MissionMode", value); }
     internal static string AirLoadoutBalance { get => Get("Air Command", "LoadoutBalance", "Primary"); set => Set("Air Command", "LoadoutBalance", value); }
@@ -397,11 +820,21 @@ internal static class CommanderSettings
     // default since the AI pilot was seen ejecting on highway-strip taxi and takeoff). On = it
     // spawns in a hangar and taxis out like a mission-authored aircraft. Applies to every
     // commander: the player's AIR window, the player-side AI and the enemy AI alike.
+    // Taxi queues (user, 2026-09-14). AirLaunchQueueMax: with more than this many aircraft on a
+    // base's deck, the next AI launch spawns airborne at the map edge nearest the base instead of
+    // joining the queue. StuckOnDeckMinutes: an AI aircraft that has sat on a deck this long with a
+    // mission and has never been airborne is despawned and its price refunded.
+    internal static int AirLaunchQueueMax { get => Get("Gameplay", "AirLaunchQueueMax", 3); set => Set("Gameplay", "AirLaunchQueueMax", value); }
+    internal static float StuckOnDeckMinutes { get => Get("Gameplay", "StuckOnDeckMinutes", 4f); set => Set("Gameplay", "StuckOnDeckMinutes", value); }
     internal static bool AiAircraftLaunchFromHangar { get => Get("Gameplay", "AiAircraftLaunchFromHangar", false); set => Set("Gameplay", "AiAircraftLaunchFromHangar", value); }
     // Off by default, and applied to the AI commanders' loadouts too: a pilot with cannon rounds left
     // counts them as ordnance and keeps making gun runs instead of returning when the real weapons
     // are spent, which is what made RTB look ignored on gun-armed airframes.
-    internal static bool AirIncludeInternalCannons { get => Get("Air Command", "IncludeInternalCannons", false); set => Set("Air Command", "IncludeInternalCannons", value); }
+    // Key renamed from IncludeInternalCannons on 2026-09-14: BepInEx keeps a saved value over a
+    // changed default, and the old key had been saved as true before the default flipped to false,
+    // so aircraft kept spawning with cannon rounds (user: "we need that remove cannon ammunition to
+    // be active by default"). The new key starts from the false default on every install.
+    internal static bool AirIncludeInternalCannons { get => Get("Air Command", "EquipInternalCannons", false); set => Set("Air Command", "EquipInternalCannons", value); }
     internal static float AwacsRadiusKm { get => Get("Air Command", "AwacsRadiusKm", 60f); set => Set("Air Command", "AwacsRadiusKm", value); }
     internal static float CasRadiusKm { get => Get("Air Command", "CasRadiusKm", 20f); set => Set("Air Command", "CasRadiusKm", value); }
     internal static float AirGuardRadiusKm { get => Get("Air Command", "AirGuardRadiusKm", 30f); set => Set("Air Command", "AirGuardRadiusKm", value); }
@@ -413,7 +846,7 @@ internal static class CommanderSettings
         config = configFile;
         _ = ModEnabled;
         _ = PersistStateAcrossReload;
-        _ = LimitToFactoryVehicles;
+        _ = LimitToFactionRoster;
         _ = ShowCommandButton;
         _ = PrimaryAction;
         _ = SecondaryAction;
@@ -428,6 +861,9 @@ internal static class CommanderSettings
         _ = CameraRight;
         _ = CameraUp;
         _ = CameraDown;
+        _ = PlacementRotateLeft;
+        _ = PlacementRotateRight;
+        _ = PlacementConformGround;
         _ = CameraFreeLook;
         _ = CameraBoost;
         _ = MapBoxSelect;
@@ -451,9 +887,12 @@ internal static class CommanderSettings
         _ = FormationCohesionMeters;
         _ = CombatAlerts;
         _ = EnemyCommanderMode;
+        _ = EnemyIncomeMultiplier;
         _ = PlayerCommanderEnabled;
         _ = PlayerCommanderHandsOffMinutes;
         _ = AiAircraftLaunchFromHangar;
+        _ = AirLaunchQueueMax;
+        _ = StuckOnDeckMinutes;
         _ = TacticalMapSize;
         _ = MapDragSpeed;
         _ = UiScaleOverride;
@@ -473,6 +912,7 @@ internal static class CommanderSettings
         _ = FactoryUpgradeCost;
         _ = FactoryBuildCost;
         _ = FactoryProductionSeconds;
+        _ = FactoriesEnabled;
         _ = BuildingCostMultiplier;
         _ = RepairCrewCost;
         _ = BuildRadiusKm;
@@ -498,6 +938,9 @@ internal static class CommanderSettings
         _ = PointsRoadsideSpacingMeters;
         _ = PointsCrossroadsMinRoads;
         _ = PointsRoadJunctionMergeMeters;
+        _ = PointsLevelnessProbeRadiusMeters;
+        _ = PointsMaxPointHeightSpreadMeters;
+        _ = PointsMaxPointSlopeDegrees;
         _ = PointsMaxNonBasePoints;
         _ = PointsMaxResourceSites;
         _ = PointsMaxCrossroads;
@@ -505,6 +948,7 @@ internal static class CommanderSettings
         _ = PointsMaxRoadPoints;
         _ = PointsCrossroadsSpacingMeters;
         _ = PointsPointMinSpacingMeters;
+        _ = PointsMaxRoadDistanceMeters;
         _ = PointsAirbaseExclusionMeters;
         _ = PointsMinGarrison;
         _ = PointsHoldSeconds;
@@ -522,18 +966,69 @@ internal static class CommanderSettings
         _ = OperationsRecipeCarrier;
         _ = OperationsRecipeAirDefence;
         _ = OperationsFrontRangeMeters;
+        _ = OperationsMaxPreemptiveAirObjectives;
         _ = OperationsFobShare;
         _ = OperationsPressureIntervalMinutes;
         _ = OperationsOffensiveSpendFraction;
         _ = CasLossCooldownMinutes;
         _ = AirborneCeiling;
+        _ = AirborneIncomePerAirframe;
+        _ = AirborneCeilingMax;
+        _ = PoolIdleCap;
+        _ = PoolIdleSellMinutes;
+        _ = PoolSellRefundFraction;
+        _ = PlatoonReseatSavingMinutes;
+        _ = DownedPilotRescueMinutes;
         _ = PackageFormUpSeconds;
-        _ = RotaryCasRangeMeters;
+        _ = HeliCasRangeMeters;
         _ = AradClusterMinimum;
+        _ = AwacsMinEnemyDistanceMeters;
+        _ = StrikeIntervalMinutes;
+        _ = StrikePointCooldownMinutes;
+        _ = StrikeRangeMeters;
+        _ = StrikeLoiterMinutes;
+        _ = StrikeSortieMaxMinutes;
+        _ = TypeShareCap;
+        _ = CheapAirframeEasyJobs;
+        _ = CheapAirframePadding;
+        _ = CapBandLowMeters;
+        _ = CapBandMidMeters;
+        _ = CapBandHighMeters;
         _ = OperationsHeliInsertionEnabled;
         _ = OperationsHeliInsertionOffRoadMeters;
         _ = OperationsHeliInsertionLimit;
+        _ = OperationsHeliInsertionRangeMeters;
+        _ = OperationsHeliInsertionEnemyStandoffMeters;
+        _ = FobEnemyStandoffMeters;
         _ = OperationsHeliInsertionCooldownMinutes;
+        _ = OperationsLzClearRadiusMeters;
+        _ = OperationsLzSearchRadiusMeters;
+        _ = OperationsInsertionStallTimeoutSeconds;
+        _ = DepotReachMeters;
+        _ = FobEnabled;
+        _ = FobMinDepotDistanceMeters;
+        _ = FobMinSpacingMeters;
+        _ = FobLossCooldownMinutes;
+        _ = AirMobileDriveMinutes;
+        _ = RoadDetourFactor;
+        _ = GroundSpeedMetersPerSecond;
+        _ = LiftLoadsPerPlatoon;
+        _ = LiftEscortMinimum;
+        _ = LiftFundsMultiple;
+        _ = LiftAirheadMaxMeters;
+        _ = StandoffContactMemorySeconds;
+        _ = LiftAbortStandoffMeters;
+        _ = FobAbortStandoffMeters;
+        _ = LogisticsWatchSeconds;
+        _ = LiftHopelessMinutes;
+        _ = AirPostureRingMeters;
+        _ = AirFallbackMargin;
+        _ = AirReengageMargin;
+        _ = AirFallbackDistanceMeters;
+        _ = AirFallbackGiveUpMinutes;
+        _ = AirSurvivalFuelFraction;
+        _ = AirBeltHoldRadiusMeters;
+        _ = PackageFormUpStandoffMeters;
         _ = DefenceArcStandoffMeters;
         _ = BoundMeters;
         _ = OffRoadRangeMeters;
@@ -545,6 +1040,7 @@ internal static class CommanderSettings
         _ = LadderBuildingWeight;
         _ = LadderRungFloorPercent;
         _ = AirCommandMode;
+        _ = AirIncludeInternalCannons;
         _ = AwacsRadiusKm;
         _ = CasRadiusKm;
         _ = AirGuardRadiusKm;
@@ -582,11 +1078,33 @@ internal static class CommanderSettings
         if (entry != null) entry.Value = value;
     }
 
+    /// <summary>Keys already reported as bound under two types, so the error is written once.</summary>
+    private static readonly HashSet<string> typeMismatchReported = new();
+
     private static ConfigEntry<T>? GetEntry<T>(string section, string key, T defaultValue)
     {
         if (config == null) return null;
         string lookup = section + "/" + key;
-        if (entries.TryGetValue(lookup, out ConfigEntryBase existing)) return (ConfigEntry<T>)existing;
+        if (entries.TryGetValue(lookup, out ConfigEntryBase existing))
+        {
+            if (existing is ConfigEntry<T> typed)
+            {
+                return typed;
+            }
+
+            // A getter and a setter binding one key under two types is a programming error; it is
+            // reported once and the call is a no-op rather than an exception thrown from inside
+            // OnGUI every frame (fix, 2026-09-15).
+            if (typeMismatchReported.Add(lookup))
+            {
+                CommanderPlugin.Log.LogError(
+                    $"Settings: {lookup} is bound as {existing.SettingType.Name} but was asked for as {typeof(T).Name}; "
+                        + "fix the property so both sides use one type.");
+            }
+
+            return null;
+        }
+
         ConfigEntry<T> created = config.Bind(section, key, defaultValue);
         entries.Add(lookup, created);
         return created;

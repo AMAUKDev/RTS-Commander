@@ -203,7 +203,13 @@ internal sealed partial class CommanderAirCommandService
         internal AirCommandMode Mode { get; set; }
         internal GlobalPosition AreaCenter { get; set; }
         internal float Radius { get; set; }
-        internal float TargetAltitude { get; }
+
+        /// <summary>The station height this mission is flown at, or 0 for the game's own standard
+        /// height. Settable since the commander's patrols carry station bands (design.md,
+        /// strike-packages_20260915 Section 4): a re-tasked patrol has to be able to take the band
+        /// its sortie was given, exactly as it takes a moved area centre.</summary>
+        internal float TargetAltitude { get; set; }
+
         internal bool TargetOrdnance { get; }
         internal bool SaturationAttack { get; }
         internal bool PurchasedWithFunds { get; }
@@ -261,5 +267,18 @@ internal sealed partial class CommanderAirCommandService
 
         /// <summary>Explicitly commanded target; preferred over the automatic mission target search.</summary>
         internal Unit? ForcedTarget { get; set; }
+
+        /// <summary>Where this airframe holds instead of its route or area while its sortie is
+        /// falling back, or null. Set and cleared by the operations posture only (design.md,
+        /// air-fallback-posture_20260916 Section 4.3); the route is not advanced while it is set.</summary>
+        internal GlobalPosition? HoldOverride { get; set; }
+
+        /// <summary>While set, this airframe engages only what is coming for IT — anything very close,
+        /// and anything closing fast that is already within its weapon's reach — unless the target was
+        /// commanded. It defends itself and nothing more. Was a radius in metres until 2026-09-16; the
+        /// number lives beside the rule now (<c>CommanderAirCommandService.SelfDefenceCloseMeters</c>),
+        /// because it was never a per-mission figure and the setting that carried it invited retuning
+        /// something that is really a property of a missile shot.</summary>
+        internal bool SelfDefenceOnly { get; set; }
     }
 }

@@ -214,7 +214,7 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
             RefreshVehicleDefinitions();
         }
 
-        if (!CommanderSettings.LimitToFactoryVehicles)
+        if (!CommanderSettings.LimitToFactionRoster)
         {
             return categories;
         }
@@ -259,7 +259,7 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
             source = filtered;
         }
 
-        bool factionOnly = CommanderSettings.LimitToFactoryVehicles;
+        bool factionOnly = CommanderSettings.LimitToFactionRoster;
         if (!reserveOnly && !factionOnly)
         {
             return source;
@@ -1049,8 +1049,15 @@ internal sealed class CommanderSpawnService : ICommanderActivate, ICommanderDeac
             return;
         }
 
-        queue.RallyPoint = (spawnTransform.position + spawnTransform.forward * DefaultStagingDistanceMeters)
+        // The depot's own exit nudge is the game's and is left exactly as it is — on a depot built on
+        // an apron the first few metres are on the tarmac by the game's design and there is nothing
+        // to move them to. The staging block this mod chooses is a different matter: 150 m straight
+        // out of a depot beside a runway is a block of vehicles parked on it, so it is pushed clear
+        // (user instruction, 2026-09-16).
+        GlobalPosition staging = (spawnTransform.position + spawnTransform.forward * DefaultStagingDistanceMeters)
             .ToGlobalPosition();
+        queue.RallyPoint = CommanderOperationsService.OffAirfieldStandingPoint(
+            staging, spawnTransform.position.ToGlobalPosition(), out _);
         queue.HasRallyPoint = true;
         queue.IsDefaultRallyPoint = true;
         queue.NextRallySlot = 0;

@@ -171,6 +171,50 @@ internal sealed partial class CommanderOperationsService
                 DrawTruckMarker(camera, localHq, hq, mission, isLocal, color, fullscreenMap, anyMap, map);
             }
         }
+
+        // FOB orders (fob-construction_20260914): the site carries its own marker from the moment
+        // the order opens, so a reader can watch three loads converge on ground that has nothing on
+        // it yet. Once the base is online the game's own airbase icon takes over and this one stops.
+        // The local faction's own orders only — an enemy commander's construction site is not shown
+        // for free, the same rule the release crosses obey.
+        for (int i = 0; isLocal && i < state.FobOrders.Count; i++)
+        {
+            CommanderFobOrder order = state.FobOrders[i];
+            if (order.Phase == CommanderFobPhase.Online)
+            {
+                continue;
+            }
+
+            DrawLabelledMarker(
+                camera,
+                order.Point.Position,
+                FobMarkerText(order),
+                isLocal ? CommanderUiTheme.LogisticsMarkerColor : color,
+                fullscreenMap,
+                anyMap,
+                map);
+
+            // Each construction truck carries its own marker on the road (user, 2026-09-14: "does
+            // the FOB convoy have a marker?"), the way a forward base's truck does. Named through
+            // the lift's own label, so a platoon's trucks are not drawn as a forward base's.
+            for (int t = 0; t < order.Convoy.Count; t++)
+            {
+                Unit truck = order.Convoy[t];
+                if (truck == null || truck.disabled)
+                {
+                    continue;
+                }
+
+                DrawLabelledMarker(
+                    camera,
+                    truck.transform.GlobalPosition(),
+                    LiftConvoyMarkerText(order, t),
+                    isLocal ? CommanderUiTheme.LogisticsMarkerColor : color,
+                    fullscreenMap,
+                    anyMap,
+                    map);
+            }
+        }
     }
 
     /// <summary>
@@ -197,7 +241,7 @@ internal sealed partial class CommanderOperationsService
         }
 
         Unit? anchor = FirstLiveMember(mission.PicketMembers);
-        bool awaitingInsertion = anchor == null && IsBoundToInsertion(state, point);
+        bool awaitingInsertion = anchor == null && PicketHasInsertionInbound(state, mission);
         if (anchor == null && !awaitingInsertion)
         {
             return;
@@ -212,7 +256,7 @@ internal sealed partial class CommanderOperationsService
         }
 
         int live = CountLiveMembers(mission.PicketMembers);
-        FindSortie(state, null, mission, out bool casShort, out bool _);
+        FindSortie(state, null, mission, out string picketCapFlag, out string picketCasFlag);
         string? label = PicketMarkerText(
             pointLabel: point.Label.Length > 0 ? point.Label : mission.Label,
             liveMembers: live,
@@ -221,7 +265,8 @@ internal sealed partial class CommanderOperationsService
             droppedRecently: mission.LastDropAt >= 0f && Time.time - mission.LastDropAt <= PicketDropWindowSeconds,
             holding: live > 0 && CountInsidePoint(point, mission.PicketMembers) == live,
             inContact: mission.ContactUntil >= Time.time,
-            requestingCas: casShort);
+            capFlag: picketCapFlag,
+            casFlag: picketCasFlag);
         if (label == null)
         {
             return;
@@ -229,6 +274,28 @@ internal sealed partial class CommanderOperationsService
 
         GlobalPosition where = anchor != null ? anchor.transform.GlobalPosition() : point.Position;
         DrawLabelledMarker(camera, where, label, color, fullscreenMap, anyMap, map);
+    }
+
+    /// <summary>
+    /// Whether THIS picket has a flight bringing its vehicles in — the only thing that entitles a
+    /// picket with nothing on the ground to a marker at all. The launch gate's
+    /// <c>IsBoundToInsertion</c> is deliberately not reused here (fix, 2026-09-16): that question is
+    /// "is anything of ours already flying to this ring", which a forward base's construction or
+    /// platoon lift standing on the same point answers yes to, so a picket whose own flight had been
+    /// recalled kept drawing <c>Awaiting insertion</c> with nothing coming for it. The record is
+    /// matched by MISSION, not by point, so a recall that removes the record removes the marker.
+    /// </summary>
+    private static bool PicketHasInsertionInbound(OperationsState state, CommanderOperationsMission mission)
+    {
+        for (int i = 0; i < state.Insertions.Count; i++)
+        {
+            if (ReferenceEquals(state.Insertions[i].Mission, mission))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>One marker per forward-base munitions truck, at the truck (user 2026-09-14: the
@@ -268,7 +335,9 @@ internal sealed partial class CommanderOperationsService
             pointLabel: point != null && point.Label.Length > 0 ? point.Label : mission.Label,
             returning: returning,
             supplying: supplying);
-        DrawLabelledMarker(camera, truck.transform.GlobalPosition(), label, color, fullscreenMap, anyMap, map);
+        DrawLabelledMarker(
+            camera, truck.transform.GlobalPosition(), label,
+            isLocal ? CommanderUiTheme.LogisticsMarkerColor : color, fullscreenMap, anyMap, map);
     }
 
     /// <summary>True when <paramref name="point"/> has an owner and that owner is somebody other
@@ -326,7 +395,8 @@ internal sealed partial class CommanderOperationsService
         bool droppedRecently,
         bool holding,
         bool inContact,
-        bool requestingCas)
+        string capFlag,
+        string casFlag)
     {
         if (liveMembers <= 0 && !awaitingInsertion)
         {
@@ -337,8 +407,8 @@ internal sealed partial class CommanderOperationsService
             + PicketSituation(liveMembers, awaitingInsertion, droppedRecently, holding, pointLabel)
             + MarkerFlags(
                 inContact: inContact,
-                requestingCas: requestingCas,
-                casOverhead: false,
+                capFlag: capFlag,
+                casFlag: casFlag,
                 requestingReinforcements: false,
                 reinforcingLabel: string.Empty,
                 underStrength: liveMembers < wanted);
@@ -457,16 +527,36 @@ internal sealed partial class CommanderOperationsService
     {
         bool isReserve = platoon.State == CommanderPlatoonState.Holding
             && platoon.Mission?.Kind == CommanderMissionKind.Reserve;
-        string label = $"{platoon.Name} {platoon.Members.Count}/{platoon.Establishment} — "
+        string label = PlatoonStrengthLabel(
+                platoon.Name,
+                platoon.Mission?.AirMobile == true,
+                platoon.Members.Count,
+                platoon.Establishment)
+            + " — "
             + MarkerSituation(platoon.State, platoon.Posture, isReserve, SituationPlaceLabel(hq, platoon));
 
-        FindSortie(state, platoon, null, out bool casShort, out bool casOverhead);
+        FindSortie(state, platoon, null, out string capFlag, out string casFlag);
         return label + MarkerFlags(
             inContact: platoon.InContactUntil >= Time.time,
-            requestingCas: casShort,
-            casOverhead: casOverhead,
+            capFlag: capFlag,
+            casFlag: casFlag,
             requestingReinforcements: platoon.Mission != null && platoon.Mission.ReinforcePlatoons > 0,
             reinforcingLabel: platoon.ReinforcesLabel);
+    }
+
+    /// <summary>
+    /// The name and strength at the head of a platoon marker, pure. A platoon still being flown in
+    /// says so (design.md, air-mobile-platoons_20260915 Section 4): <c>3RD PLATOON (air-mobile)
+    /// 4/6</c> reads as a platoon whose remaining vehicles are in the air, where a bare <c>4/6</c>
+    /// would read as one that has lost two. The note goes the moment the platoon is complete — it is
+    /// about the arrival, not about the platoon.
+    /// </summary>
+    internal static string PlatoonStrengthLabel(
+        string name, bool airMobile, int strength, int establishment)
+    {
+        return airMobile && strength < establishment
+            ? $"{name} (air-mobile) {strength}/{establishment}"
+            : $"{name} {strength}/{establishment}";
     }
 
     /// <summary>
@@ -509,10 +599,15 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
-    /// The marker's flags, appended in the addendum's fixed order (<c>In contact</c>,
-    /// <c>Requesting CAS</c>, <c>CAS overhead</c>, <c>Requesting reinforcements</c>,
-    /// <c>Reinforcing &lt;label&gt;</c>, <c>Under strength</c>) behind a <c> · </c> separator, or
-    /// nothing when no flag is set. Pure, for the self-check.
+    /// The marker's flags, appended in the addendum's fixed order (<c>In contact</c>, the escort
+    /// flag, the strike flag, <c>Requesting reinforcements</c>, <c>Reinforcing &lt;label&gt;</c>,
+    /// <c>Under strength</c>) behind a <c> · </c> separator, or nothing when no flag is set. Pure,
+    /// for the self-check.
+    /// <para>The two air flags arrive already built by <see cref="AirFlag"/> (user request,
+    /// 2026-09-14): one flag said <c>Requesting CAS</c> whether the platoon was short of fighters,
+    /// short of ground attack or short of both, and said nothing at all about whether anything was
+    /// coming. They are strings rather than a pile of bools because the escort and strike sides
+    /// carry their own counts and their own state.</para>
     /// <para>
     /// <paramref name="underStrength"/> is the picket marker's own flag (picket/truck markers,
     /// 2026-09-14) and defaults to false, so this stayed one definition with two callers rather
@@ -523,15 +618,15 @@ internal sealed partial class CommanderOperationsService
     /// </summary>
     internal static string MarkerFlags(
         bool inContact,
-        bool requestingCas,
-        bool casOverhead,
+        string capFlag,
+        string casFlag,
         bool requestingReinforcements,
         string reinforcingLabel,
         bool underStrength = false)
     {
         if (!inContact
-            && !requestingCas
-            && !casOverhead
+            && capFlag.Length == 0
+            && casFlag.Length == 0
             && !requestingReinforcements
             && reinforcingLabel.Length == 0
             && !underStrength)
@@ -545,14 +640,16 @@ internal sealed partial class CommanderOperationsService
             text.Append(" · In contact");
         }
 
-        if (requestingCas)
+        // Escort before strike, the order the sortie itself fills its slots in, so a marker reads
+        // the same way round as the wing works.
+        if (capFlag.Length > 0)
         {
-            text.Append(" · Requesting CAS");
+            text.Append(" · ").Append(capFlag);
         }
 
-        if (casOverhead)
+        if (casFlag.Length > 0)
         {
-            text.Append(" · CAS overhead");
+            text.Append(" · ").Append(casFlag);
         }
 
         if (requestingReinforcements)
@@ -571,6 +668,41 @@ internal sealed partial class CommanderOperationsService
         }
 
         return text.ToString();
+    }
+
+    /// <summary>
+    /// One side of the air request, as the marker prints it (user request, 2026-09-14).
+    /// <paramref name="role"/> is <c>CAP</c> or <c>CAS</c>; <paramref name="wanted"/> is how many
+    /// airframes the sortie asks for, <paramref name="bound"/> how many it has been given and
+    /// <paramref name="onStation"/> how many of those are actually over the objective
+    /// (<c>CommanderOperationsService.CountOnStation</c> — the same answer an attack's go-in check
+    /// reads, never a second opinion). Pure, for the self-check.
+    /// <list type="bullet">
+    /// <item>Nothing wanted, nothing queued — no flag.</item>
+    /// <item>Held back by the pre-emptive cap — <c>Requesting CAS (0/2 · queued)</c>.</item>
+    /// <item>Asked and given nothing — <c>Requesting CAS (0/2)</c>.</item>
+    /// <item>Given something still flying out — <c>Requesting CAS (1/2 · inbound)</c>.</item>
+    /// <item>At least one airframe over the objective — <c>CAS overhead</c>, with no counts,
+    /// because at that point what the player needs to know is that it is there.</item>
+    /// </list>
+    /// </summary>
+    internal static string AirFlag(string role, int wanted, int bound, int onStation, bool queued)
+    {
+        if (wanted <= 0)
+        {
+            return string.Empty;
+        }
+
+        if (onStation > 0)
+        {
+            return $"{role} overhead";
+        }
+
+        // Clamped rather than trusted: a sortie can hold more airframes than it asked for after a
+        // retask, and "2/1" would read as a bug to the player.
+        int shown = Mathf.Clamp(bound, 0, wanted);
+        string state = queued ? " · queued" : (shown > 0 ? " · inbound" : string.Empty);
+        return $"Requesting {role} ({shown}/{wanted}{state})";
     }
 
     /// <summary>
@@ -695,11 +827,9 @@ internal sealed partial class CommanderOperationsService
         OperationsState state,
         CommanderPlatoon? platoon,
         CommanderOperationsMission? mission,
-        out bool casShort,
-        out bool casOverhead)
+        out string capFlag,
+        out string casFlag)
     {
-        casShort = false;
-        casOverhead = false;
         for (int i = 0; i < state.AirSorties.Count; i++)
         {
             CommanderAirSortie sortie = state.AirSorties[i];
@@ -711,17 +841,20 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
-            if (sortie.Cas.Count < sortie.Wanted || sortie.Caps.Count < sortie.CapsWanted)
-            {
-                casShort = true;
-            }
-            else
-            {
-                casOverhead = true;
-            }
-
+            capFlag = AirFlag(
+                "CAP", sortie.CapsWanted, sortie.Caps.Count,
+                CountOnStation(sortie, sortie.Caps), queued: false);
+            casFlag = AirFlag(
+                "CAS", sortie.Wanted, sortie.Cas.Count,
+                CountOnStation(sortie, sortie.Cas), queued: false);
             return;
         }
+
+        // No sortie of its own. A platoon the pre-emptive cap is holding back still asks — it says
+        // so with the sizing the sortie WOULD have had, so the queue is visible on the map rather
+        // than only in the log.
+        capFlag = platoon == null ? string.Empty : AirFlag("CAP", platoon.QueuedCapWanted, 0, 0, queued: true);
+        casFlag = platoon == null ? string.Empty : AirFlag("CAS", platoon.QueuedCasWanted, 0, 0, queued: true);
     }
 
     /// <summary>The addendum 2026-09-14 §1 label table: every state produces its situation text,
@@ -735,6 +868,23 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "an attacking platoon names its target", MarkerSituation(CommanderPlatoonState.Attacking, CommanderGroundPosture.Ring, false, "Maris Airport"), "Attacking Maris Airport");
         Expect(failures, "a withdrawing platoon says where it falls back to", MarkerSituation(CommanderPlatoonState.Withdrawing, CommanderGroundPosture.Ring, false, "FOB Crossroads 4"), "Withdrawing to FOB Crossroads 4");
         Expect(failures, "no state, no situation text", MarkerSituation((CommanderPlatoonState)99, CommanderGroundPosture.Ring, false, "Hilltop 12"), string.Empty);
+
+        // A platoon still being flown in (design.md, air-mobile-platoons_20260915 Section 4).
+        Expect(
+            failures,
+            "a platoon still arriving by air says so",
+            PlatoonStrengthLabel("3RD PLATOON", true, 4, 6),
+            "3RD PLATOON (air-mobile) 4/6");
+        Expect(
+            failures,
+            "a complete air-mobile platoon is just a platoon",
+            PlatoonStrengthLabel("3RD PLATOON", true, 6, 6),
+            "3RD PLATOON 6/6");
+        Expect(
+            failures,
+            "a platoon that drove there never says air-mobile",
+            PlatoonStrengthLabel("3RD PLATOON", false, 4, 6),
+            "3RD PLATOON 4/6");
 
         // ground-tactics design §5: a posture outranks the state in the situation text.
         Expect(
@@ -758,19 +908,55 @@ internal sealed partial class CommanderOperationsService
             MarkerSituation(CommanderPlatoonState.Holding, CommanderGroundPosture.Screen, false, "Crossroads 13"),
             "Screening Crossroads 13");
 
-        Expect(failures, "a quiet platoon carries no flags", MarkerFlags(false, false, false, false, string.Empty), string.Empty);
+        Expect(failures, "a quiet platoon carries no flags", MarkerFlags(false, string.Empty, string.Empty, false, string.Empty), string.Empty);
         Expect(
             failures,
             "flags appear in the addendum's order",
-            MarkerFlags(true, true, false, true, "Hilltop 12"),
-            " · In contact · Requesting CAS · Requesting reinforcements · Reinforcing Hilltop 12");
-        Expect(failures, "a filled sortie reads as CAS overhead", MarkerFlags(false, false, true, false, string.Empty), " · CAS overhead");
-        Expect(failures, "a reinforcing platoon alone still says so", MarkerFlags(false, false, false, false, "Crossroads 4"), " · Reinforcing Crossroads 4");
+            MarkerFlags(true, string.Empty, "Requesting CAS (0/2)", true, "Hilltop 12"),
+            " · In contact · Requesting CAS (0/2) · Requesting reinforcements · Reinforcing Hilltop 12");
+        Expect(failures, "a filled sortie reads as CAS overhead", MarkerFlags(false, string.Empty, "CAS overhead", false, string.Empty), " · CAS overhead");
+        Expect(failures, "a reinforcing platoon alone still says so", MarkerFlags(false, string.Empty, string.Empty, false, "Crossroads 4"), " · Reinforcing Crossroads 4");
         Expect(
             failures,
             "under strength is the last flag on the line",
-            MarkerFlags(true, false, false, false, string.Empty, underStrength: true),
+            MarkerFlags(true, string.Empty, string.Empty, false, string.Empty, underStrength: true),
             " · In contact · Under strength");
+
+        // The escort flag comes before the strike flag, and both can stand at once — the split the
+        // single `Requesting CAS` flag could not express (user request, 2026-09-14).
+        Expect(
+            failures,
+            "escort is named before strike and both can stand together",
+            MarkerFlags(false, "Requesting CAP (1/2 · inbound)", "Requesting CAS (0/1)", false, string.Empty),
+            " · Requesting CAP (1/2 · inbound) · Requesting CAS (0/1)");
+
+        CheckAirFlags(failures);
+    }
+
+    /// <summary>Every combination of the air request flag (user request, 2026-09-14): the side that
+    /// wants nothing, the queued one, the asked-and-empty one, the part-filled one still flying out,
+    /// and the one with an airframe over the objective — for both the escort and the strike
+    /// side.</summary>
+    private static void CheckAirFlags(List<string> failures)
+    {
+        Expect(failures, "a side that wants nothing has no flag", AirFlag("CAS", 0, 0, 0, false), string.Empty);
+        Expect(failures, "a queued side that wants nothing still has no flag", AirFlag("CAS", 0, 0, 0, true), string.Empty);
+        Expect(failures, "an unserved request reads as a bare fraction", AirFlag("CAS", 2, 0, 0, false), "Requesting CAS (0/2)");
+        Expect(failures, "a queued request says so", AirFlag("CAS", 2, 0, 0, true), "Requesting CAS (0/2 · queued)");
+        Expect(failures, "a bound airframe not yet over the objective is inbound", AirFlag("CAS", 2, 1, 0, false), "Requesting CAS (1/2 · inbound)");
+        Expect(failures, "a fully bound sortie still flying out is inbound", AirFlag("CAS", 2, 2, 0, false), "Requesting CAS (2/2 · inbound)");
+        Expect(failures, "one airframe on station reads as overhead", AirFlag("CAS", 2, 2, 1, false), "CAS overhead");
+        Expect(failures, "on station beats a part-filled element", AirFlag("CAS", 2, 1, 1, false), "CAS overhead");
+        Expect(failures, "the escort side uses the same table", AirFlag("CAP", 2, 1, 0, false), "Requesting CAP (1/2 · inbound)");
+        Expect(failures, "the escort side reads overhead too", AirFlag("CAP", 1, 1, 1, false), "CAP overhead");
+        Expect(failures, "a queued escort says so", AirFlag("CAP", 1, 0, 0, true), "Requesting CAP (0/1 · queued)");
+
+        // A retask can leave a sortie holding more than it asked for; "2/1" would read as a bug.
+        Expect(failures, "more bound than wanted never prints an impossible fraction", AirFlag("CAS", 1, 2, 0, false), "Requesting CAS (1/1 · inbound)");
+
+        // Queued and bound cannot both be true in the live code — a queued platoon has no sortie and
+        // therefore no airframes — but the table has to be total, and queued is the stronger claim.
+        Expect(failures, "queued outranks inbound", AirFlag("CAS", 2, 1, 0, true), "Requesting CAS (1/2 · queued)");
     }
 
     /// <summary>The picket and forward-base truck marker tables (user 2026-09-14: "we need markers
@@ -808,37 +994,37 @@ internal sealed partial class CommanderOperationsService
         Expect(
             failures,
             "a full picket reads two of two",
-            PicketMarkerText("Crossroads 13", 2, 2, false, false, true, false, false) ?? string.Empty,
+            PicketMarkerText("Crossroads 13", 2, 2, false, false, true, false, string.Empty, string.Empty) ?? string.Empty,
             "PICKET Crossroads 13 2/2 — Holding Crossroads 13");
         Expect(
             failures,
             "a picket down to one vehicle reads one of two and says it is under strength",
-            PicketMarkerText("Crossroads 13", 1, 2, false, false, true, false, false) ?? string.Empty,
+            PicketMarkerText("Crossroads 13", 1, 2, false, false, true, false, string.Empty, string.Empty) ?? string.Empty,
             "PICKET Crossroads 13 1/2 — Holding Crossroads 13 · Under strength");
         Expect(
             failures,
             "every picket flag renders in the fixed order",
-            PicketMarkerText("Crossroads 13", 1, 2, false, false, true, true, true) ?? string.Empty,
-            "PICKET Crossroads 13 1/2 — Holding Crossroads 13 · In contact · Requesting CAS · Under strength");
+            PicketMarkerText("Crossroads 13", 1, 2, false, false, true, true, string.Empty, "Requesting CAS (0/1)") ?? string.Empty,
+            "PICKET Crossroads 13 1/2 — Holding Crossroads 13 · In contact · Requesting CAS (0/1) · Under strength");
         Expect(
             failures,
             "an awaited insertion is drawn at nought of two",
-            PicketMarkerText("Hilltop 12", 0, 2, true, false, false, false, false) ?? string.Empty,
+            PicketMarkerText("Hilltop 12", 0, 2, true, false, false, false, string.Empty, string.Empty) ?? string.Empty,
             "PICKET Hilltop 12 0/2 — Awaiting insertion · Under strength");
         Expect(
             failures,
             "a larger garrison setting is counted against, not a hard-coded two",
-            PicketMarkerText("Hilltop 12", 3, 3, false, false, false, false, false) ?? string.Empty,
+            PicketMarkerText("Hilltop 12", 3, 3, false, false, false, false, string.Empty, string.Empty) ?? string.Empty,
             "PICKET Hilltop 12 3/3 — Moving to Hilltop 12");
         Expect(
             failures,
             "one short of a larger garrison is still under strength",
-            PicketMarkerText("Hilltop 12", 2, 3, false, false, false, false, false) ?? string.Empty,
+            PicketMarkerText("Hilltop 12", 2, 3, false, false, false, false, string.Empty, string.Empty) ?? string.Empty,
             "PICKET Hilltop 12 2/3 — Moving to Hilltop 12 · Under strength");
         Expect(
             failures,
             "an empty picket with no flight inbound gets no marker",
-            PicketMarkerText("Crossroads 13", 0, 2, false, false, false, false, false) == null,
+            PicketMarkerText("Crossroads 13", 0, 2, false, false, false, false, string.Empty, string.Empty) == null,
             true);
 
         Expect(failures, "a truck on the road says where it is going", TruckSituation(false, false, "Crossroads 13"), "Moving to Crossroads 13");
@@ -854,6 +1040,41 @@ internal sealed partial class CommanderOperationsService
             "a returning truck still says which post it is leaving",
             TruckMarkerText("Crossroads 13", true, false),
             "TRUCK Crossroads 13 — Returning");
+
+        // Who "Awaiting insertion" belongs to (fix, 2026-09-16). A picket with nothing on the ground
+        // is drawn ONLY while its own flight is open; a delivery to the same ground for somebody else
+        // — a forward base's construction lift, a platoon lift using the point as a landing zone —
+        // is not this picket's, and a recall that removes the picket's record must remove the marker.
+        OperationsState markerState = new();
+        CommanderOperationsMission picket = new() { Kind = CommanderMissionKind.Picket };
+        CommanderOperationsMission otherMission = new() { Kind = CommanderMissionKind.ForwardBase };
+        CommanderStrategicPoint sharedGround = new(
+            StrategicPointKind.Hilltop, default, CommanderSettings.PointsHilltopRadiusMeters, "HILLTOP 12");
+        picket.Point = sharedGround;
+        otherMission.Point = sharedGround;
+        Expect(
+            failures,
+            "a picket with no flight of its own is not awaiting an insertion",
+            PicketHasInsertionInbound(markerState, picket),
+            false);
+        markerState.Insertions.Add(new CommanderInsertion { Mission = otherMission, Point = sharedGround });
+        Expect(
+            failures,
+            "somebody else's delivery onto the picket's ground is not the picket's insertion",
+            PicketHasInsertionInbound(markerState, picket),
+            false);
+        markerState.Insertions.Add(new CommanderInsertion { Mission = picket, Point = sharedGround });
+        Expect(
+            failures,
+            "a picket with its own flight open is awaiting an insertion",
+            PicketHasInsertionInbound(markerState, picket),
+            true);
+        markerState.Insertions.RemoveAt(markerState.Insertions.Count - 1);
+        Expect(
+            failures,
+            "a recalled picket flight stops the picket awaiting anything",
+            PicketHasInsertionInbound(markerState, picket),
+            false);
     }
 
     /// <summary>

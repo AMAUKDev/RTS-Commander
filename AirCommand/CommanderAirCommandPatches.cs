@@ -10,6 +10,10 @@ internal static class CommanderAirCommandPatches
     private static readonly FieldInfo? StateAircraftField = AccessTools.Field(typeof(PilotBaseState), "aircraft");
     private static readonly FieldInfo? DestinationField = AccessTools.Field(typeof(PilotBaseState), "destination");
     private static readonly FieldInfo? TimeWithoutTargetField = AccessTools.Field(typeof(AIPilotCombatModes), "timeWithoutTarget");
+    /// <summary>The pilot's current attack mode. The enum itself is private, so the value is read as
+    /// a number against the ordinals in <c>CommanderAirCommandService.AttackModeBreakOffAttack</c>
+    /// and its pair; the same reflection pattern as <see cref="DestinationField"/>.</summary>
+    private static readonly FieldInfo? AttackModeField = AccessTools.Field(typeof(AIPilotCombatModes), "attackMode");
     private static readonly FieldInfo? TargetHeightField = AccessTools.Field(typeof(AIPilotCombatModes), "targetHeight");
     private static readonly FieldInfo? LandingModeField = AccessTools.Field(typeof(AIPilotLandingState), "landingMode");
     private static readonly FieldInfo? LandingAirbaseField = AccessTools.Field(typeof(AIPilotLandingState), "airbase");
@@ -89,7 +93,7 @@ internal static class CommanderAirCommandPatches
     [HarmonyPostfix]
     private static void RunAttackModePostfix(AIPilotCombatModes __instance)
     {
-        CommanderAirCommandService.ConstrainMissionDestination(__instance, DestinationField);
+        CommanderAirCommandService.ConstrainMissionDestination(__instance, DestinationField, AttackModeField);
     }
 
     [HarmonyPatch(typeof(FactionHQ), nameof(FactionHQ.RegisterFactionUnit))]

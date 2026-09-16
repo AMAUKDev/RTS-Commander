@@ -65,6 +65,11 @@ strip that accepts them within `RotaryCasRangeMeters` (40 km) of the objective. 
 Pre-emptive sorties request jets. When no rotary can launch in range the sortie falls back to a
 jet with a once-per-objective log line. Helicopter CAS loadouts use the same ordnance preference.
 
+> **Amended 2026-09-14 (user instruction, plan.md Departure 10).** The setting is now
+> `HeliCasRangeMeters` and its default is 90 km: at 40 km most objectives on an 80 km map had no pad
+> in range at all. The fallback line is printed EVERY time it happens, with the distance to the
+> nearest pad, not once per objective.
+
 ## Section 3 — Packages
 
 - A sortie with wanted > 1 (or any escort) is a **package**. Each launched airframe is bound and
@@ -84,12 +89,55 @@ jet with a once-per-objective log line. Helicopter CAS loadouts use the same ord
 ## Section 4 — AWACS
 
 - One `Awacs` sortie per commander whenever the roster has an airframe carrying the game's radar
-  special system (`SpecialAirSystem.Radar`) that `CanAiFly`; wanted 1. Station: 30 km behind the
-  centre of the front (mean of front points and ForwardBase missions) along the line toward the
-  commander's main base; if no front exists yet, over the main base at 20 km. Flies `AirGuard`
-  mode at the station with the radar loadout; never lent to a sortie. Replaced after loss with the
-  normal loss cooldown; ladder rung 2, immediately after the CAP baseline and before CAS demand.
-- Log: `tasks <airframe> as AWACS 30 km behind the front`, `AWACS` entry in `air=[…]`.
+  special system (`SpecialAirSystem.Radar`) that `CanAiFly`. Flies `AirGuard` mode at the station
+  with the radar loadout; never lent to a sortie and never stripped for another sortie. Replaced
+  after loss with the normal loss cooldown; ladder rung 2, immediately after the CAP baseline and
+  before CAS demand.
+- Log: `tasks <airframe> with radar watch 15 km from <base> toward the front`, `AWACS` entry in
+  `air=[…]`.
+
+**Departure 2026-09-14 — the hard limit and the station** (user report, far-start map: "it seems to
+have bought 2x AWACS and sent them to the middle of the map. I think we should have a hard limit on
+one AWACS and it stays near the airbase"). Three things changed; the rest of this section stands.
+
+- **Wanted is a limit, not a constant.** It was `1`, which meant "one BOUND to this sortie". A radar
+  airframe that unbound itself reopened the slot at once and a second was bought while the first was
+  still airborne. It is now `AwacsWanted(CountOwnedRadarAirframes(hq, state))` — one per commander,
+  counting every owned radar airframe alive in ANY state (on station, outbound, returning, on the
+  deck), by the same `FillsAirRole(…, AirRole.Awacs)` capability test the sortie fill binds on. A
+  replacement is bought only once the airframe is gone, and then only after `AwacsLossCooldown`.
+- **The out-of-ammo RTB no longer fires on a radar airframe.** The seed in `ChooseMissionTarget`
+  read "out of ammunition" for any mission whose mode is not `AwacsJammer`, and the operations AWACS
+  flies `AirGuard`, so a radar aeroplane with no shootable store counted as empty the moment it
+  reached its orbit: `Returning` was set, `PruneSortieAirframes` unbound it, and the slot reopened.
+  `CommanderAirCommandService.MissionIsOutOfAmmo(carriesEligibleStore, anyLoadedStore, radarWatch)`
+  now answers it: an airframe with NO usable store FITTED for its mode was never armed and is never
+  empty. A strike airframe with empty racks is unaffected — its racks exist.
+- **The station is measured from the BASE, not the front.** 30 km behind the centre of the front put
+  the orbit in the middle of a 69 km-apart map. It is now the main airbase offset
+  `AwacsBaseOffsetMeters` (15 km) toward the centre of the front, or toward the nearest asset another
+  faction holds when no front has formed, or the airbase itself with neither. Inside the base's own
+  air defence, and an airborne radar still reaches 150 km+ from there. `AwacsOrbitRadiusMeters`
+  stays 20 km. `AwacsStandoffMeters(hasAim, baseToAimMeters)` keeps its clamp: the station never
+  passes the thing it is aimed at.
+- **The radar airframe is never retasked off radar watch** (user decision 2026-09-14: "AWACS aircraft
+  should never be retasked from being AWACS"). One predicate pair — `IsAwacsAirframe(hq, aircraft)`
+  (the same `FillsAirRole(…, AirRole.Awacs)` capability test the fill and the count use) and
+  `IsAwacsSortie(sortie)` — feeds one pure rule, `MayBindToSortie(radarAirframe, awacsSortie)`,
+  which holds BOTH ways: the radar airframe flies the radar watch and nothing else, and nothing
+  without the pod is ever put on the radar watch. Wired into every reassignment path:
+  `TryRetaskOne` (the AWACS sortie is never a retask target) and `MayTakeForContact` (a radar
+  airframe is never a retask source), `TakeUnboundOwned` (the fill's selection),
+  `TakeLendableHomeCapFighter` (home-CAP lending), the idle sweep's patrol test and its refusal
+  wording, `IssueHomeCapTask` and `IssuePostureTask` (both patrol doors), and
+  `NotifyAircraftRegistered` — a radar airframe registering is bound to the radar watch or to
+  nothing, never parked on the home CAP. `BindCas` and `BindCap` now return `bool` and carry the
+  backstop gate `MayBindAirframe`, which says the refusal out loud
+  (`refuses to retask <airframe>: AWACS stays on radar watch`); the fill loop breaks on a refusal
+  rather than offering the same airframe again.
+- Self-checks (in `CheckAirSupport`): six on `AwacsWanted` and the limit constant, four on the new
+  station geometry, four on `MissionIsOutOfAmmo`, four on `MayBindToSortie` (both directions, both
+  ways round) and two on the idle sweep's radar wording.
 
 ## Section 5 — ARAD
 
@@ -113,7 +161,7 @@ Winchester to RTB, the rest to home CAP. One log line per airframe: `<airframe> 
 
 ## Settings and constants
 
-Settings (`Operations`): `PackageFormUpSeconds` 180, `RotaryCasRangeMeters` 40000,
+Settings (`Operations`): `PackageFormUpSeconds` 180, `HeliCasRangeMeters` 90000 (was `RotaryCasRangeMeters` 40000; renamed and raised 2026-09-14),
 `AradClusterMinimum` 3. Constants with `<summary>`: `PreferredCasOrdnance` table, form-up
 distance 12 km, form-up arrival 3 km, AWACS stand-off 30 km / 20 km, ARAD link distance 5 km.
 
@@ -429,3 +477,462 @@ so it labels as `INSERTION <point> — outbound / unloading / returning` and nev
 `IDLE`.
 
 Verification: the predicate, on both halves and neither.
+
+### Section 18 — A package says what it actually has (user, 2026-09-14)
+
+The marker `CAS CROSSROADS 20 0/3 — Going in · +esc rotary` appeared while the only airframe bound
+to that sortie was its escort — a T/A-30 Compass flying CAP — and the strike slots read `0/4`.
+Nothing was going in; there was nothing to go in with.
+
+**Decision.** The sortie marker reads from what is BOUND, not from the phase the sortie believes it
+is in.
+
+- A sortie that wants strike airframes, has none bound, and has at least one escort bound reads
+  `Escort only, awaiting strike`. It sits below `Lent from home CAP`, `Retasked` and
+  `Holding for ARAD` in the phase precedence (those three are more specific about the same
+  situation) and above everything else, so it overrides `Forming at form-up`, `Going in` and
+  `On station`.
+- The escort flag carries its counts: `· CAP 1/3` rather than the bare `· +esc`. A package reading
+  `0/4 — Escort only, awaiting strike` has to be able to say how much escort it actually has, and
+  the bare flag was the half of the old label that hid it. The flag is suppressed on a sortie whose
+  own counts already ARE its fighters — a platoon's own CAP request, an escort over a strike-less
+  objective — so a marker never prints the same pair twice.
+- The whole line for the reported case is now
+  `CAS CROSSROADS 20 0/4 — Escort only, awaiting strike · CAP 1/3`, pinned by a self-check that
+  builds it from the three pure pieces.
+
+**Where.** `Operations/CommanderOperationsAirMarkers.cs` — `AirMarkerPhase` (new `escortOnly`
+parameter), `AirMarkerFlags` (counts instead of a bool), `SortieMarkerLabel` (the two call sites),
+and `CheckAirMarkerLabels`.
+
+### Section 19 — Commander aircraft fly with an empty cannon (user, 2026-09-14)
+
+> "aircraft spawned need to have 0 internal cannon rounds, otherwise they go suicidal and try and
+> use their cannons in heavily contested airspace."
+
+#### How the game stores the cannon and its ammunition — VERIFIED in `Assembly-CSharp.dll`
+
+Decompiled with `ilspycmd` on 2026-09-14. Everything in this subsection was read from the
+decompiled source, not inferred.
+
+- `Loadout.weapons` is a positional list of `WeaponMount`, one entry per `HardpointSet`. A null
+  entry means that hardpoint set carries nothing.
+- `WeaponMount` is a `ScriptableObject` with an `ammo` field and a `GunAmmo` flag. It is a shared
+  ASSET: the same object backs every aircraft in the game that can carry that store. **Writing to
+  `WeaponMount.ammo` would take the rounds off the player's aircraft and off every future spawn for
+  the rest of the session.** Nothing in this mod may do it.
+- `WeaponInfo.gun` is the flag that says a store is a gun.
+- The internal cannon is a `Hardpoint.BuiltInWeapons` entry — a `Gun` component already on the
+  airframe. `Hardpoint.SpawnMount(aircraft, mount)` calls `gun.LoadAmmunition(mount)` to fill it and
+  `aircraft.weaponManager.RegisterWeapon(...)` to give it a `WeaponStation`.
+  `Hardpoint.RemoveMount()` calls `gun.LoadAmmunition(null)`, which sets `magazines = 0` and
+  `Weapon.ammo = 0`.
+- `WeaponManager.LoadHardpointSet(set, mount)` takes the `RemoveMounts` branch when the mount is
+  null and `SpawnMounts` otherwise. `SpawnMount` is the ONLY place a weapon is registered.
+- `WeaponStation.AccountAmmo()` re-totals `Ammo` from each `Weapon.ammo`. `WeaponStation.Ready()`
+  requires `Ammo > 0`, and `AIPilotCombatModes` aborts a gun run on
+  `currentWeaponStation.Ammo <= 0`. Those are the only numbers the AI's gun runs read.
+
+**So `WithoutInternalCannons` does more than drop a cosmetic entry**: a null entry means the built-in
+gun is never registered, gets no weapon station, and cannot be selected or fired by the AI at all.
+
+Two residuals, both verified and both harmless: `Gun.Awake()` loads one magazine when its
+`startLoaded` flag is set, and `LoadAmmunition(null)` clears `magazines` and `ammo` but not
+`bulletsLoaded`. Neither is reachable without a weapon station.
+
+#### The gap that was actually letting cannons through
+
+`CommanderAirCommandMissions.TryLaunchAiAircraft` fell back to
+`weaponManager.SelectAIAircraftWeapons(airbase)` whenever the caller passed a null loadout — which
+`LaunchBoughtAirframe` does for any airframe with no standard loadout. That method picks a random
+legal mount for EVERY hardpoint set, the gun's included. `Aircraft` itself also substitutes
+`definition.aircraftParameters.loadouts[1]` for a null or empty loadout.
+
+#### Decision
+
+- The cannon rule is applied at the choke point, `TryLaunchAiAircraft`, not trusted to each caller.
+  It runs on the loadout going in AND on whatever `SelectAIAircraftWeapons` produced.
+- The supply and naval cargo spawns do not go through that door, so they apply the same rule to
+  their own loadouts. They build them empty, so there is nothing to remove today; the rule is there
+  so a future cargo recipe carrying a gun pod cannot slip past.
+- Belt and braces: `StripCannonAmmo(Aircraft)` empties any gun weapon station that exists anyway,
+  through the game's own `Gun.LoadAmmunition(null)` plus `WeaponStation.AccountAmmo()`. It runs once
+  right after each launch, and again over every commander-owned airframe on the review sweep
+  (`PruneAirBook`) — which is what actually covers an airframe whose stations were still being built
+  at spawn, one rearmed at a strip, or one adopted after a hot reload. It logs only when it removes
+  rounds, so a quiet log means the loadout rule is doing its job.
+- The launch line says so: `launched a A-19 Brawler (Strike) from Maris Airport for 36
+  (cannon 0 rounds) (…)`. With INTERNAL CANNONS on it says `(cannon loaded: INTERNAL CANNONS is on)`.
+  A loadout that still carries a gun mount at launch logs a named self-check failure.
+- Self-check `CheckInternalCannonRule` drives the real `WithoutInternalCannons` with probe mounts:
+  the gun goes, every other store stays, a gun-only airframe keeps its gun rather than flying
+  unarmed, and an empty or absent loadout carries none.
+
+### Section 20 — A package is one type, ordered together, from one base (user, 2026-09-14)
+
+> "when building mission packages, aircraft should be of the same type. so if there's 2x CAS
+> aircraft, both should be the same (for example) and ordered at the same time from the same
+> location."
+
+**Decision.**
+
+- The demand walk now hands the chosen sortie back to the buyer, so the buy knows which ELEMENT it
+  is filling and how much of it is empty: the escort slots on the CAP side, the strike, suppression
+  and radar slots on the other.
+- The type is chosen once for the whole element. The tier rule runs against the element's own share
+  of the allocation (`budget / elementSize`), so the airframe picked is one the whole element can
+  afford rather than one only the first slot can.
+- The base is the accepting base NEAREST the objective. `FindAcceptingAirbase` gained that
+  behaviour for a caller that passes a reference point with no range limit; the rotary pass, which
+  passes both, is unchanged.
+- The element is ordered whole or not at all: `PackageElementBuys(elementShort, unitPrice, budget,
+  inContact)` returns the whole element when the allocation covers it, nothing when it does not, and
+  whatever it can when the sortie is IN CONTACT — one aeroplane now beats none for a platoon being
+  shot at, and the pinned type means the second one still matches.
+- The chosen type and base are recorded on the sortie (`PackageStrikeType` / `PackageStrikeBase`,
+  and `PackageCapType` / `PackageCapBase` for the escort, which may differ). A later top-up after a
+  loss reuses them while `KeepsPackageChoice` holds: something is pinned, the airframe can still
+  fill the role from a strip this commander holds, and the pinned base still accepts it. Any of those
+  failing releases both fields together and the element re-picks.
+- The pin is written from what actually LAUNCHED, not from what was chosen, so an order that put
+  nothing in the air leaves the next review free.
+- Logs: `orders 2x A-19 Brawler from Maris Airport for CROSSROADS 20 (package strike element)`, and
+  each airframe's own launch line says `2 of 2 in the element`. The review line carries the type
+  behind the counts: `CROSSROADS 20 CAP 1/1 FS-12 CAS 2/2 A-19`.
+- Self-check `CheckPackageElements`: twelve element-sizing cases including the contact exception and
+  a zero price, and five on type and base persistence.
+
+**Bound.** `MaxAirBuysPerReview` still bounds how many BUY CALLS a review makes; one call may now
+launch a whole element. The airborne ceiling is re-read before each airframe of the element.
+
+## Section 12 — the pre-emptive demand cap (user report 2026-09-14, `Ground Control Duel Far`)
+
+**The report.** "We have loads of requests for CAS from platoons and only a handful in the air."
+
+**What the log showed.** Across the 43 reviews of the match, the player side's demand read
+(`Ops Player commander (Boscali): air demand:`) ran from `CAP 0/4, CAS 2/3` early to
+`CAP 0/28, CAS 2/10` at its peak, against a rung-2 grant of 1 to 163 and an air share of 40 % of
+that. The wing could afford one or two airframes a review — 84 CAS sorties were launched in the
+whole match, almost all SAH-46 Chicanes at 31 — so a demand list of fifteen to thirty objectives
+meant every objective got a fraction of an aeroplane and none got cover. The CAP side was bound
+`0/N` on **every single review of the match**: not one platoon-requested or point CAP was ever
+filled.
+
+**Where the list comes from.** `AddPreemptiveDemand` opens one sortie per platoon under way, and the
+side had ten platoons marching at once. That is the term that scales with the size of the front
+rather than with the fighting, and it is the term that was drowning the contact sorties.
+
+**Decision (2026-09-14).** Pre-emptive cover is capped at
+`CommanderSettings.OperationsMaxPreemptiveAirObjectives` (default 4) marching platoons, the ones
+NEAREST the enemy first — the distance `PreemptiveEnemyDistance` already measures for the hold
+clock. Contact sorties, attack sorties, points under attack and the AWACS are never capped by this:
+the cap exists to stop the quiet half of the front outbidding the fighting half, not to ration the
+fighting half.
+
+- The measuring pass still runs over every platoon, because `PreemptiveAirUntil` is the platoon's
+  hold clock and a platoon that stops marching must have it cleared whether or not it made the cut.
+- `AlreadyDemanded` is re-read in the adding pass, not the measuring pass: two platoons of one
+  mission would both have passed it before either had added anything.
+- Log, on a change in the queued count only: `pre-emptive air cover is capped at the 4 marches
+  nearest the enemy: 4 covered, 6 queued.`
+
+**Not done, and why.** Pooling pre-emptive cover per attack AXIS rather than per platoon was
+considered and left out: the axis is a property of an Attack mission, and the platoons that
+dominate this list are `Moving@ForwardBase`, which have no axis. The nearest-first cap gets the same
+concentration without inventing a grouping for platoons that are not grouped.
+
+## Section 13 — the home CAP launches from the nearest base (fix 2026-09-14)
+
+`BuyHomeCapFighter` asked `FindAcceptingAirbase(hq, definition)` with no reference point, which
+returns the FIRST accepting base in `hq.GetAirbases()` order. Every one of the player side's nine
+home-CAP FS-12 Revokers in the 2026-09-14 match launched from `airbase_boscali_north` while the
+commander also held `airbase_city`, `highwaystrip2` and a captured field. The sortie buyer has
+picked the nearest accepting base to its objective since 2026-09-14 (Section 11); this is the same
+rule for the buy that has no objective, anchored on `CommanderCaptureService.GetTerritoryCenter(hq)`
+— the middle of what the patrol exists to cover. Proof line: `launched a FS-12 Revoker (Fighter)
+from <base>` should stop naming one base for every home-CAP buy.
+
+## Section 14 — the marker says which air it wants and what it is getting (user request 2026-09-14)
+
+**The problem.** A platoon, picket or forward-base marker carried one flag, `Requesting CAS`, set
+whenever `sortie.Cas.Count < sortie.Wanted || sortie.Caps.Count < sortie.CapsWanted`. It could not
+distinguish a platoon short of its escort from one short of ground attack, said nothing about
+whether anything had been bought, and went silent altogether for a platoon the new pre-emptive cap
+is holding back — which reads to the player as the wing ignoring them.
+
+**Decision (2026-09-14).** The flag splits in two, escort before strike (the order the sortie itself
+fills its slots in), and each carries its own fill state. `AirFlag(role, wanted, bound, onStation,
+queued)` is the whole table and is pure:
+
+| State | Reads |
+|---|---|
+| Nothing wanted | no flag |
+| Held by the pre-emptive cap | `Requesting CAS (0/2 · queued)` |
+| Asked, nothing bought | `Requesting CAS (0/2)` |
+| Bought, still flying out | `Requesting CAS (1/2 · inbound)` |
+| At least one airframe over the objective | `CAS overhead` |
+
+`CAP` reads identically with its own counts. A marker can carry both:
+`8TH PLATOON 6/6 — Attacking Dustbowl Highway Strip · In contact · Requesting CAP (1/2 · inbound) ·
+Requesting CAS (2/2 · inbound)`.
+
+- **"On station" is not a second opinion.** The loop that decided whether an attack may go in was
+  moved out to `CommanderOperationsService.CountOnStation(sortie, bound)` — package gone in, airframe
+  alive, inside `CasSortieRadiusMeters` — and the marker reads that same method (Reuse rule 3, moved
+  not paraphrased). The player can never be told air is overhead by a rule the attack does not
+  believe.
+- **The queued counts are the real sizing.** `AddDemand`'s sizing arithmetic was cut out to
+  `SizeSortie` and the cap's queued branch calls it, so the `2` in `(0/2 · queued)` is the number the
+  platoon will actually get when its turn comes. A second copy of that arithmetic would have been
+  free to drift. The counts live on the platoon (`QueuedCasWanted` / `QueuedCapWanted`) and are
+  cleared every review before the cap runs, so a platoon that is served or stops marching goes quiet
+  at once.
+- **`MarkerFlags` takes the two flags as strings** rather than growing four more bools, and the
+  picket marker passes its own pair through the same one definition it always did.
+- **More bound than wanted is clamped**: a retask can leave a sortie holding more airframes than it
+  asked for, and `2/1` would read to the player as a bug.
+- Self-check `CheckAirFlags`: thirteen cases covering every combination for both roles, including
+  the clamp and the queued-beats-inbound precedence, plus a `MarkerFlags` case proving escort is
+  named before strike and both can stand at once.
+
+## Section 15 — the radar airframe stops holding the fighter turn (fix 2026-09-14)
+
+**The evidence.** In the `Ground Control Duel Far` match the player side's fighter demand was bound
+`CAP 0/N` on **every one of the 43 reviews**, N running from 4 to 28. Not one platoon escort and not
+one point patrol was bought all match. The reason is in the 51 denial lines: `[CAP] bought no
+aircraft: its air budget is short of the cheapest radar-carrying airframe its strips accept, and it
+saves for one rather than launching the last-resort airframe`. "Radar-carrying" is
+`RoleCapabilityLabel(AirRole.Awacs)` — the denial is the AWACS, logged under the CAP label because
+the radar airframe sits on the CAP side of the alternation.
+
+**The mechanism.** `NextAirDemand` served the AWACS first whenever it was short, unconditionally.
+The cheapest radar carrier on that roster is an EW-25 Medusa at 145; the wing's fund took 40 % of a
+rung-2 grant of 1 to 163 and the ground-attack side spent whatever it held every review on a 31
+Chicane. So the fund never passed 63 (`air saved 6-63 (cap 390)` on every ladder line), the AWACS
+was never affordable, and the fighter demand behind it never got a turn. One aircraft the commander
+could not buy blocked twenty-eight it could.
+
+**Decision (2026-09-14).** On the fighter side's turn, the AWACS keeps its priority only when it can
+actually be bought, or when standing aside would buy nothing:
+
+```
+if (awacsShort && (awacsAffordable || !capShort || !capAffordable)) -> Awacs
+if (capShort)                                                      -> Cap
+```
+
+- **Affordable** means this review's air fund covers the cheapest airframe of that role the
+  commander's own strips accept — `CheapestLaunchableValue`, which is `DearestLaunchableValue`
+  generalised rather than forked (Reuse rule 5), so the turn order, the buy and the fund ceiling all
+  read the same catalogue, the same capability gate and the same accepting-strip pair. The dead
+  `cheapestInRole` local left over in `TryBuyRole` was removed with it, so there is one definition of
+  "cheapest in role" and not two.
+- **Only the buy passes the flags.** The "is anything open" and "what is the fund saving for" reads
+  keep the `true` defaults: they ask what the wing WANTS, not what it can pay for this instant, and
+  the fund ceiling must keep counting the AWACS or the fund could never grow to it.
+- **A wing that can afford neither still saves.** Standing aside for a fighter that cannot be bought
+  either would burn the turn and bank nothing — which is the same failure in the other direction.
+- The AWACS stays one per commander with its loss cooldown; nothing about the sortie itself changed.
+- Self-checks, six cases on `NextAirDemand`: unaffordable AWACS plus affordable fighter buys the
+  fighter; affordable AWACS still outranks it; unaffordable AWACS with no fighter demand keeps
+  saving; unaffordable both keeps saving; the ground-attack side never takes the turn from this
+  path; and the ground-attack side's own turn is unaffected by either flag.
+
+**The trade, stated plainly.** While fighter demand is open and affordable — which in a busy match is
+most reviews — the AWACS is now bought late or not at all. That is the intended exchange: one radar
+aircraft against every escort and patrol the ground asked for. If the next match shows the commander
+never fielding a radar airframe at all, the answer is a reserved slice for it rather than a return to
+the unconditional priority, because the unconditional priority is what produced `CAP 0/28`.
+
+## Section 16 — the radar station stands 15 km clear of everything (user report 2026-09-14)
+
+**The report.** "An AWACS was just tasked straight into the enemy and killed because the front-line
+was close to the airbase. AWACS should never be tasked closer than 15 km to the enemy."
+
+**The mechanism.** Section 4's station is the main airbase offset `AwacsBaseOffsetMeters` (15 km)
+toward the centre of the front, with a 20 km orbit. The offset is measured from the base and clamped
+only by the distance to the thing it is aimed at — it never looks at what is between them. On a map
+where the front reaches the airbase, "15 km toward the front" is 15 km into the fight, and the 20 km
+orbit puts the aircraft 35 km into it at the far edge.
+
+**Decision (departure, 2026-09-14).** The design's offset becomes the CANDIDATE station. The station
+actually flown is the nearest one to that candidate whose WHOLE orbit clears every hostile position
+by `CommanderSettings.AwacsMinEnemyDistanceMeters` (15 km, new, `Operations` section) — so the
+centre stands at least 15 km plus the orbit's own radius from all of them.
+
+- **What counts as hostile:** every control point or base another live HQ holds
+  (`TryNearestEnemyAsset`'s walk — base points carry every airbase and resolve their owner live), and
+  the last known position of every tracked hostile ground vehicle and aircraft, on the same
+  `ThreatMemorySeconds` freshness and the same skip of buildings the existing tracking walks use.
+  Bounded at 64 entries, nearest the commander's own ground first, because the list is walked once
+  per candidate station.
+- **The remedies, in order** (`TryAwacsStation`, pure): slide back along the base-to-front line and on
+  past the base away from the front, never further behind the base than the forward offset it
+  started from; then, only if no offset on that line works at the full orbit, squeeze the orbit down
+  to `AwacsMinOrbitRadiusMeters` (8 km) and no further; then give up. Sliding before squeezing,
+  because a full-width orbit in the right place sees more than a pinched one in the wrong place.
+- **Grounded** means the AWACS demand is not opened at all. Nothing is bought, and a radar aircraft
+  already flying is released by the reconcile — where both patrol doors already refuse it, so it is
+  sent home. One line per change: `AWACS grounded: no station 15 km clear of the enemy.`
+- **The launch base.** The station is measured from the nearest held airbase to the territory centre
+  that itself has nothing hostile within 15 km — `MainAirbase` generalised with a clearance and a
+  threat list, behaviour-neutral at zero clearance (Reuse rule 5). The buy then picks the accepting
+  strip nearest the station (`FindAcceptingAirbase` with `near`), so a threatened strip is passed
+  over for the clear one the station was measured from.
+  - **Known limit, stated plainly.** That is a strong preference, not a hard gate: the accepting-strip
+    walk lives in `Ai/CommanderEnemyCommanderAir.cs`, outside this change's files, and it still picks
+    purely by distance to the station. If the only strip that can spawn the radar airframe is the
+    threatened one, the launch will still use it. A hard gate needs a clearance parameter threaded
+    through `FindAcceptingAirbase`; it is deliberately not done here.
+- **Re-evaluated every review.** The station is recomputed in `AddAwacsDemand`, `SameSortie` matches
+  the AWACS on kind alone so the new centre replaces the old, and `SyncBoundAirframe` retasks past
+  the existing 3 km hysteresis. A squeezed orbit reaches the aircraft too: the mission area's RADIUS
+  is now compared as well as its centre, scoped to the AWACS kind because it is the only mission area
+  whose radius moves on its own.
+- **Self-checks** on `TryAwacsStation`: a clear candidate kept at the design's offset and full orbit;
+  a blocked one slid back exactly far enough and no further; one no forward offset can save slid
+  behind the base; the squeeze taken only at the end of the slide and only to its floor; ten metres
+  inside the floor grounding the watch; an enemy on the airbase grounding it; an empty picture never
+  moving the station.
+
+## Section 17 — a released aircraft is offered elsewhere before it is sent home (team lead 2026-09-14)
+
+**The report.** `tasks SAH-46 Chicane with CAS over HILLTOP 41`, then minutes later `releases SAH-46
+Chicane: HILLTOP 41 no longer calls for air support`, after which the helicopter had no task.
+
+**The mechanism.** `ReleaseSortie` put every released aircraft on the standing home patrol via
+`IssueHomeCapTask`. The patrol is an air-superiority orbit; `MayHoldPatrol` refuses a helicopter, but
+`IssueHomeCapTask` never consulted it, so the task was issued, the pilot could not fly it, and the
+idle sweep then skipped the aircraft because it carried a mission. The design's own words — "released
+airframes go to the next-hungry sortie (the fill pass below does that)" — were never true either: the
+fill pass only ever takes aircraft no sortie holds, and a released one is offered to nothing.
+
+**Decision (departure, 2026-09-14).** `ReleaseDisposal` (pure) is the order, and the release path is
+the one place that acts on it:
+
+1. **Retask.** The aircraft is offered to every other sortie in this review's demand, nearest first,
+   matched on the same `FillsAirRole` capability test the fill and the buy use, skipping sorties
+   standing down after a loss and honouring the radar rule both ways. A strike slot wins over an
+   escort slot when it could take either. Bound through the existing `BindCas`/`BindCap`, stamped
+   into `AirRetaskedAt` so the retask hold applies. Logged `retasks <aircraft> from <old> to <new>`.
+2. **Home CAP**, if nothing wants it and `MayHoldPatrol` allows — which is the existing rule, now
+   actually consulted on this path.
+3. **Return to base** otherwise, logged `sends <aircraft> home: nothing calls for it`.
+
+The release pass moved AFTER the match pass in `ReconcileSorties`: an aircraft offered to a surviving
+sortie has to see how full that sortie really is, which is only true once every match has moved its
+bindings across.
+
+## Section 18 — why the objectives flap, and the minimum hold (team lead 2026-09-14)
+
+**The finding.** Eight `no longer calls for air support` lines against five taskings in twenty
+minutes is a SAMPLING mismatch, not a decision the plan is making badly.
+
+- A platoon's `InContactUntil` and a picket or forward base's `ContactUntil` are both set to
+  `Time.time + ContactHoldSeconds`, and `ContactHoldSeconds` is 20 s
+  (`Operations/CommanderOperationsService.cs:548`).
+- The air plan is rebuilt every `ReviewIntervalSeconds`, which is 30 s
+  (`Operations/CommanderOperationsService.cs:26`). `BuildAirDemand` skips any platoon or mission whose
+  clock has expired.
+- The clock is refreshed only while a hostile is tracked inside `ContactRangeMeters` (2500 m) or a
+  member was lost inside `LossContactSeconds`. Tracking decays and a 2500 m ring is tight, so the
+  evidence blinks.
+
+A 20 s memory sampled every 30 s cannot survive a blink: the objective has to have taken fire in the
+20 s before the review tick or it reads as quiet, the sortie dissolves, and the next review re-opens
+it. The CAS loss cooldown is a separate effect and marks the sortie `cooldown` rather than dissolving
+it; it is not the cause here.
+
+**Decision (departure, 2026-09-14).** Rather than lengthening the ground line's contact clock — which
+would change how platoons deploy, a gameplay change this report does not license — the hysteresis goes
+on the AIR side, where the cost is: `SortieMinHoldSeconds` (120 s, four reviews). A sortie whose
+demand closed is kept until the hold runs out, provided it is holdable and actually holds aircraft.
+
+- **Holdable** is a CAS objective or a platoon CAP — the two kinds that open and close on the tracking
+  picture. The radar watch and an anti-radiation sortie are not: both close for a reason rather than a
+  blink, and the radar watch's own close is now the safety grounding of Section 16, which must reach
+  the aircraft at once.
+- A held sortie asks for exactly what it already holds, so neither the fill nor the buy adds to it,
+  and it reads as quiet — so `RetaskSourceRank` makes it the first place a fight in contact takes an
+  aircraft from. It sits behind everything actually demanded in the sortie list. The review line marks
+  it `held`.
+- Self-checks on the boundary (a moment inside the hold keeps the wing, exactly at it lets go) and on
+  which kinds are holdable.
+
+## Section 19 — money-limited air buying, ARAD first, and the right missiles (departure 2026-09-14)
+
+User instruction, verbatim: *"implement those recommendations - note that ARADs are not using the
+correct ordinance, should be AGM-99 or AGM-68 etc"*. Four changes, all read off one `LogOutput.log`
+from a `Ground Control Duel` match (commander Boscali).
+
+**1. The buy loop is limited by money, not by a count.** The evidence: `air demand: CAP 0/13,
+CAS 1/33, ceiling 13/20, budget 214` with `income 380/min … balance 601` climbing, and two to four
+launches a review, never more. `MaxAirBuysPerReview = 3` (user decision 2026-09-13) is retired.
+`AirBuyContinues` now takes the wing's money, the cheapest airframe an OPEN demand can launch, the
+airborne count and the ceiling, and continues while the money covers the price and the sky has room.
+`MaxAirBuysPerReviewSafety` (12) is a runaway guard, not a policy: the fund is itself capped at the
+price of one airframe by `AirFundCeiling`, so twelve is unreachable in a real review. The price is
+read by `ReadAirDemandPrices`, which is `AirFundCeiling`'s own role walk generalised to return both
+ends of the range (Reuse rule 5) — so the saving rule and the spending rule can never disagree about
+which airframes count. The rung-1 home-CAP loop keeps the one-argument overload; it was already
+bounded by the shortfall and its own budget.
+
+**2. The ground's unspent share goes to the wing.** The evidence, on the same reviews:
+`holds: balance 491, unit budget 152, 7 vehicle types on offer (5 quiet reviews)`. When
+`GroundBuyingBookOnly` holds the ground buyer and the book is empty and the wing has an open
+request, `GroundShareGoesToWing` is true and the remaining rung-2 budget, less the naval ask priced
+before the hand-over, is accrued into `state.AirFund` through the same `AccrueFund` the ordinary
+share uses — so the fund's ceiling bounds it and what the ceiling refuses flows on to the rungs
+below. Announced once per transition:
+`hands the ground's unspent 152 to the wing: order book empty, 13 air requests open`.
+
+**3. ARAD before rotary CAS.** The evidence: `loses an airframe over 1ST PLATOON: CAS stands down
+for 4 min (13 hostile air-defence observed)`, repeatedly, with 31-value SAH-46 Chicanes fed into
+seven to twenty-three observed launchers. `RotaryCasAllowed(observedAirDefence, aradFlown)` holds an
+objective's helicopters while its ring shows `AirDefenceHesitationCount` (2) or more tracked
+air-defence vehicles and no anti-radiation sortie has yet been on station over the belt. The
+objective still gets CAS meanwhile — jets, which stand off — so the gate decides WHO flies it, never
+whether it is flown. The count is recorded per sortie as `LastAirDefence` by `AddDemand`, using the
+same `CountObservedAirDefence` walk the loss cooldown already reads. `AradFlown` is set by
+`RefreshAradHolds` the moment an anti-radiation sortie near the objective stops being inbound —
+one read, two answers: "still inbound" holds the CAS package at its form-up point, "over the belt"
+releases the helicopters. The memory is carried across the review by the reconcile through
+`AradMemorySurvives`, which drops it once the belt has thinned below the threshold, so a belt that
+comes back is suppressed again. Review line: `CAS 0/4 held: ARAD first (13 AD)` in place of
+`rotary`.
+
+**4. A suppression sortie carries anti-radiation missiles, and only flies if it has them.** The
+evidence: `tasks FS-12 Revoker with an anti-radiation strike over 1ST PLATOON (23 air-defence
+vehicles clustered …)` followed by `launched a FS-12 Revoker (Fighter) … (Fighter tier, best
+affordable — 7 in the sky)`. The aeroplane was bought through the FIGHTER role path and bound to the
+suppression slot because `FillsAirRole` asks what the TYPE could carry. `FillsAirRoleNow` asks what
+the aeroplane IS carrying (`CommanderAirCommandService.CarriesAntiRadiation`, over the live weapon
+stations) and is read by all five binding paths: the claim, the fill, the retask to contact, the
+released-aircraft retask and the unbound-aircraft search. The pure rule is `MayBindToRole`.
+
+The loadout itself: `AutoConfigureAradLoadout` runs two passes. Every hardpoint group that can carry
+a real anti-radiation missile takes one first; only then do the groups that cannot take the named
+standoff stores, and one of those is skipped when selecting it would exclude a group that already
+has a store — a single greedy pass in group order could have knocked a missile off the aeroplane
+through the game's hardpoint exclusions. Before this, the suppression scorer counted anti-radiation
+stores and nothing else, so every other pylon flew EMPTY, which is what the user saw.
+
+**Departure from the user's wording, stated.** The user asked for AGM-99 or AGM-68. Checked against
+`NuclearOption_Data/resources.assets`: the AGM-99 is described there as *"This air launched
+anti-ship missile has a very low altitude cruise profile…"*, the AGM-68 as *"a large, optically
+guided missile capable of destroying structures and heavily armored vehicles"*, and neither carries
+an `ARMSeeker`. The game's anti-radiation missiles are the **ARAD-116** and the **ARAD-45**. Making
+AGM-99 or AGM-68 the primary suppression store would have made every strike aircraft a suppression
+candidate (the capability gate is `AradLoadoutScore > 0`) and sent sorties against radars with
+nothing aboard that homes on one. They are therefore ranked FIRST AMONG THE SECONDARY stores
+(`PreferredAradSecondaryOrdnance` = AGM-99, then AGM-68, then anything else on its ground score),
+which is where the user's intent and the asset data agree: the suppression aeroplane now carries the
+missiles that kill the radar and the standoff stores that kill the launcher. The launch line reports
+the load as `anti-radiation loadout: ARAD-116 x4`.
+
+**Self-checks.** Twenty-nine cases: the money-limited continuation (fund covers the price, fund one
+short, fund exactly at it, the ceiling, one place under it, an unlaunchable demand, no demand at
+all, the runaway guard); the hand-over gate (all four combinations); the ARAD-first gate (below the
+count, at it, thick belt, suppression flown, belt thinned) and its memory rule; the binding rule
+(`MayBindToRole`, four cases, plus a null aeroplane); and the ordnance order (`PreferredAradSecondaryRank`
+and `ScoreAradMountForCommander`: missile beats AGM-99 beats AGM-68 beats a rocket pod, an
+air-to-air missile scores nothing, and the reported load names the missile and its rack size).

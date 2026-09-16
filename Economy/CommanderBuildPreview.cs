@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using BepInEx.Configuration;
 using RoadPathfinding;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -37,6 +38,43 @@ internal sealed class CommanderBuildPreview
     /// <summary>Smallest footprint a definition is treated as having, for definitions that author none.</summary>
     private const float MinimumFootprintMeters = 10f;
 
+    /// <summary>
+    /// How far one press of the rotate key turns the armed ghost, in degrees. Fine enough to line a
+    /// hangar up with a taxiway, coarse enough that six presses is a right angle and twenty-four a
+    /// full turn — so a player can square a building up by counting rather than by eye.
+    /// </summary>
+    private const float PlacementRotationStepDegrees = 15f;
+
+    /// <summary>
+    /// Seconds between steps while a rotate key is held down. A quarter turn takes about a second
+    /// of holding, which is fast enough to spin a building round and slow enough to stop on a
+    /// chosen heading.
+    /// </summary>
+    private const float PlacementRotationRepeatSeconds = 0.15f;
+
+    /// <summary>
+    /// Seconds a rotate key must be held before it starts repeating at all. Comfortably longer than
+    /// a deliberate tap, so one press is always exactly one step and never two.
+    /// </summary>
+    private const float PlacementRotationHoldSeconds = 0.35f;
+
+    /// <summary>
+    /// The steepest a ground-conforming building is allowed to be laid over. Past about 12 degrees
+    /// a vehicle depot's spawn point and a helipad's landing point start pointing into the hill
+    /// rather than along it, so the structure stops working as a structure; a slope steeper than
+    /// this gets the clamped tilt and looks slightly buried on the uphill side, which is the honest
+    /// signal that the ground is too steep to build on properly.
+    /// </summary>
+    private const float MaxPlacementTiltDegrees = 12f;
+
+    /// <summary>
+    /// Smallest distance out from the site the ground is measured at when fitting the slope. Half a
+    /// building's own footprint is the natural span, but a small structure would then fit its plane
+    /// inside a few metres of ground and read every bump as a hill; 12 m is about the shortest
+    /// baseline that answers "which way does this hillside run".
+    /// </summary>
+    private const float SlopeProbeMinimumRadiusMeters = 12f;
+
     /// <summary>Compass points probed around a dock site looking for water. Eight is enough to
     /// find a coastline; a finer sweep only costs raycasts to answer the same question.</summary>
     private static readonly Vector2[] ShoreProbeDirections =
@@ -61,9 +99,70 @@ internal sealed class CommanderBuildPreview
 
     private bool hasSite;
     private GlobalPosition site;
+    private float placementYawDegrees;
+    private float nextRotateLeftAt;
+    private float nextRotateRightAt;
+    private bool conformToGround;
+    private Vector3 groundNormal = Vector3.up;
 
     /// <summary>The site under the cursor is legal to build on.</summary>
     internal bool SiteValid { get; private set; }
+
+    /// <summary>
+    /// Which way the armed building is turned, in degrees clockwise from north. The ghost is drawn
+    /// with it and the spawned building is given it, so what the player lines up is what lands.
+    /// </summary>
+    internal float PlacementYawDegrees => placementYawDegrees;
+
+    /// <summary>
+    /// The armed building's full rotation, for the ghost and for the spawn: the chosen heading on
+    /// its own while the building stands upright, or that heading laid over the slope under the
+    /// cursor while ground-conforming is on.
+    /// </summary>
+    internal Quaternion PlacementRotation => conformToGround
+        ? CommanderTerrainSlope.Compose(placementYawDegrees, groundNormal)
+        : Quaternion.Euler(0f, placementYawDegrees, 0f);
+
+    /// <summary>True while the ghost is being laid over the ground rather than stood upright.</summary>
+    internal bool PlacementConformsToGround => conformToGround;
+
+    /// <summary>
+    /// How the placement is sitting, for the status line: the measured lean while conforming, or
+    /// plainly upright. The angle is the clamped one, so it never claims a tilt the building will
+    /// not actually be given.
+    /// </summary>
+    internal string PlacementTiltLabel => conformToGround
+        ? $"tilted to ground ({Mathf.RoundToInt(CommanderTerrainSlope.TiltDegrees(groundNormal))}°)"
+        : "upright";
+
+    /// <summary>The heading for the status line, in the three-digit form a compass heading is read
+    /// in ("090"), so 5 degrees does not read as the number five.</summary>
+    internal string PlacementHeadingLabel => $"{Mathf.RoundToInt(WrapYaw(placementYawDegrees)) % 360:000}";
+
+    /// <summary>
+    /// True while a build placement is armed and the cursor is out in the world rather than on one
+    /// of the mod's own windows. This one condition decides both whether the rotate keys turn the
+    /// ghost and whether the camera's rise/descend stands aside for them
+    /// (<see cref="IsPlacementRotationKey"/>), so the two can never disagree.
+    /// </summary>
+    internal static bool PlacementRotationActive =>
+        CommanderEconomyService.Instance?.AwaitingPlacement == true
+        && CommanderOverlayUi.Instance?.ContainsScreenPoint(Input.mousePosition) != true;
+
+    /// <summary>
+    /// True when a camera key is currently being used to turn the build ghost instead. The rotate
+    /// keys default to Q and E, which are also the RTS camera's rise and descend, and a player with
+    /// a building on the cursor means "turn it" — so while a placement is armed the ghost wins, and
+    /// the moment the placement ends the camera has its keys back.
+    /// </summary>
+    internal static bool IsPlacementRotationKey(KeyboardShortcut shortcut)
+    {
+        return shortcut.MainKey != KeyCode.None
+            && PlacementRotationActive
+            && (shortcut.MainKey == CommanderSettings.PlacementRotateLeft.MainKey
+                || shortcut.MainKey == CommanderSettings.PlacementRotateRight.MainKey
+                || shortcut.MainKey == CommanderSettings.PlacementConformGround.MainKey);
+    }
 
     /// <summary>Why the site is blocked, or empty when it is not.</summary>
     internal string BlockedReason { get; private set; } = string.Empty;
@@ -79,6 +178,9 @@ internal sealed class CommanderBuildPreview
     internal void Clear()
     {
         Hide();
+        ResetRotation();
+        conformToGround = false;
+        groundNormal = Vector3.up;
         parts.Clear();
         footprints.Clear();
         boundsNetwork = null;
@@ -98,6 +200,10 @@ internal sealed class CommanderBuildPreview
     /// </summary>
     internal void Tick(BuildingDefinition definition, FactionHQ? hq, Vector2 screenPosition)
     {
+        // Turning the building is read before the site is, so the rotate keys still answer while the
+        // cursor is off the map edge and there is no ground to preview on.
+        TickRotationInput();
+
         if (!CommanderGameAccess.TryRaycastWorldPosition(screenPosition, out GlobalPosition ground))
         {
             hasSite = false;
@@ -117,6 +223,9 @@ internal sealed class CommanderBuildPreview
         }
 
         hasSite = true;
+        groundNormal = conformToGround
+            ? CommanderTerrainSlope.ClampTilt(SampleGroundNormal(definition, site), MaxPlacementTiltDegrees)
+            : Vector3.up;
         SiteValid = Evaluate(definition, site, hq, out string reason);
         BlockedReason = reason;
         Draw(definition, site);
@@ -126,6 +235,105 @@ internal sealed class CommanderBuildPreview
     internal void Suspend()
     {
         hasSite = false;
+    }
+
+    /// <summary>
+    /// Points the ghost back at north. Called when a placement is armed, so a building is never
+    /// inheriting the heading the player chose for the last one they sited.
+    /// </summary>
+    internal void ResetRotation()
+    {
+        placementYawDegrees = 0f;
+        nextRotateLeftAt = 0f;
+        nextRotateRightAt = 0f;
+    }
+
+    /// <summary>
+    /// The rotate keys, read once per frame while a placement is armed. A tap turns one step; a
+    /// held key starts repeating after <see cref="PlacementRotationHoldSeconds"/>. Each direction
+    /// keeps its own repeat clock so holding both does not make them fight over one.
+    /// </summary>
+    private void TickRotationInput()
+    {
+        if (!PlacementRotationActive)
+        {
+            return;
+        }
+
+        TickRotationKey(CommanderSettings.PlacementRotateLeft, -1, ref nextRotateLeftAt);
+        TickRotationKey(CommanderSettings.PlacementRotateRight, 1, ref nextRotateRightAt);
+
+        // A toggle, not a repeat: laying a building over the ground is a decision about this build,
+        // not something to hold down. It survives into the next placement on purpose, so a commander
+        // building along a hillside sets it once.
+        if (CommanderShortcutInput.IsDown(CommanderSettings.PlacementConformGround))
+        {
+            conformToGround = !conformToGround;
+        }
+    }
+
+    private void TickRotationKey(KeyboardShortcut key, int direction, ref float nextStepAt)
+    {
+        if (CommanderShortcutInput.IsDown(key))
+        {
+            placementYawDegrees = StepYaw(placementYawDegrees, direction);
+            nextStepAt = Time.unscaledTime + PlacementRotationHoldSeconds;
+            return;
+        }
+
+        // Wall-clock, not the game clock: a placement is exactly the moment a commander is most
+        // likely to be paused, and a rotate key that does nothing while paused reads as broken.
+        if (CommanderShortcutInput.IsPressed(key)
+            && CommanderScheduler.IsDueRealtime(ref nextStepAt, PlacementRotationRepeatSeconds))
+        {
+            placementYawDegrees = StepYaw(placementYawDegrees, direction);
+        }
+    }
+
+    /// <summary>
+    /// Which way is up on the ground under a site: four ground probes at the edges of the
+    /// building's own footprint, fitted to a plane by <see cref="CommanderTerrainSlope"/>. The
+    /// probes go through <see cref="CommanderGameAccess.SnapToTerrain"/>, the mod's one
+    /// drop-to-ground measurement, so the ghost is measuring the same surface the building is
+    /// placed on rather than a second-hand height map.
+    /// </summary>
+    /// <remarks>
+    /// The span is the building's own footprint because that is the ground it actually has to lie
+    /// on: a 60 m hangar should follow the slope across 60 m, not across a metre of it. A probe that
+    /// finds no terrain returns its own neighbourhood's ground, so the worst case is a flatter
+    /// answer than the truth — never a wilder one.
+    /// </remarks>
+    private Vector3 SampleGroundNormal(BuildingDefinition candidate, GlobalPosition target)
+    {
+        Vector3 footprint = GetFootprint(candidate);
+        float radius = Mathf.Max(Mathf.Max(footprint.x, footprint.z), SlopeProbeMinimumRadiusMeters);
+        float west = GroundHeight(target, -radius, 0f);
+        float east = GroundHeight(target, radius, 0f);
+        float south = GroundHeight(target, 0f, -radius);
+        float north = GroundHeight(target, 0f, radius);
+        return CommanderTerrainSlope.EstimateNormal(west, east, south, north, radius);
+    }
+
+    private static float GroundHeight(GlobalPosition target, float offsetX, float offsetZ)
+    {
+        return CommanderGameAccess.SnapToTerrain(
+            new GlobalPosition(target.x + offsetX, target.y, target.z + offsetZ)).y;
+    }
+
+    /// <summary>
+    /// One rotation step in <paramref name="steps"/> direction, wrapped back into 0-359 degrees.
+    /// Static and side-effect free so the self-check can run the arithmetic on its own.
+    /// </summary>
+    internal static float StepYaw(float yaw, int steps)
+    {
+        return WrapYaw(yaw + steps * PlacementRotationStepDegrees);
+    }
+
+    /// <summary>A heading folded into 0-359 degrees, from either side of the wrap.</summary>
+    private static float WrapYaw(float yaw)
+    {
+        yaw %= 360f;
+        return yaw < 0f ? yaw + 360f : yaw;
     }
 
     /// <summary>True when a placement click at <paramref name="target"/> should be allowed.</summary>
@@ -166,13 +374,18 @@ internal sealed class CommanderBuildPreview
         CommanderStrategicPointService? pointService = CommanderStrategicPointService.Instance;
         if (mine && hq != null && pointService != null && pointService.HasResourceSites)
         {
-            if (pointService.TrySnapMineSite(target, out GlobalPosition site))
+            if (pointService.TrySnapMineSite(target, out GlobalPosition site, hq))
             {
                 target = site;
             }
             else
             {
-                reason = "Blocked: a gold mine has to stand on a resource site.";
+                // Two reasons now share this test (user decision 2026-09-14): not a site at all,
+                // and a site this faction has not taken. They read very differently to a player who
+                // is standing on the right patch of ground, so they are told apart.
+                reason = pointService.TrySnapMineSite(target, out _)
+                    ? "Blocked: hold this resource site with two vehicles before building on it."
+                    : "Blocked: a gold mine has to stand on a resource site.";
                 return false;
             }
         }
@@ -231,8 +444,97 @@ internal sealed class CommanderBuildPreview
             return false;
         }
 
+        // A depot's vehicles drive to the nearest road; a depot on the far side of a runway from
+        // that road sends every one of them across the strip (user report 2026-09-14, "Ground
+        // Control Duel Far"). Both the player's ghost and the commanders' siting come through here.
+        if (candidate.buildingType == BuildingType.DEP && RoadPathCrossesRunway(target, out string runwayName))
+        {
+            reason = $"Blocked: a depot here would send its vehicles across {runwayName}.";
+            return false;
+        }
+
         reason = string.Empty;
         return true;
+    }
+
+    /// <summary>How far a depot's nearest road may be for the runway test to apply: five
+    /// kilometres. A depot farther from any road than that has no road to drive to, and the test
+    /// would compare against nothing.</summary>
+    private const float DepotRoadSearchMeters = 5000f;
+
+    /// <summary>
+    /// True when the straight line from <paramref name="site"/> to its nearest road point crosses a
+    /// runway of any airbase (within half the runway's width plus the ordinary clearance).
+    /// <paramref name="runwayName"/> names the runway and its airbase for the log.
+    /// </summary>
+    internal static bool RoadPathCrossesRunway(GlobalPosition site, out string runwayName)
+    {
+        runwayName = string.Empty;
+        CommanderStrategicPointService? points = CommanderStrategicPointService.Instance;
+        if (points == null
+            || FactionRegistry.airbaseLookup == null
+            || !points.TryNearestRoadPoint(site, DepotRoadSearchMeters, out GlobalPosition road))
+        {
+            return false;
+        }
+
+        foreach (KeyValuePair<string, Airbase> entry in FactionRegistry.airbaseLookup)
+        {
+            Airbase airbase = entry.Value;
+            if (airbase == null || airbase.disabled || airbase.center == null || airbase.runways == null)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < airbase.runways.Length; i++)
+            {
+                Airbase.Runway runway = airbase.runways[i];
+                if (runway?.Start == null || runway.End == null)
+                {
+                    continue;
+                }
+
+                GlobalPosition a = runway.Start.position.ToGlobalPosition();
+                GlobalPosition b = runway.End.position.ToGlobalPosition();
+                float limit = runway.GetWidth() * 0.5f + RunwayClearanceMeters;
+                if (SegmentsCross(site, road, a, b, limit))
+                {
+                    runwayName = $"the {CommanderCaptureService.GetAirbaseLabel(airbase)} runway "
+                        + $"({a.x:0},{a.z:0})-({b.x:0},{b.z:0})";
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether segment p1-p2 crosses segment q1-q2 in the horizontal plane, pure: a proper
+    /// intersection, or either segment's end within <paramref name="margin"/> of the other segment
+    /// (a path that ends on the strip crosses it too).
+    /// </summary>
+    internal static bool SegmentsCross(GlobalPosition p1, GlobalPosition p2, GlobalPosition q1, GlobalPosition q2, float margin)
+    {
+        float d1 = Cross(q1, q2, p1);
+        float d2 = Cross(q1, q2, p2);
+        float d3 = Cross(p1, p2, q1);
+        float d4 = Cross(p1, p2, q2);
+        if (((d1 > 0f && d2 < 0f) || (d1 < 0f && d2 > 0f)) && ((d3 > 0f && d4 < 0f) || (d3 < 0f && d4 > 0f)))
+        {
+            return true;
+        }
+
+        float marginSquared = margin * margin;
+        return SegmentDistanceSquared(p1, q1, q2) <= marginSquared
+            || SegmentDistanceSquared(p2, q1, q2) <= marginSquared
+            || SegmentDistanceSquared(q1, p1, p2) <= marginSquared
+            || SegmentDistanceSquared(q2, p1, p2) <= marginSquared;
+    }
+
+    private static float Cross(GlobalPosition a, GlobalPosition b, GlobalPosition p)
+    {
+        return (b.x - a.x) * (p.z - a.z) - (b.z - a.z) * (p.x - a.x);
     }
 
     /// <summary>
@@ -246,7 +548,73 @@ internal sealed class CommanderBuildPreview
     /// up on the landing strip, which then had nowhere to land. Every airbase counts, because a
     /// base you are about to capture is one you are about to want to fly from.
     /// </remarks>
-    private static bool IsOnAirfieldSurface(GlobalPosition target, float clearance)
+    /// <summary>How far a parked vehicle must stand from a runway or taxiway centreline beyond the
+    /// surface's own half-width: 60 m, a vehicle length or two of grass. The placed loss lines of
+    /// 2026-09-15 read two fighters destroyed on Sandrift's own deck within 90 s of spawning, 0.0
+    /// and 0.6 km from the base at ground level, with the enemy's reserve and home-guard rings —
+    /// 900 m and 450–1400 m around the base centre — drawn straight across its strip.</summary>
+    internal const float VehicleAirfieldClearanceMeters = 60f;
+
+    /// <summary>How far a ring post is pushed outward per try when it lands on the airfield: 150 m,
+    /// about a runway's width, so a post on the strip clears it in one or two steps.</summary>
+    internal const float AirfieldPushStepMeters = 150f;
+
+    /// <summary>Tries before a post is left where it is: eight, 1.2 km outward, which crosses the
+    /// widest strip on the map and its parallel taxiway; a post still on tarmac after that is inside
+    /// an apron the ring cannot avoid without leaving the base altogether.</summary>
+    internal const int AirfieldPushMaxSteps = 8;
+
+    /// <summary>The radius of the <paramref name="step"/>th push outward, pure.</summary>
+    internal static float RingStepRadius(float radius, int step, float stepMeters)
+    {
+        return radius + Mathf.Max(0, step) * Mathf.Max(0f, stepMeters);
+    }
+
+    /// <summary>
+    /// A ring post kept off the runways and taxiways: <paramref name="candidate"/> itself when it is
+    /// clear, otherwise the same bearing from <paramref name="center"/> pushed outward in
+    /// <see cref="AirfieldPushStepMeters"/> steps until it is (at most
+    /// <see cref="AirfieldPushMaxSteps"/>). <paramref name="moved"/> says whether it had to move. One
+    /// definition for the reserve ring and the home guard ring (Reuse rule 4). Terrain is re-snapped
+    /// at the new spot.
+    /// </summary>
+    internal static GlobalPosition OffAirfieldPost(GlobalPosition center, GlobalPosition candidate, out bool moved)
+    {
+        moved = false;
+        if (!IsOnAirfieldSurface(candidate, VehicleAirfieldClearanceMeters))
+        {
+            return candidate;
+        }
+
+        float dx = candidate.x - center.x;
+        float dz = candidate.z - center.z;
+        float radius = Mathf.Sqrt(dx * dx + dz * dz);
+        if (radius < 1f)
+        {
+            return candidate;
+        }
+
+        float ux = dx / radius;
+        float uz = dz / radius;
+        for (int step = 1; step <= AirfieldPushMaxSteps; step++)
+        {
+            float r = RingStepRadius(radius, step, AirfieldPushStepMeters);
+            GlobalPosition pushed = CommanderGameAccess.SnapToTerrain(new GlobalPosition(center.x + ux * r, center.y, center.z + uz * r));
+            if (!IsOnAirfieldSurface(pushed, VehicleAirfieldClearanceMeters))
+            {
+                moved = true;
+                return pushed;
+            }
+        }
+
+        moved = true;
+        return CommanderGameAccess.SnapToTerrain(new GlobalPosition(
+            center.x + ux * RingStepRadius(radius, AirfieldPushMaxSteps, AirfieldPushStepMeters),
+            center.y,
+            center.z + uz * RingStepRadius(radius, AirfieldPushMaxSteps, AirfieldPushStepMeters)));
+    }
+
+    internal static bool IsOnAirfieldSurface(GlobalPosition target, float clearance)
     {
         if (FactionRegistry.airbaseLookup == null)
         {
@@ -538,7 +906,7 @@ internal sealed class CommanderBuildPreview
     }
 
     /// <summary>Horizontal distance squared from a point to a segment. Height is irrelevant here.</summary>
-    private static float SegmentDistanceSquared(GlobalPosition point, GlobalPosition a, GlobalPosition b)
+    internal static float SegmentDistanceSquared(GlobalPosition point, GlobalPosition a, GlobalPosition b)
     {
         float abX = b.x - a.x;
         float abZ = b.z - a.z;
@@ -568,9 +936,12 @@ internal sealed class CommanderBuildPreview
         tintBlock.SetColor("_BaseColor", tint);
         tintBlock.SetColor("_Color", tint);
 
+        // The spawn offset is turned with the building, exactly as CommanderEconomyService.SpawnBuilding
+        // applies it, or a rotated ghost would stand somewhere the real structure does not.
+        Quaternion rotation = PlacementRotation;
         Matrix4x4 root = Matrix4x4.TRS(
-            target.ToLocalPosition() + candidate.spawnOffset,
-            Quaternion.identity,
+            target.ToLocalPosition() + rotation * candidate.spawnOffset,
+            rotation,
             Vector3.one);
         for (int i = 0; i < meshes.Count; i++)
         {
@@ -710,6 +1081,32 @@ internal sealed class CommanderBuildPreview
                 "Build site self-check FAILED: the road bounds margin is not being applied.");
         }
 
+        // The depot-across-the-runway rule (2026-09-14): a path that cuts the strip is caught, a
+        // path beside it is not, and a path that only reaches the strip's edge counts as crossing.
+        GlobalPosition runwayA = new(0f, 0f, 0f);
+        GlobalPosition runwayB = new(2000f, 0f, 0f);
+        if (!SegmentsCross(new GlobalPosition(1000f, 0f, -300f), new GlobalPosition(1000f, 0f, 300f), runwayA, runwayB, 30f))
+        {
+            CommanderPlugin.Log.LogError("Build site self-check FAILED: a depot path cutting straight across a runway is not caught.");
+        }
+
+        if (SegmentsCross(new GlobalPosition(0f, 0f, 500f), new GlobalPosition(2000f, 0f, 500f), runwayA, runwayB, 30f))
+        {
+            CommanderPlugin.Log.LogError("Build site self-check FAILED: a depot path running beside a runway is wrongly called a crossing.");
+        }
+
+        if (!SegmentsCross(new GlobalPosition(1000f, 0f, -300f), new GlobalPosition(1000f, 0f, -20f), runwayA, runwayB, 30f))
+        {
+            CommanderPlugin.Log.LogError("Build site self-check FAILED: a depot path ending on a runway's edge is not caught.");
+        }
+
+        // The ring push (2026-09-15): each step is one more step length outward, never inward.
+        if (!Mathf.Approximately(RingStepRadius(900f, 2, 150f), 1200f)
+            || !Mathf.Approximately(RingStepRadius(900f, 0, 150f), 900f))
+        {
+            CommanderPlugin.Log.LogError("Build site self-check FAILED: the ring push does not step outward by the step length.");
+        }
+
         // The runway rule is the same segment measure. A point beside the middle of a runway is the
         // case the point-only test used to miss, and it is what put a gold mine on a landing strip.
         GlobalPosition threshold = new(0f, 0f, 0f);
@@ -728,6 +1125,89 @@ internal sealed class CommanderBuildPreview
             CommanderPlugin.Log.LogError(
                 "Build site self-check FAILED: the runway measure is not bounded, so nothing can be "
                     + "built anywhere near an airfield.");
+        }
+
+        // Placement rotation. The step is only useful if it divides a right angle: "six presses is
+        // a square corner" is how a player lines a hangar up with a runway without measuring.
+        float yaw = 0f;
+        for (int i = 0; i < 6; i++)
+        {
+            yaw = StepYaw(yaw, 1);
+        }
+
+        if (!Mathf.Approximately(yaw, 90f))
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: six rotation steps come to {yaw}°, not a right "
+                    + "angle, so a building cannot be squared up by counting presses.");
+        }
+
+        for (int i = 0; i < 18; i++)
+        {
+            yaw = StepYaw(yaw, 1);
+        }
+
+        if (!Mathf.Approximately(yaw, 0f))
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: a full turn of rotation steps ends at {yaw}°, "
+                    + "not back at north, so the step does not divide 360.");
+        }
+
+        if (!Mathf.Approximately(StepYaw(0f, -1), 360f - PlacementRotationStepDegrees))
+        {
+            CommanderPlugin.Log.LogError(
+                "Build placement self-check FAILED: turning anti-clockwise past north does not wrap "
+                    + "to 360, so the heading readout can go negative.");
+        }
+
+        // Ground conforming. A made-up 20 m rise over a 40 m span: ground climbing to the east, so
+        // the ground's up direction has to lean west, and by the angle of that slope.
+        Vector3 slope = CommanderTerrainSlope.EstimateNormal(0f, 20f, 10f, 10f, 20f);
+        if (slope.x >= 0f || !Mathf.Approximately(slope.z, 0f))
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: ground rising to the east fits a normal of "
+                    + $"{slope}, which does not lean west, so a conforming building will tilt the "
+                    + "wrong way.");
+        }
+
+        float measured = CommanderTerrainSlope.TiltDegrees(slope);
+        if (Mathf.Abs(measured - 26.57f) > 0.1f)
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: a 20 m rise over 40 m measures as {measured}°, "
+                    + "not the 26.6° it is, so the slope fit is wrong.");
+        }
+
+        float clamped = CommanderTerrainSlope.TiltDegrees(
+            CommanderTerrainSlope.ClampTilt(slope, MaxPlacementTiltDegrees));
+        if (Mathf.Abs(clamped - MaxPlacementTiltDegrees) > 0.01f)
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: a {measured}° slope clamps to {clamped}°, not "
+                    + $"the {MaxPlacementTiltDegrees}° limit, so a building can be laid over ground "
+                    + "too steep to use it on.");
+        }
+
+        Vector3 gentle = CommanderTerrainSlope.EstimateNormal(0f, 2f, 1f, 1f, 20f);
+        if (!Mathf.Approximately(
+                CommanderTerrainSlope.TiltDegrees(gentle),
+                CommanderTerrainSlope.TiltDegrees(CommanderTerrainSlope.ClampTilt(gentle, MaxPlacementTiltDegrees))))
+        {
+            CommanderPlugin.Log.LogError(
+                "Build placement self-check FAILED: the tilt clamp is moving a slope that is already "
+                    + "inside the limit, so gentle ground is not being followed faithfully.");
+        }
+
+        // Conforming on flat ground has to be the same rotation as not conforming at all, or the
+        // toggle would visibly nudge a building standing on the level.
+        Quaternion upright = Quaternion.Euler(0f, 90f, 0f);
+        if (Quaternion.Angle(CommanderTerrainSlope.Compose(90f, Vector3.up), upright) > 0.01f)
+        {
+            CommanderPlugin.Log.LogError(
+                "Build placement self-check FAILED: conforming to flat ground does not give the same "
+                    + "rotation as standing upright, so the toggle moves buildings on level ground.");
         }
     }
 

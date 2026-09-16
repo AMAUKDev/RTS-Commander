@@ -6,8 +6,11 @@ namespace GroundControlRts;
 /// which ownership rule applies (see <see cref="CommanderStrategicPoint.GetOwner"/>).</summary>
 internal enum StrategicPointKind
 {
-    /// <summary>An industrial building or a generated fill site. Owned by the mine standing on it,
-    /// not by presence — driving through pays nothing.</summary>
+    /// <summary>An industrial building or a generated fill site. Held by presence like a village
+    /// (user decision 2026-09-14) — two vehicles in the ring for the hold time take it — and the
+    /// holder is who may build a mine there. While a live mine stands on it, the mine's owner owns
+    /// the site whatever is parked in the ring; it only changes hands once that mine is destroyed
+    /// AND somebody takes the ground.</summary>
     Site,
 
     /// <summary>A cluster of civilian buildings. Held by presence, like a hilltop.</summary>
@@ -35,11 +38,18 @@ internal enum StrategicPointKind
     Base,
 }
 
-/// <summary>Groups the five kinds that share the take-and-hold garrison rule (village, hilltop,
-/// outpost, crossroads, roadside) as against <see cref="StrategicPointKind.Site"/> (owned by
-/// whichever mine stands on it) and <see cref="StrategicPointKind.Base"/> (owned live by the game)
-/// — one predicate instead of the growing list of <c>!= Village &amp;&amp; != Hilltop</c> checks
-/// this replaces across the service, the AI garrison review and the build-reach check.</summary>
+/// <summary>Groups the kinds that share the take-and-hold garrison rule (village, hilltop, outpost,
+/// crossroads, roadside and — since 2026-09-14 — the resource site) as against
+/// <see cref="StrategicPointKind.Base"/>, which the game owns live — one predicate instead of the
+/// growing list of <c>!= Village &amp;&amp; != Hilltop</c> checks this replaces across the service,
+/// the AI garrison review and the build-reach check.
+/// <para>
+/// The site joined the group on the user's own observation: "I just manually moved two units near a
+/// resource site — it didn't capture it." A site was owned by whichever mine stood on it and by
+/// nothing else, so ground near one meant nothing at all. It is now taken and held exactly like a
+/// village; what stays special is what a held site is FOR — it pays nothing itself, and its holder
+/// is who may put a mine on it (<see cref="CommanderStrategicPointService.SiteMinePermitted"/>).
+/// </para></summary>
 internal static class StrategicPointKinds
 {
     internal static bool IsControlPoint(StrategicPointKind kind)
@@ -48,7 +58,8 @@ internal static class StrategicPointKinds
             || kind == StrategicPointKind.Hilltop
             || kind == StrategicPointKind.Outpost
             || kind == StrategicPointKind.Crossroads
-            || kind == StrategicPointKind.Roadside;
+            || kind == StrategicPointKind.Roadside
+            || kind == StrategicPointKind.Site;
     }
 }
 
@@ -85,9 +96,29 @@ internal sealed class CommanderStrategicPoint
     /// <summary>Where the point sits, already snapped to terrain.</summary>
     internal GlobalPosition Position;
 
-    /// <summary>The control ring radius, in metres. Also the mine footprint clearance for a site
-    /// (cosmetic only — a site has no ring garrison rule).</summary>
+    /// <summary>The control ring radius, in metres — where the garrison is PLACED. Also the mine
+    /// footprint clearance for a site. Capture presence is measured against
+    /// <see cref="CaptureRadius"/>, which is wider.</summary>
     internal float Radius;
+
+    /// <summary>
+    /// How much wider the capture ring is than the placement ring for every kind but a site: 1.5
+    /// (user, 2026-09-14: "make the capturable area around points 1.5x larger (but don't change unit
+    /// placement) — we're having issues of units holding JUST outside the capture ring"). A site's
+    /// capture ring was set on its own that day (500 m with the garrison at 0.875 of it), so it is
+    /// left alone.
+    /// </summary>
+    internal const float CaptureRingMultiplier = 1.5f;
+
+    /// <summary>The radius a vehicle must be inside to count toward holding this point, pure over
+    /// the kind and the placement radius (see <see cref="CaptureRingMultiplier"/>).</summary>
+    internal static float CaptureRadiusFor(StrategicPointKind kind, float radius)
+    {
+        return kind == StrategicPointKind.Site ? radius : radius * CaptureRingMultiplier;
+    }
+
+    /// <summary>This point's capture ring (<see cref="CaptureRadiusFor"/>).</summary>
+    internal float CaptureRadius => CaptureRadiusFor(Kind, Radius);
 
     /// <summary>What the map, the world marker and the log call this point, e.g. <c>"RESOURCE SITE 3"</c>,
     /// <c>"VILLAGE 2"</c>, <c>"HILLTOP 5"</c>, or the airbase's own display name for a base.</summary>
@@ -101,8 +132,19 @@ internal sealed class CommanderStrategicPoint
     /// (design §2, "Mine destroyed -> site free").</summary>
     internal Unit? Mine;
 
-    /// <summary>The control-point hold state machine. Untouched for a site or a base.</summary>
+    /// <summary>The control-point hold state machine. Untouched for a base; a site runs it like any
+    /// other control point since 2026-09-14.</summary>
     internal HoldState Hold;
+
+    /// <summary>
+    /// True when this point's own footprint is woodland or ground no helicopter will land on, so a
+    /// picket here has to be parachuted in or driven (user report 2026-09-14: "air insertion of
+    /// pickets sometimes is sent to land in tree covered areas - it cannot land"). Set by discovery
+    /// from the game's tree scatter data, and again by any insertion that proved it the hard way.
+    /// Deliberately a mark rather than a reason to drop the point — plenty of hilltops worth holding
+    /// are wooded.
+    /// </summary>
+    internal bool Wooded;
 
     /// <summary>Per-faction ground-vehicle presence count from the last hold tick, indexed the same
     /// way as the service's <c>hqOrder</c> snapshot. Read by the marker label (T12) and the
@@ -147,7 +189,14 @@ internal sealed class CommanderStrategicPoint
             case StrategicPointKind.Base:
                 return Airbase?.CurrentHQ;
             case StrategicPointKind.Site:
-                return Mine == null || Mine.disabled ? null : Mine.NetworkHQ;
+                // A live mine owns the ground it stands on, whatever is parked around it (user
+                // decision 2026-09-14): an enemy mine keeps the site enemy-owned until it is
+                // destroyed, and only then does the presence holder become the owner. Without that
+                // order a picket driving past an enemy mine would take the site out from under a
+                // building that is still standing and still paying.
+                return Mine != null && !Mine.disabled
+                    ? Mine.NetworkHQ
+                    : CommanderStrategicPointService.Instance?.HqAt(Hold.OwnerIndex);
             default:
                 return CommanderStrategicPointService.Instance?.HqAt(Hold.OwnerIndex);
         }

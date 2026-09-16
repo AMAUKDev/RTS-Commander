@@ -136,3 +136,101 @@ map with expected kinds; a mine cannot be placed off-site; a two-vehicle platoon
 after 60 s and income rises; driving one vehicle away drops it to neutral; the AI builds its first
 mine on a site rather than at its base; the COMMANDER LOG shows the AI's purchases and garrison
 orders live.
+
+## Resource sites are captured like any other point (user decision, 2026-09-14)
+
+> "I just manually moved two units near a resource site — it didn't capture it."
+
+They could not. A site's owner was the owner of the mine standing on it and nothing else
+(`CommanderStrategicPoint.GetOwner`), the hold tick skipped sites outright, and the only rule that
+decided who could build on one was reach — so both sides could mine ground neither had taken, and
+ground forces near a site meant nothing at all.
+
+### Decision
+
+A resource site is a control point. `StrategicPointKinds.IsControlPoint(Site)` is true, which by
+itself gives a site everything a village has: garrison counts every hold tick, the same
+two-vehicles-for-sixty-seconds capture, contest freezing, the ownership-change log line, and the
+index reset when the faction list changes.
+
+Three things stay special, and each has its own self-check:
+
+1. **A held site pays nothing on its own.** `IncomePerMinute(Site, …)` still returns 0 and the
+   income counter has no case for it. The mine is what pays, at `GoldMineIncomePerMinute`, to
+   whoever owns the mine.
+2. **Ownership is the mine first, the garrison second.** `SiteOwnerIndex(mineStanding,
+   mineOwnerIndex, holdOwnerIndex)`: while a live mine stands there the site belongs to the mine's
+   owner however the ground is garrisoned; once the mine is destroyed the site passes to whoever
+   holds the ground, and is neutral if nobody does. The order matters — a picket driving past an
+   enemy mine must not take the site out from under a building that is still standing and still
+   paying.
+3. **Only the holder may build.** `SiteMinePermitted(mineStanding, holderIsBuilder)` gates both
+   siting paths: the player's ghost through `TrySnapMineSite` (which now takes the builder) and the
+   enemy commander's through `TryPickFreeReachableSite`. "Holder" means owns it outright — a
+   contested site is nobody's. A caller with no faction is the ground-clearance probe discovery
+   uses and is answered on the mine alone.
+
+### Consequence worth stating plainly
+
+**A mine can no longer be built on a site nobody has taken.** At the start of a match every site is
+neutral, so the first mine waits on the first picket holding a site for the hold time. That is a
+real change to the early economy and it is what the decision asks for: take the ground, then mine it.
+The pre-points fallback is untouched — a map with no resource sites at all still builds a mine
+anywhere in reach (`HasResourceSites`).
+
+There is no deadlock in it: a held site is itself inside `IsInsideGarrisonedPointReach`, so holding a
+site is what puts that site in build range. Hold it, then build on it.
+
+### What the player sees
+
+The marker and the selection card were the other half of the user's report — a site that says only
+"free" looks identical whether two vehicles are taking it or nothing is happening. A free site now
+reads `free 1/2` (or `free, contested 1/2`, or `held, no mine`), and the selection card reads
+`FREE — hold it to build a gold mine   GARRISON 1/2`. The refusal text tells the two failures apart:
+"a gold mine has to stand on a resource site" against "hold this resource site with two vehicles
+before building on it".
+
+## Decision (user, 2026-09-14): points sit on level ground
+
+"We need to revisit control point generation (including resource sites) and ensure they are placed
+on flat-ish ground. They can still be hilltops etc, but should be on level tops etc. This doesn't
+apply to roads/cross-roads."
+
+Implemented in `Points/CommanderStrategicPointDiscovery.cs`.
+
+- **The rule.** Ground is level enough for a point when a probe of the strategic height map at the
+  centre plus eight compass points `LevelnessProbeRadiusMeters` (60 m) out spans no more than
+  `MaxPointHeightSpreadMeters` (6 m) from highest to lowest AND the mean of the slopes from the
+  centre to each probe is no steeper than `MaxPointSlopeDegrees` (8 deg). Both boundaries pass.
+  60 m is the footprint the things standing on a point need: a mine building plus the two vehicles
+  of a minimum garrison. 6 m is the most that footprint can straddle and still read as one level
+  patch rather than a slope the garrison slides off.
+- **Which kinds.** Site, Village, Hilltop and Outpost. Crossroads and Roadside are exempt by the
+  user's decision: a road is level enough wherever the level's authors ran it, hillside included.
+- **The search.** `EmitLevelSearchOffsets` walks the candidate itself first, then whole rings
+  outward in `LevelSearchStepMeters` (20 m, the height map's own resolution) to
+  `LevelSearchMaxRadiusMeters` (150 m) — 57 offsets, nearest-first, so the accepted spot is always
+  the closest level ground to where discovery meant the point to be. No level spot inside 150 m
+  drops the candidate; past 150 m it is a different piece of ground and dropping is the honest
+  answer.
+- **Hilltops** keep the existing `ClimbToPeak` and then search the level top with a height floor of
+  `peak - HilltopMinProminenceMeters`, so the search cannot settle on a level shelf half way down
+  the hill.
+- **Resource sites** re-prove `IsSiteAllowed` (and sea level) after a nudge that actually moved
+  them: moving a site can walk it onto a road, a building or a runway. In the fill pass the level
+  test runs before `IsSiteAllowed`, because nine height-map reads cost less than that call's physics
+  overlap.
+- **Ordering.** The nudge runs at candidate-creation time, before `ApplySpacing`, so spacing and the
+  per-kind caps measure the positions the points actually end up at. Caps and spacing are otherwise
+  unchanged.
+- **Which of the two thresholds binds.** At the 60 m default probe radius, 8 deg of slope is an
+  8.4 m step, larger than the 6 m spread limit — so in practice the spread rule decides and the
+  slope rule only bites if the probe radius is retuned smaller. That is deliberate: the slope entry
+  is there so a narrower probe ring stays meaningful.
+- **Cost.** Nine height-map reads per probe, up to 57 probes (513 reads) per candidate, typically 9
+  when the candidate is already level. No raycasts and no physics.
+- **Log.** The discovery line gained `levelled: N nudged, M dropped`.
+- **Self-checks.** `CheckLevelness` covers the pure rule (flat passes; exactly 6 m spread passes;
+  7 m fails; the mean-slope boundary at a 20 m probe radius, 2.7 m passes and 2.9 m fails; an empty
+  ring is not level) and the search order (57 offsets, centre first, never stepping back inward,
+  first ring one step out, ninth offset starting the second ring).

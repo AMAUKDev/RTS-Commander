@@ -493,7 +493,7 @@ internal sealed class CommanderCaptureService : ICommanderTickPersistent, IComma
         int count = 0;
         foreach (Airbase airbase in hq.GetAirbases())
         {
-            if (airbase != null && !airbase.disabled && airbase.center != null)
+            if (airbase != null && !airbase.disabled && airbase.center != null && !CommanderGameAccess.IsShipAirbase(airbase))
             {
                 sum += airbase.center.GlobalPosition().AsVector3();
                 count++;

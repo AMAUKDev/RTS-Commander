@@ -286,3 +286,155 @@ rather than inventing work. What changed under it is who gets the pool first.
 - **Not verified in the running game.** The self-check cases added here run at plugin load and were
   desk-checked arithmetically, not observed failing. The in-game verification listed in design.md is
   still outstanding.
+
+## Departure 11 — off-road points are reserved for the helicopter (2026-09-14, user instruction)
+
+**What the match showed.** Every picket line in the 2026-09-14 log reads `pickets=2` with `heli=0/3`
+and not one `requesting air insertion` line, on a map whose points service reports 674 roads. The
+insertion gate is never wrong; it is never *reached*. `QualifiesForInsertion` requires `shortHanded`
+(`Operations/CommanderOperationsInsertion.cs`), but two earlier steps of the same review have
+already closed the shortfall: `FillPickets` (`Operations/CommanderOperationsFront.cs`) tops every
+picket up out of the free pool, and `PostPicketRequisitions`
+(`Operations/CommanderOperationsRequisitions.cs`) writes what the pool could not cover onto the
+order book so the buyer fills it by road. `PlanInsertions` runs after both and finds every point
+full.
+
+**The decision.** A point farther than `OperationsHeliInsertionOffRoadMeters` from the nearest road
+is now AIR-DELIVERED: the drive fill skips it and no road-stock requisition is posted for it, so the
+shortfall survives to the insertion step that exists to serve it. The reservation is given up — the
+point reverts to driving, exactly as before — when the flight is impossible for this commander this
+review: no transport airframe with vehicle cargo can launch from a held base, the loss-streak pause
+is running, or that point's own loss cooldown is live.
+
+**How it is built.**
+
+- Pure rule `PicketDeliveryMode(offRoad, insertionPossible, paused, cooldownLive)` →
+  `Drive`/`Air`, in `Operations/CommanderOperationsInsertion.cs` beside `QualifiesForInsertion`,
+  with six self-check cases (each input flipped on its own, plus the all-negative case) and an
+  `Expect` overload for the enum next to the existing ones.
+- `MarkAirDeliveredPickets` is the live read, called from `PlanPickets` after the review's picket
+  missions exist and before `FillPickets`. It fills `OperationsState.AirDeliveredPickets`, which the
+  drive fill, the order book and the review line all read through `IsAirDeliveredPicket` — one
+  definition, three callers.
+- Whether a flight is possible at all is read ONCE per commander per review through the new
+  `CommanderSupplyHeliService.HasLaunchableVehicleTransport(hq)`, which is
+  `TryLaunchInsertionAircraft`'s own candidate walk (`CollectVehicleMountCandidates`) stopped at the
+  first hit, with the price and route tests left out: affordability is the flight's own business
+  and moves review to review, while this answers the standing question of whether the roster can do
+  it at all.
+- A picket on a FRONT point is never reserved. It is a demoted forward base, and
+  `QualifiesForInsertion`'s `rear` test would refuse it, so reserving it would leave it empty.
+- An air-delivered picket no longer counts toward `ShortPicketMissions`, so it does not withhold the
+  free pool from platoon formation through `PicketsNeedThePool`. It is not waiting on the pool; the
+  vehicles it is waiting for are bought as cargo at heli spawn.
+- The review line tags it: `missions=[Picket HILLTOP 44 0/0 pickets=0 air]`.
+
+**Risk to watch in the next match.** The reservation is released only by the three conditions above.
+An off-road point whose flights are refused for a reason that carries no cooldown — a persistent
+`hostile air defence tracked along every route`, or `cannot afford the picket's vehicles` — stays
+reserved and therefore stays empty for as long as that reason holds, where before it would have been
+driven to. The decline lines name the point every time the reason changes, so the log will say so;
+if it happens in play, the answer is to add those reasons to the per-point cooldown rather than to
+weaken the reservation.
+
+**Not verified in the running game.** The new self-check cases run at plugin load and were
+desk-checked arithmetically. The proof to look for in the next match is a `requesting air insertion`
+line for a point whose review line reads `pickets=0 air`.
+
+## Departure 12 — the picket rung banks across reviews (2026-09-14, user instruction)
+
+**What the match showed.** In the 2026-09-14 `Ground Control Duel` log, the player-side commander's
+picket insertions were refused on every review: `the ladder's picket share cannot cover the flight`
+appears 92 times and `the priority ladder's picket share is empty this cycle` 31 times, while every
+`ladder:` line reports `pickets 0`. Not one insertion flew.
+
+**Why.** Rung 3's allocation was granted and thrown away each review. `ReviewPurchases`
+(`Ai/CommanderEnemyCommanderService.cs`) called `GrantInsertionAllowance(hq, budget)` with this
+review's share only, and `PlanInsertions` (`Operations/CommanderOperationsInsertion.cs`) charged
+flights against it until the next review overwrote it. Rung 3's weight is 20 % and its floor 10 % of
+a post-CAP remainder around 100, so the share was 10–30 a review; an insertion is a transport hull
+(a Tarantula at 118, refunded on recovery) plus two picket vehicles (~16). The share could never
+reach the price. The building rung already banked its allocation (`StructureSavings`), and so did
+the air side (`AirFund`, `AwacsSavings`); rung 3 was the one rung that did not.
+
+**The departure.** Rung 3 now accumulates, through the same `AccrueFund` the naval hull, the air
+fund and the radar airframe's slice use.
+
+- `CommanderState.PicketSavings` / `PicketSavingsTarget` hold the bank and its cap, beside
+  `AwacsSavings` / `AwacsSavingsTarget` (`Ai/CommanderEnemyCommanderService.cs`).
+- The cap is one complete flight: `PicketSavingsTarget(flightPrice, roadPairPrice)`
+  (`Ai/CommanderEnemyCommanderLadder.cs`), where the flight price comes from the new
+  `CommanderSupplyHeliService.CheapestInsertionFlightValue` — the `HasLaunchableVehicleTransport`
+  walk with the price kept instead of stopping at the first hit — and the fallback, for a commander
+  whose airbases launch no vehicle-carrying transport, is the cheapest pair of vehicles its own
+  catalog offers, priced through the same `PickInsertionCargo` chooser the flight's cargo goes
+  through (one chooser, three callers).
+- Excess above the cap goes back into the same review's pool and the rung's budget is recomputed,
+  the pattern the air fund's ceiling overflow already follows.
+- What the bank takes is now deducted from the pool. The old grant was not — a share nobody had
+  banked could not be double-spent, but a bank can be.
+- Last cycle's charged flights come off the bank at the top of `ReviewPurchases`, from the single
+  `TakeInsertionSpend` call that also feeds the `ladder:` line, so the deduction happens before the
+  rung accrues again rather than after.
+
+**The two decline reasons are gone.** `PlanInsertions` now gates on
+`PicketSavingsCover(allowance, target)` — the shape of the FOB order's own `FobAffordable` money
+gate — and a point that is merely waiting logs `PICKET <label>: saving for the flight (N/M)` once
+per stretch of saving, through the existing per-point dedup map. The supply side's
+`PicketShareDecline` is a named constant now so the operations side can tell "the rung is saving"
+apart from "the flight is refused". The running total is on every `ladder:` line as
+`pickets saved N/M`.
+
+**Deliberate cost.** The gate is the price of a FULL flight even for a picket that has lost one of
+its pair and only wants one vehicle. That costs such a point a review or two of extra saving and
+buys one rule instead of two; the rung's cap is the same number, so the bank always reaches it.
+
+**Not verified in the running game.** The build is clean (`0 Warning(s)`, `0 Error(s)`). The nine
+new self-check cases run at plugin load and were desk-checked arithmetically, not observed failing.
+The proof to look for in the next match is a `pickets saved N/M` field on the `ladder:` line that
+climbs, then a `requesting air insertion` line, and no further
+`the ladder's picket share cannot cover the flight`.
+
+## Departure 13 — resource sites fly first (2026-09-14, user instruction)
+
+**The instruction.** "Resource sites need to be a priority for air insertion." Taking a site is what
+permits a mine (`CommanderStrategicPointService.SiteMinePermitted`) and the mine is what pays;
+no other point on the map earns anything, so a site the commander does not hold is worth more than
+the hilltop that happens to be farthest from a road.
+
+**The departure.** `PlanInsertions` (`Operations/CommanderOperationsInsertion.cs`) ordered its
+candidates farthest-off-road first. It now orders them by a rank:
+
+- `IsPriorityInsertionSite(kind, held)` — a `StrategicPointKind.Site` we do not hold, and nothing
+  else. A site already held is holding ground, not unlocking income, so it ranks like any other
+  point.
+- `InsertionCandidateRank(kind, held, distance)` — a priority site ranks by its distance to
+  `CommanderCaptureService.GetTerritoryCenter(hq)` (the mean of the airbases held, the same read
+  `RequestInsertion` already makes to choose the landing post, taken once per review); everything
+  else shares `InsertionSiteRankCeiling`, a million metres, which is larger than any distance a
+  stock map can produce. So no site ever sorts behind a point that is not one.
+- The sort compares rank first and falls back to road distance descending, so the points that are
+  not sites keep exactly the order they had.
+
+**The savings queue jump is the same rule.** Rung 3 banks enough for one flight at a time
+(Departure 12) and the request loop spends it on the first candidate that passes its gates, so
+putting the site first IS giving it the flight when a site and a hilltop both qualify and there is
+money for one. No second mechanism was added.
+
+**The request line says why.** `PICKET RESOURCE SITE 27: requesting air insertion (site first).`
+instead of the metres-from-the-road wording, so the log shows why a site was served ahead of points
+farther off the road. `siteFirst` is passed down from the candidate rather than recomputed.
+
+**Self-checks.** Seven cases beside the insertion gate's own: a site before a hilltop at equal
+distance, a far site before a near hilltop, a held site ranking exactly like another point, the
+nearer of two sites first, a site past the ceiling still ahead of a crossroads, a negative distance
+clamped to zero, and the predicate itself on all three of its cases.
+
+**Defect proof.** `IsPriorityInsertionSite` was inverted to `kind == Site && held`, the project
+still built clean (so the cases run against the broken rule and four of them fail by construction),
+and the file was restored and confirmed byte-identical by checksum. The `self-check FAILED` console
+line itself can only be observed at plugin load in the running game.
+
+**Not verified in the running game.** The proof to look for in the next match is a
+`requesting air insertion (site first)` line for a `RESOURCE SITE` point while `HILLTOP` points that
+are farther off the road are still waiting.

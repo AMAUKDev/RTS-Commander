@@ -61,6 +61,15 @@ internal static class CommanderPlatoonRoles
             return CommanderPlatoonRole.Carrier;
         }
 
+        // A light unmanned vehicle whose name says it is a missile launcher is air defence too
+        // (2026-09-14: the Hexhound SAM the transports carry is a UGV by type, so it read as Other
+        // and the air-defence-first cargo rule never saw it; every inserted picket flew without
+        // its umbrella). The type table stays the first word; the name is only asked for UGVs.
+        if (definition.vehicleType == VehicleType.UGV && IsAirDefenceByName(definition.unitName))
+        {
+            return CommanderPlatoonRole.AirDefence;
+        }
+
         return definition.vehicleType switch
         {
             VehicleType.MBT or VehicleType.AFV => CommanderPlatoonRole.Armour,
@@ -68,6 +77,27 @@ internal static class CommanderPlatoonRoles
             VehicleType.AAA or VehicleType.IR_SAM or VehicleType.R_SAM => CommanderPlatoonRole.AirDefence,
             _ => CommanderPlatoonRole.Other,
         };
+    }
+
+    /// <summary>Whether a unit name marks an air-defence launcher, pure: a whole word "SAM" or
+    /// "AA" (so "Hexhound SAM" and "LCV25 AA" qualify, "Samson" and "Jackknife" do not).</summary>
+    internal static bool IsAirDefenceByName(string? unitName)
+    {
+        if (string.IsNullOrEmpty(unitName))
+        {
+            return false;
+        }
+
+        string[] words = unitName!.Split(' ', '-', '_');
+        for (int i = 0; i < words.Length; i++)
+        {
+            if (words[i] == "SAM" || words[i] == "AA")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 
@@ -176,6 +206,17 @@ internal sealed class CommanderPlatoon
     internal float PreemptiveAirUntil = -1f;
 
     /// <summary>
+    /// What this platoon's pre-emptive sortie WOULD have asked for, while
+    /// <c>CommanderSettings.OperationsMaxPreemptiveAirObjectives</c> is holding it back (user
+    /// request, 2026-09-14). Both zero when it is not queued — it was served, or it never asked.
+    /// The marker reads them so a platoon waiting its turn says <c>Requesting CAS (0/2 · queued)</c>
+    /// rather than going silent, which is how the cap stays legible to the player instead of
+    /// looking like the wing ignoring them.
+    /// </summary>
+    internal int QueuedCasWanted;
+    internal int QueuedCapWanted;
+
+    /// <summary>
     /// Scaled <c>Time.time</c> of the most recent member this platoon lost to death, capture by
     /// another faction or removal from the game — stamped by the review sweep, negative when it
     /// has never lost one (addendum 2026-09-14 §2). A loss this fresh is contact evidence for a
@@ -272,11 +313,26 @@ internal sealed class CommanderPlatoon
     /// what "half strength" means for a platoon already in the field.</summary>
     internal int Establishment = 0;
 
+    /// <summary>
+    /// Armour slots the recipe this platoon was formed from wanted, fixed at formation time beside
+    /// <see cref="Establishment"/> and for the same reason. The teeth rule
+    /// (<see cref="CommanderOperationsService.ShouldWithdraw(int, int, int, int)"/>) reads it rather
+    /// than the live setting, so an air-mobile platoon — six light vehicles the transports can carry,
+    /// no tanks by design — is not read as a platoon that has lost all its armour and sent home the
+    /// moment it lands.
+    /// </summary>
+    internal int ArmourWanted = 0;
+
     /// <summary>Game time this platoon last began forming up (creation, or re-entry from
     /// Withdrawing). Read by <see cref="CommanderOperationsService.IsReadyToMoveOut"/>: a platoon
     /// moves out when full, or when it has waited long enough that waiting is costing more than
     /// the missing vehicles would add.</summary>
     internal float FormingSince = 0f;
+
+    /// <summary>This platoon's re-raise bookkeeping — see <see cref="CommanderReseatRecord"/>. One
+    /// record type, two holders: a platoon and a picket detachment are both groups of ground
+    /// vehicles that can be taken off the road and handed back to a nearer depot.</summary>
+    internal readonly CommanderReseatRecord Reseat = new();
 
     /// <summary>Per-member last-issued destination, owned by this platoon and handed to
     /// <see cref="CommanderMoveService.IssuePlatoonMove"/> so a member that has arrived at its
@@ -285,11 +341,67 @@ internal sealed class CommanderPlatoon
 }
 
 /// <summary>
+/// What one group of ground vehicles' last re-raise from a nearer depot did, and when (user
+/// instruction 2026-09-16: a platoon or a ground-driven picket that a forward base has overtaken is
+/// despawned and raised again from that base). One definition, two holders —
+/// <see cref="CommanderPlatoon.Reseat"/> and <see cref="CommanderOperationsMission.Reseat"/> — because
+/// the rule, the churn guard and the "these vehicles are already paid for" accounting are identical
+/// for a marching platoon and a driving picket detachment; only what is being moved differs.
+/// </summary>
+internal sealed class CommanderReseatRecord
+{
+    /// <summary>Scaled <c>Time.time</c> of the last re-raise, negative when there has never been
+    /// one. The churn guard reads it: a group is re-raised at most once every
+    /// <c>CommanderOperationsService.ReseatCooldownSeconds</c>, so a second forward base coming
+    /// online cannot dissolve the same group again while the first re-raise is still landing.</summary>
+    internal float At = -1f;
+
+    /// <summary>How many vehicles that re-raise handed back to the new depot; read against how many
+    /// have since rejoined, through <c>CommanderOperationsService.ReseatVehiclesInTransit</c>, so the
+    /// order books and the fills count a vehicle on its way back as one the commander already owns
+    /// rather than one it has to buy again.</summary>
+    internal int Banked = 0;
+
+    /// <summary>
+    /// Minutes of driving from the depot the last re-raise moved this group TO, to the objective it
+    /// was moving toward — the strict-progress guard (user decision 2026-09-16). Every re-raise must
+    /// come in strictly under this, so each one shortens the remaining journey and a group can never
+    /// be sent back and forth between two depots that are each nearer than the other depending on
+    /// where it happens to stand. A long cooldown slows such a loop; this makes it impossible.
+    /// <para><see cref="float.MaxValue"/> means "no previous re-raise on this journey", which any
+    /// depot beats. That is the value a fresh record carries and the value
+    /// <see cref="ResetForNewObjective"/> restores.</para>
+    /// </summary>
+    internal float LastDepotMinutes = float.MaxValue;
+
+    /// <summary>
+    /// Forgets the strict-progress memory because this group is now going somewhere else, so the
+    /// distance its last re-raise achieved no longer describes its journey. Called wherever a group
+    /// is given a new objective — which is <c>CommanderOperationsService.AttachPlatoon</c>, the one
+    /// choke point a platoon passes through when it takes a mission. A picket never needs it: its
+    /// objective is its own control point and never moves.
+    /// <para>Without this, a platoon that finished one journey and was then sent to a nearer base
+    /// would be refused a perfectly good re-raise because of a number describing a journey it is no
+    /// longer on.</para>
+    /// </summary>
+    internal void ResetForNewObjective()
+    {
+        LastDepotMinutes = float.MaxValue;
+    }
+}
+
+/// <summary>
 /// A live mission: a forward base, a picket, an offensive or the base reserve. Owns the platoons
 /// assigned to it and, for an offensive, the axes those platoons are marching on.
 /// </summary>
 internal sealed class CommanderOperationsMission
 {
+    /// <summary>This mission's picket detachment's re-raise bookkeeping — see
+    /// <see cref="CommanderReseatRecord"/>. Only ever used by a
+    /// <see cref="CommanderMissionKind.Picket"/>, the one mission kind that drives vehicles of its
+    /// own rather than through a platoon.</summary>
+    internal readonly CommanderReseatRecord Reseat = new();
+
     internal CommanderMissionKind Kind = CommanderMissionKind.Reserve;
 
     /// <summary>The control point this mission holds or attacks, or null for a base attack.</summary>
@@ -349,6 +461,13 @@ internal sealed class CommanderOperationsMission
     internal bool CasHoldLogged = false;
 
     /// <summary>
+    /// <see cref="CasHoldLogged"/>'s twin for the strike ahead of the attack (design.md,
+    /// strike-packages_20260915 Section 5): the "holding until the strike has gone in" line is
+    /// written once per attack, not once per review it is in force.
+    /// </summary>
+    internal bool StrikeHoldLogged = false;
+
+    /// <summary>
     /// Scaled <c>Time.time</c> until which this <see cref="CommanderMissionKind.Picket"/> or
     /// <see cref="CommanderMissionKind.ForwardBase"/> mission is "in contact" — a tracked hostile
     /// ground unit inside <c>CommanderOperationsService.ContactRangeMeters</c> of its point, or a
@@ -396,6 +515,37 @@ internal sealed class CommanderOperationsMission
 
     /// <summary>What the COMMANDER LOG calls this mission, e.g. a point's label or an airbase's.</summary>
     internal string Label = string.Empty;
+
+    // ---- Air-mobile platoons (design.md, air-mobile-platoons_20260915) ----
+
+    /// <summary>
+    /// True when this mission's platoon is flown in rather than driven: the objective was more than
+    /// <c>CommanderSettings.AirMobileDriveMinutes</c> from the nearest usable depot when the mission
+    /// would have raised a new platoon, and a vehicle-carrying transport could reach it. An
+    /// air-mobile mission is skipped by the purpose count and the platoon matching — nothing is
+    /// raised at a depot for it and no existing platoon is sent driving to it — and its carrier and
+    /// air-defence lines are bought as cargo by the lift rather than at a depot.
+    /// </summary>
+    internal bool AirMobile = false;
+
+    /// <summary>The open lift bringing this mission's platoon in, or null when none is flying.</summary>
+    internal CommanderOperationsService.CommanderFobOrder? LiftOrder = null;
+
+    /// <summary>
+    /// The name the platoon this lift is raising will carry, reserved when the mission is marked
+    /// air-mobile so the log line that announces the raise, the lift's own lines and the review
+    /// line's <c>lift=</c> field all name the same platoon — which does not exist until its first
+    /// load is on the ground. Empty on every other mission.
+    /// </summary>
+    internal string AirMobilePlatoonName = string.Empty;
+
+    /// <summary>
+    /// Minutes of driving from the nearest usable depot to this mission's point, refreshed once per
+    /// review by the forward-base planner. The drive-time gate reads it to decide whether a new
+    /// platoon flies, and the order book reads it to decide whether the armour and truck lines — the
+    /// ones no transport can carry — may be posted yet. <c>float.MaxValue</c> with no depot at all.
+    /// </summary>
+    internal float DriveMinutesToPoint = float.MaxValue;
 }
 
 /// <summary>

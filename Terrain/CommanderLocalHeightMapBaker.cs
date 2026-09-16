@@ -199,7 +199,9 @@ internal sealed class CommanderLocalHeightMapBaker
             {
                 return 0f;
             }
-            return new Vector3(left - right, spacing * 2f, down - up).normalized.y;
+            // The plane fit itself lives in CommanderTerrainSlope, because the build ghost needs the
+            // whole normal and this caller needs only how vertical it is (Reuse rule 5).
+            return CommanderTerrainSlope.EstimateNormal(left, right, down, up, spacing).y;
         }
 
         private float Decode(ushort value) => minimumHeight + value / 65535f * heightRange;

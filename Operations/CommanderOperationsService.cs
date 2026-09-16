@@ -52,6 +52,11 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
     private float nextReviewAt = CommanderScheduler.Stagger("operations.review", ReviewIntervalSeconds);
     private float nextMovementAt = CommanderScheduler.Stagger("operations.movement", MovementIntervalSeconds);
 
+    /// <summary>When the logistics watch next runs. Zero rather than a staggered start because its
+    /// interval is a setting and the settings are not bound when this field is initialised; the
+    /// stagger is applied by <see cref="ResetSession"/>, which runs with a live config.</summary>
+    private float nextLogisticsAt;
+
     internal static CommanderOperationsService? Instance { get; private set; }
 
     internal CommanderOperationsService()
@@ -76,7 +81,24 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// </summary>
         internal readonly Dictionary<Unit, GlobalPosition> PoolIssued = new();
 
+        /// <summary>Game time each pool vehicle was first staged with nothing to do, for the
+        /// idle-pool sale (<c>SellSurplusPool</c>). Pruned with the staging posts the moment a
+        /// vehicle leaves the pool (<c>PruneStagingPosts</c>), so a vehicle that comes back starts
+        /// a fresh clock.</summary>
+        internal readonly Dictionary<Unit, float> PoolIdleSince = new();
+
+        /// <summary>What already covered each role's order-book lines at the buyer's last pass
+        /// (<c>OpenRolesByPriority</c>): bought that review, banked as depot supply, idle in the
+        /// pool. Kept only for the review line's <c>covered:</c> fields; the buyer recomputes it
+        /// every purchase.</summary>
+        internal readonly int[] CoveredByRole = new int[RoleCount];
+
         internal readonly List<CommanderPlatoon> Platoons = new();
+        /// <summary>How many marching platoons the pre-emptive air cap held back the last time the
+        /// number changed, so the queue line is logged on a change rather than every review.
+        /// -1 until the first review, so a first review with nothing queued stays quiet.</summary>
+        internal int PreemptiveQueuedReported = -1;
+
 
         internal readonly List<CommanderOperationsMission> Missions = new();
 
@@ -173,7 +195,9 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// <summary>
         /// Home CAP (design.md, commander-priorities_20260914, rung 1): the fighters the ladder bought
         /// to hold the standing patrol over the commander's own airbases. Only these count toward the
-        /// home CAP's size, and they are never lent to sorties — a sortie's escort is bought
+        /// home CAP's size. While the base is quiet every one of them may be lent to a sortie (design
+        /// SS9; the minimum of one kept at the base removed by user decision 2026-09-16) — the patrol
+        /// is the lowest-priority holder of fighters, and a sortie's escort is otherwise bought
         /// separately in rung 2.
         /// </summary>
         internal readonly HashSet<Aircraft> HomeCapAirframes = new();
@@ -200,9 +224,10 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// </summary>
         internal readonly HashSet<Aircraft> LentHomeCap = new();
 
-        /// <summary>Scaled <c>Time.time</c> since which no hostile aircraft has been tracked inside
-        /// the base ring, or negative while one is. The loan's quiet clock.</summary>
-        internal float HomeCapQuietSince = -1f;
+        /// <summary>Why the radar watch is currently held on the deck, or empty while it is flying
+        /// (user report, 2026-09-14). Compared rather than re-derived so the grounding line is
+        /// logged once per change instead of once per review.</summary>
+        internal string AwacsGroundedReason = string.Empty;
 
         /// <summary>
         /// Scaled <c>Time.time</c> at which each airframe was last moved from a quiet sortie to one
@@ -211,12 +236,28 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// </summary>
         internal readonly Dictionary<Aircraft, float> AirRetaskedAt = new();
 
+        /// <summary>Game time each owned aircraft was first seen on a deck, for the stuck-on-deck
+        /// refund; cleared the moment it is airborne.</summary>
+        internal readonly Dictionary<Aircraft, float> OnDeckSince = new();
+
+        /// <summary>Owned aircraft that have been airborne at least once — a parked one that has
+        /// flown is recovered, not stuck.</summary>
+        internal readonly HashSet<Aircraft> EverAirborne = new();
+
         /// <summary>
         /// The priority ladder's picket share for this HQ, granted at each ladder review and spent
         /// down by insertion flights as they charge (design Section 3, rung 3). Zero until the
         /// ladder grants one; the next ladder review overwrites whatever was not consumed.
         /// </summary>
         internal float InsertionAllowance;
+
+        /// <summary>
+        /// What one complete insertion flight costs this commander — the price rung 3's savings are
+        /// capped at, granted with the allowance each ladder review (departure 2026-09-14). Zero
+        /// until the ladder has granted one, which reads as "no flight is priced yet" and holds the
+        /// request exactly as an empty share does.
+        /// </summary>
+        internal float InsertionSavingsTarget;
 
         /// <summary>Insertion money actually charged since the last <c>ladder:</c> line, so the line
         /// reports the picket rung's spend when it happens rather than when it was granted.</summary>
@@ -238,6 +279,140 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// after a run of losses; zero when no pause is running. The per-point cooldown alone only
         /// moves the bleeding to the next hilltop.</summary>
         internal float InsertionPauseUntil;
+
+        /// <summary>
+        /// Which side of the wing the last air buy served — the alternation's whole memory (fix,
+        /// 2026-09-14, <c>PrefersCasThisBuy</c>). Set only by a buy that actually read the demand,
+        /// so the "is anything open" queries never disturb the turn.
+        /// </summary>
+        internal bool LastAirBuyWasCas;
+
+        /// <summary>
+        /// Points this review reserved for a transport helicopter (<c>PicketDeliveryMode</c>
+        /// answered <c>Air</c>): the drive fill skips them, they post no road-stock requisition, and
+        /// the review line tags them <c>air</c>. Rebuilt from scratch at the top of every
+        /// <c>PlanPickets</c>, so a commander that loses its transports reverts to driving on the
+        /// very next review.
+        /// </summary>
+        internal readonly HashSet<CommanderStrategicPoint> AirDeliveredPickets = new();
+
+        /// <summary>
+        /// Ranked points this review put out of reach of every vehicle depot this commander owns
+        /// (reach-and-points Section 2, user decision 2026-09-14). No forward base, no road picket
+        /// and no platoon is sent to one of these; a helicopter insertion is the only way to staff
+        /// it until a depot comes within <c>DepotReachMeters</c>. Rebuilt from scratch by
+        /// <c>RefreshReach</c> at the top of every review, so a commander that builds or loses a
+        /// depot sees the change on the very next one.
+        /// </summary>
+        internal readonly HashSet<CommanderStrategicPoint> OutOfReach = new();
+
+        /// <summary>
+        /// Forward operating bases (design.md, fob-construction_20260914): this commander's open
+        /// FOB orders. One at a time while any is still delivering (design Section 1); an order that
+        /// has come online stays in the list so the teardown watch can measure its buildings.
+        /// </summary>
+        internal readonly List<CommanderFobOrder> FobOrders = new();
+
+        /// <summary>The FOB deliveries currently in the air. Kept apart from
+        /// <see cref="Insertions"/> because a picket insertion is swept against a picket mission and
+        /// a FOB flight has none, but counted against the same airborne limit.</summary>
+        internal readonly List<CommanderFobFlight> FobFlights = new();
+
+        /// <summary>The last lift-flight slot id handed out for this commander, so the next one is
+        /// this plus one (lift-wave_20260916). A platoon lift launches every load it owes in one
+        /// review, and the supply side must be able to recall, re-drop or credit ONE of those loads
+        /// without touching the others — which it can only do if each carries its own id. Ids are
+        /// never reused within a session and never reset while the session runs; the counter only
+        /// has to outrun the flights alive at any moment, which is at most the airborne ceiling.</summary>
+        internal int LastLiftSlotId;
+
+        /// <summary>Scaled <c>Time.time</c> until which a point that lost a FOB order will not be
+        /// offered another, keyed by the point (the <see cref="InsertionCooldownUntil"/>
+        /// convention).</summary>
+        internal readonly Dictionary<CommanderStrategicPoint, float> FobCooldownUntil = new();
+
+        /// <summary>
+        /// Landing zones a platoon lift was cancelled on, and when they may be flown to again. A
+        /// table of its own rather than a share of <see cref="FobCooldownUntil"/> (fix, 2026-09-15):
+        /// that one says "do not put a BASE on this ground yet", and a lift turned back from a point
+        /// was stopping the commander building a forward operating base there for ten minutes.
+        /// </summary>
+        internal readonly Dictionary<CommanderStrategicPoint, float> LiftCooldownUntil = new();
+
+        /// <summary>Points this commander currently reads as FRONT because of something it has
+        /// spotted rather than because of ground the enemy holds. The set is what throttles the line
+        /// that says so to once per point per spell, rather than once per review.</summary>
+        internal readonly HashSet<CommanderStrategicPoint> FrontBySpotting = new();
+
+        /// <summary>Last FOB decline reason per point, so a refusal logs once per reason rather than
+        /// once per 30 s review (the <c>ReportInsertionDenial</c> convention).</summary>
+        internal readonly Dictionary<CommanderStrategicPoint, string> FobDenials = new();
+        /// <summary>Why the last review picked no FOB site, so the reason is logged once per change
+        /// rather than every 30 s (diagnostic, 2026-09-14: a whole match passed with no FOB line at
+        /// all and nothing to say which rule refused).</summary>
+        internal string FobSiteReason = string.Empty;
+
+        /// <summary>When each site's clearance nudge was last logged (see RequestSiteClearance).</summary>
+        internal readonly Dictionary<CommanderStrategicPoint, float> SiteClearanceLoggedAt = new();
+
+        /// <summary>The dearest flight price a launch has refused for want of bank while the bank
+        /// stood at its target — proof the target was priced too low. The ladder banks toward at
+        /// least this much until a flight gets away (fix, 2026-09-14: `saving for the flight
+        /// (31/31)` on every request while the airdrop load the request demanded cost more).</summary>
+        internal float InsertionRefusedFlightPrice;
+
+        /// <summary>Scaled <c>Time.time</c> until which this commander builds no FOB anywhere after
+        /// losing one — destroyed or captured (user instruction 2026-09-14). A base it abandons on
+        /// purpose does not start this clock; that is the point of abandoning one.</summary>
+        internal float FobLossCooldownUntil;
+
+        /// <summary>Scaled <c>Time.time</c> of the last deliberate abandonment, so a commander cannot
+        /// chase a moving front by tearing a base down every review.</summary>
+        internal float LastFobAbandonAt = -1f;
+
+        // ---- Strike packages (design.md, strike-packages_20260915) ----
+
+        /// <summary>
+        /// The one open strike sortie, or null while none is. Held here as well as in
+        /// <see cref="AirSorties"/> because a strike is the commander's OWN initiative: nothing in
+        /// the world re-derives it each review the way a platoon in contact re-derives its CAS, so
+        /// the demand walk re-posts this very object rather than building a fresh one and losing the
+        /// package's progress with it.
+        /// </summary>
+        internal CommanderAirSortie? StrikeSortie;
+
+        /// <summary>Minutes accrued on the strike clock since the last deliberate strike went in —
+        /// <c>StepPressure</c>'s shape applied to the strike interval (design Section 1).</summary>
+        internal float StrikeClockMinutes;
+
+        /// <summary>Whole minutes the strike clock last REPORTED, so the countdown line prints once
+        /// a minute rather than once a review. -1 until the first line.</summary>
+        internal int StrikeClockReported = -1;
+
+        /// <summary>Scaled <c>Time.time</c> the last strike sortie ended, or negative while none
+        /// ever has — which reads as "never struck" and makes the first strike due at once.</summary>
+        internal float LastStrikeAt = -1f;
+
+        /// <summary>Scaled <c>Time.time</c> until which a point that has just been struck will not
+        /// be struck again, keyed by the point (the <see cref="FobCooldownUntil"/> convention).</summary>
+        internal readonly Dictionary<CommanderStrategicPoint, float> StrikeCooldownUntil = new();
+
+        /// <summary>Where the CAP band rotation has reached (design Section 4). Every sortie that
+        /// opens a CAP takes the next band from here, so consecutive patrols stack in height
+        /// instead of every fighter in the wing orbiting at the same altitude.</summary>
+        internal int CapBandCursor = -1;
+
+        /// <summary>The deliberate strikes' own band rotation (fix, 2026-09-15). A strike is rare —
+        /// one every six minutes — and the patrols between two of them would otherwise decide its
+        /// height: with three bands, any multiple of three patrols in between put two consecutive
+        /// strikes at the same altitude, and the 2026-09-15 match logged four strike orders in a row
+        /// at 7,500 m. A cursor of their own makes consecutive strike packages differ by
+        /// construction.</summary>
+        internal int StrikeCapBandCursor = -1;
+
+        /// <summary>The station band each home-CAP fighter was given, so a patrol re-tasked on a
+        /// later review keeps the height it was sent to rather than rotating every 30 s.</summary>
+        internal readonly Dictionary<Aircraft, int> HomeCapBand = new();
     }
 
     public void TickPersistent()
@@ -257,6 +432,14 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         {
             TickMovement();
         }
+
+        // The logistics watch (user decision 2026-09-16): the cheap in-flight re-checks, six times a
+        // review. On the scaled clock like everything else here, so it pauses with the game and
+        // keeps pace at 2x and 4x — a transport covers four times the ground per second there too.
+        if (CommanderScheduler.IsDue(ref nextLogisticsAt, Mathf.Max(0.5f, CommanderSettings.LogisticsWatchSeconds)))
+        {
+            TickLogistics();
+        }
     }
 
     public void ResetSession()
@@ -266,8 +449,11 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         // (discovery reruns from scratch), the same reason the garrison step's own cache was
         // cleared here.
         holdPosts.Clear();
+        airfieldClearedUnits.Clear();
         nextReviewAt = CommanderScheduler.Stagger("operations.review", ReviewIntervalSeconds);
         nextMovementAt = CommanderScheduler.Stagger("operations.movement", MovementIntervalSeconds);
+        nextLogisticsAt = CommanderScheduler.Stagger(
+            "operations.logistics", Mathf.Max(0.5f, CommanderSettings.LogisticsWatchSeconds));
     }
 
     private void Review()
@@ -286,18 +472,47 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             SweepPool(hq, state);
             FoldWithdrawnPlatoons(hq, state);
             RankPoints(hq, state);
+            // Reach before every planner that sends ground vehicles anywhere (reach-and-points
+            // Section 2): it reads the ranking RankPoints has just built, and PlanForwardBases,
+            // PlanPickets and the FOB site picker below all consult the set it fills.
+            RefreshReach(hq, state);
             PlanForwardBases(hq, state);
             FillMissionTrucks(hq, state);
             PlanPickets(hq, state);
+            // BEFORE PlanInsertions (user, 2026-09-14, "still no FOB!?"): a construction flight
+            // opens a base that brings a dozen points into reach, while a picket flight fills one
+            // point — so the FOB takes the first free transport slot and the pickets share the rest.
+            // The reverse order let the picket flights fill every slot before the FOB step ran.
+            ReviewFobs(hq, state);
             // After PlanPickets so the picket missions it reads are this review's, and before the
             // offensive so an insertion never competes with an attack for the same review's pot.
             PlanInsertions(hq, state);
+            // BEFORE the offensive planner (fix, 2026-09-15): an attack opens its own strike on the
+            // same review it is planned, and a strike that has already finished still occupies the
+            // one-per-commander slot until it is closed. Closing it here means an attack planned
+            // this review gets its package this review; closing it only inside UpdateStrikeClock,
+            // which runs after this line, left that attack with no strike at all and nothing to
+            // retry with, because TryOpenAttack is not called again for a mission that already
+            // exists. The call inside UpdateStrikeClock stays: it is what closes a strike that
+            // finishes while no attack is being planned, and a second call is a no-op.
+            CloseFinishedStrike(hq, state);
             PlanOffensive(hq, state);
             UpdatePressure(hq, state);
+            // Straight after the pressure clock (design.md, strike-packages_20260915 Section 1): an
+            // attack the clock has just forced already counts as open, so the strike ahead of it and
+            // the deliberate strike can never both fire on one review.
+            UpdateStrikeClock(hq, state);
             // Addendum 2026-09-14 §3: reinforcement requests are sized here — after the planning
             // passes that decide which missions exist this review, before AssignPlatoons so a
             // request raised now is manned by the assignment pass of this same review.
             ReviewReinforcements(hq, state);
+            // Before AssignPlatoons, after the forward-base planner: a platoon still driving from the
+            // depot it was bought at, which a forward operating base has since overtaken, is taken off
+            // the road here and re-raised from that base, as is a picket detachment still driving to
+            // the point it garrisons (user instruction 2026-09-16, both halves). It has to run
+            // before the assignment pass so the platoon it empties is already carrying its re-raise
+            // bookkeeping when the empty-platoon rule there looks at it.
+            ReviewGroundReseats(hq, state);
             // B1 fix: every mission this review's planning may have just opened (a forward base, a
             // picket or an attack, whether from PlanOffensive above or from the pressure clock inside
             // UpdatePressure) is manned here, before UpdateAttacks below ever tests an axis for
@@ -315,6 +530,7 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             // Prune again after the fills so the review line's staged= counts only vehicles still
             // in the pool, not the ones a platoon or picket took this review.
             PruneStagingPosts(state);
+            SellSurplusPool(hq, state);
             LogReviewDiagnostics(hq, state);
         }
 
@@ -424,6 +640,11 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             // on — a picket detachment or an un-manned forward base.
             DetectMissionContact(entry.Key, entry.Value);
             StagePool(entry.Key, entry.Value);
+            // Last, so its order is the one that stands: anything already parked on a runway or a
+            // taxiway is driven off it (user instruction, 2026-09-16). The hold-post drives above
+            // will not do it — they skip a member that is already near its post, which is exactly
+            // the vehicle sitting on the strip beside a clean one.
+            ClearVehiclesOffAirfield(entry.Key, entry.Value);
         }
     }
 
@@ -464,10 +685,142 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             {
                 newlyStaged++;
             }
+
+            if (unit != null && !state.PoolIdleSince.ContainsKey(unit))
+            {
+                state.PoolIdleSince[unit] = Time.time;
+            }
         }
 
         DriveToReserveRing(hq, state.Pool, state.PoolIssued);
         LogStaged(hq, newlyStaged, state.Pool.Count);
+    }
+
+    /// <summary>How many pool vehicles are surplus to the idle cap, pure: everything past the cap,
+    /// never negative. A cap of zero or less disables the sale.</summary>
+    internal static int PoolSurplusToSell(int poolCount, int cap)
+    {
+        return cap <= 0 ? 0 : Mathf.Max(0, poolCount - cap);
+    }
+
+    /// <summary>Whether one pool vehicle has stood idle long enough to be sold, pure.</summary>
+    internal static bool PoolUnitSellable(float idleSeconds, float minutes)
+    {
+        return minutes > 0f && idleSeconds >= minutes * 60f;
+    }
+
+    /// <summary>
+    /// Whether one sale candidate of <paramref name="role"/> is kept back for an open order-book
+    /// line instead of sold, pure (user decision 2026-09-15, fix B): while
+    /// <paramref name="openByRole"/> still has a line for the role, the vehicle is wanted, the line's
+    /// count is decremented and the answer is true. Counted, not blanket: only as many vehicles as
+    /// the book asks for are kept, so twenty idle tanks against a three-tank line still sell
+    /// seventeen — a blanket skip would have pinned the whole pool over its cap, which also holds
+    /// the buyer, with no way out. Called youngest-idle first so the vehicles kept are the ones
+    /// most recently delivered for those lines and the sale still takes the oldest.
+    /// </summary>
+    internal static bool PoolUnitWanted(int[] openByRole, CommanderPlatoonRole role)
+    {
+        int index = (int)role;
+        if (index < 0 || index >= openByRole.Length || openByRole[index] <= 0)
+        {
+            return false;
+        }
+
+        openByRole[index]--;
+        return true;
+    }
+
+    /// <summary>Scratch for the sale, reused per review.</summary>
+    private readonly List<Unit> poolSaleScratch = new();
+
+    /// <summary>Scratch for the sale's open-line counts by role, reused per review.</summary>
+    private readonly int[] poolSaleOpenByRole = new int[RoleCount];
+
+    /// <summary>
+    /// Sells the pool's surplus (user, 2026-09-14): once every picket, platoon and truck slot has
+    /// taken what it wants, any vehicle past <c>PoolIdleCap</c> that has stood on the reserve ring
+    /// for <c>PoolIdleSellMinutes</c> is despawned and half its price refunded, oldest idle first.
+    /// Reassignment already runs ahead of this every review (the picket fill, platoon formation and
+    /// reinforcement all draw from the pool), so what is left here is what nothing on the map wants
+    /// — except a vehicle whose role the order book still has an open line for (fix B, 2026-09-15):
+    /// that one is the answer to a line the buyer would otherwise buy again, and as many of them as
+    /// the book asks for are kept (<see cref="PoolUnitWanted"/>).
+    /// Server-only: the despawn and the refund both are.
+    /// </summary>
+    private void SellSurplusPool(FactionHQ hq, OperationsState state)
+    {
+        if (!hq.IsServer)
+        {
+            return;
+        }
+
+        int surplus = PoolSurplusToSell(state.Pool.Count, CommanderSettings.PoolIdleCap);
+        if (surplus <= 0)
+        {
+            return;
+        }
+
+        poolSaleScratch.Clear();
+        float minutes = CommanderSettings.PoolIdleSellMinutes;
+        for (int i = 0; i < state.Pool.Count; i++)
+        {
+            Unit unit = state.Pool[i];
+            // Only the pool is ever sold: a platoon member, a picket vehicle and a forward base's
+            // truck are not in it by construction. A pooled vehicle the PLAYER has given an order
+            // to is theirs now and is skipped too (user, 2026-09-14).
+            if (unit != null
+                && !unit.disabled
+                && CommanderMoveService.Instance?.HasPlayerOrder(unit) != true
+                && state.PoolIdleSince.TryGetValue(unit, out float since)
+                && PoolUnitSellable(Time.time - since, minutes))
+            {
+                poolSaleScratch.Add(unit);
+            }
+        }
+
+        poolSaleScratch.Sort((a, b) => state.PoolIdleSince[a].CompareTo(state.PoolIdleSince[b]));
+
+        // Keep back, youngest idle first, as many candidates of each role as the book has open
+        // lines for; what remains is sold oldest first below.
+        SumOrderBook(state.Requisitions, poolSaleOpenByRole);
+        for (int i = poolSaleScratch.Count - 1; i >= 0; i--)
+        {
+            CommanderPlatoonRole role = CommanderPlatoonRoles.Of(poolSaleScratch[i].definition as VehicleDefinition);
+            if (PoolUnitWanted(poolSaleOpenByRole, role))
+            {
+                poolSaleScratch.RemoveAt(i);
+            }
+        }
+
+        int sold = 0;
+        float refund = 0f;
+        for (int i = 0; i < poolSaleScratch.Count && sold < surplus; i++)
+        {
+            Unit unit = poolSaleScratch[i];
+            float price = unit.definition is VehicleDefinition definition ? Mathf.Max(0f, definition.value) : 0f;
+            if (!CommanderEconomyService.DespawnUnit(unit))
+            {
+                continue;
+            }
+
+            state.Pool.Remove(unit);
+            state.PoolIssued.Remove(unit);
+            state.PoolIdleSince.Remove(unit);
+            refund += price * Mathf.Clamp01(CommanderSettings.PoolSellRefundFraction);
+            sold++;
+        }
+
+        if (sold > 0)
+        {
+            hq.AddFunds(refund);
+            CommanderAiLog.Note(
+                hq,
+                $"sells {sold} idle vehicle(s) from the pool for {refund:0}: nothing on the map wants them "
+                    + $"({state.Pool.Count} left, cap {CommanderSettings.PoolIdleCap}).");
+        }
+
+        poolSaleScratch.Clear();
     }
 
     /// <summary>
@@ -576,13 +929,45 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         out GlobalPosition position,
         out float distance)
     {
+        return TryNearestTrackedHostile(
+            hq, from, range, CommanderEnemyCommanderService.ThreatMemorySeconds, out position, out distance, out _);
+    }
+
+    /// <summary>
+    /// Whether a contact seen <paramref name="secondsSinceSeen"/> ago still counts, pure. Exactly on
+    /// the window still counts — the inclusive-on-the-patient-side convention the rest of the mod
+    /// uses. A window of zero or less counts nothing, so a rule can be turned off by its own setting
+    /// rather than by deleting the call.
+    /// </summary>
+    internal static bool ContactStillCounts(float secondsSinceSeen, float memorySeconds)
+    {
+        return memorySeconds > 0f && secondsSinceSeen <= memorySeconds;
+    }
+
+    /// <param name="memorySeconds">How long a contact still counts. The home defence reads its own
+    /// 45 s here, which is the right window for reacting to a raid; the siting and standoff rules
+    /// read <c>CommanderSettings.StandoffContactMemorySeconds</c>, because a column seen five minutes
+    /// ago is still somewhere near that ground when the question is where to put a base or land a
+    /// transport (user report 2026-09-15).</param>
+    /// <param name="label">What the nearest contact is, for the log line that says why a point has
+    /// gone front or a flight has been turned round. Empty when none was found.</param>
+    private static bool TryNearestTrackedHostile(
+        FactionHQ hq,
+        GlobalPosition from,
+        float range,
+        float memorySeconds,
+        out GlobalPosition position,
+        out float distance,
+        out string label)
+    {
         position = default;
         distance = float.MaxValue;
+        label = string.Empty;
         float now = Time.timeSinceLevelLoad;
         foreach (KeyValuePair<PersistentID, TrackingInfo> entry in hq.trackingDatabase)
         {
             TrackingInfo info = entry.Value;
-            if (now - info.lastSpottedTime > CommanderEnemyCommanderService.ThreatMemorySeconds
+            if (!ContactStillCounts(now - info.lastSpottedTime, memorySeconds)
                 || !info.TryGetUnit(out Unit unit)
                 || unit == null
                 || unit.disabled
@@ -599,6 +984,7 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             {
                 distance = d;
                 position = info.lastKnownPosition;
+                label = CommanderGameAccess.GetUnitLabel(unit);
             }
         }
 
@@ -1054,6 +1440,44 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
     }
 
     /// <summary>
+    /// The next platoon name this commander has not used, and the counter moved on. Reserved
+    /// separately from <see cref="CreatePlatoon"/> because an air-mobile platoon is NAMED when its
+    /// lift is ordered and CREATED when its first load lands, several minutes later: the log line
+    /// that announces the raise, the lift's own lines and the review line all have to name the same
+    /// platoon, and a name read without reserving it would be handed to whatever formed in between.
+    /// </summary>
+    private static string ReservePlatoonName(OperationsState state)
+    {
+        string name = $"{PlatoonNames[state.NextPlatoonNumber % PlatoonNames.Length]} PLATOON";
+        state.NextPlatoonNumber++;
+        return name;
+    }
+
+    /// <summary>
+    /// The empty platoon every formation path starts from: named, on the roster, forming from this
+    /// moment, and carrying the establishment and the armour slot count of the RECIPE it was raised
+    /// on (the teeth rule reads that rather than the live setting — see
+    /// <see cref="CommanderPlatoon.ArmourWanted"/>). Moved out of <see cref="TryFormPlatoon"/> when
+    /// the air-mobile lift became its second caller (Reuse rule 5): the lift has no free pool to
+    /// draw from, its vehicles arrive two at a time from the sky, but the platoon they join must be
+    /// the same object with the same bookkeeping as one raised at a depot.
+    /// </summary>
+    private static CommanderPlatoon CreatePlatoon(
+        OperationsState state, string name, int establishment, int armourWanted)
+    {
+        CommanderPlatoon platoon = new()
+        {
+            Name = name,
+            Establishment = establishment,
+            ArmourWanted = armourWanted,
+            State = CommanderPlatoonState.Forming,
+            FormingSince = Time.time,
+        };
+        state.Platoons.Add(platoon);
+        return platoon;
+    }
+
+    /// <summary>
     /// Forms a new platoon from the free pool, up to <paramref name="wantedSize"/> vehicles by
     /// recipe. Forms on whatever the recipe fill returns as long as at least one member came back
     /// (design SS1: a platoon forms on what it has and requisitions the rest — a platoon of one is
@@ -1078,14 +1502,8 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             return null;
         }
 
-        CommanderPlatoon platoon = new()
-        {
-            Name = $"{PlatoonNames[state.NextPlatoonNumber % PlatoonNames.Length]} PLATOON",
-            Establishment = wantedSize,
-            State = CommanderPlatoonState.Forming,
-            FormingSince = Time.time,
-        };
-        state.NextPlatoonNumber++;
+        CommanderPlatoon platoon = CreatePlatoon(
+            state, ReservePlatoonName(state), wantedSize, CommanderSettings.OperationsRecipeArmour);
 
         TakePicksFromPool(state.Pool, recipePicks, platoon.Members);
         OrderForMarch(platoon.Members);
@@ -1096,7 +1514,6 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         platoon.Objective = platoon.Leader != null
             ? ChooseFormUpPoint(platoon.Leader.transform.GlobalPosition())
             : CommanderCaptureService.GetTerritoryCenter(hq);
-        state.Platoons.Add(platoon);
         CommanderAiLog.Note(hq, $"forms {platoon.Name} {purpose}: {platoon.Members.Count}/{wantedSize} vehicles.");
         return platoon;
     }
@@ -1148,7 +1565,7 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         BuildingDefinition? probe = economy?.MineDefinition;
         if (economy == null || probe == null)
         {
-            return around;
+            return OffAirfieldStandingPoint(around, around, out _);
         }
 
         for (int attempt = 0; attempt < CommanderEconomyService.EnemySiteAttempts; attempt++)
@@ -1165,7 +1582,10 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             }
         }
 
-        return around;
+        // Every probe failed, so the anchor itself is the answer — and the anchor is wherever the
+        // first vehicle happens to stand, which on a base built round a depot is the apron. The
+        // probes were the only airfield check on this path (user instruction, 2026-09-16).
+        return OffAirfieldStandingPoint(around, around, out _);
     }
 
     /// <summary>
@@ -1525,6 +1945,13 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         CheckContactEvidence(failures);
         CheckReinforcements(failures);
         CheckGroundTactics(failures);
+        CheckAirfieldClearance(failures);
+        CheckFob(failures);
+        CheckAirMobile(failures);
+        CheckLogistics(failures);
+        CheckAirPosture(failures);
+        CheckSurvival(failures);
+        CheckReseat(failures);
 
         if (failures.Count == 0)
         {
@@ -1584,6 +2011,18 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         if (actual != expected)
         {
             failures.Add($"{name}: expected \"{expected}\", got \"{actual}\"");
+        }
+    }
+
+    /// <summary>The picket delivery rule's own overload (departure 2026-09-14): the decision table
+    /// answers Drive or Air, and a self-check that had to stringify it would read worse than the
+    /// rule it is checking.</summary>
+    private static void Expect(
+        List<string> failures, string name, CommanderPicketDelivery actual, CommanderPicketDelivery expected)
+    {
+        if (actual != expected)
+        {
+            failures.Add($"{name}: expected {expected}, got {actual}");
         }
     }
 }

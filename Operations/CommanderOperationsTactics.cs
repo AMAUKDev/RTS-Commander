@@ -295,6 +295,21 @@ internal sealed partial class CommanderOperationsService
         return CommanderMoveService.HeadingDegrees(from.ToLocalPosition(), to.ToLocalPosition());
     }
 
+    /// <summary>
+    /// A resource site's garrison ring as a fraction of its capture ring: 0.875, which is the old
+    /// 250 m ring times 1.75 on the new 500 m capture ring (user, 2026-09-14). Far enough inside
+    /// that a vehicle a length past its post is still counted, far enough out to leave the mine's
+    /// footprint clear.
+    /// </summary>
+    internal const float SiteHoldRingFraction = 0.875f;
+
+    /// <summary>The ring a point's garrison stands on, pure: a site's fraction of its capture ring,
+    /// every other kind's full radius.</summary>
+    internal static float HoldRingRadius(StrategicPointKind kind, float radiusMeters)
+    {
+        return kind == StrategicPointKind.Site ? radiusMeters * SiteHoldRingFraction : radiusMeters;
+    }
+
     /// <summary>Slot scratch for <see cref="EnsureHoldPostSet"/>: one point is planned at a time.</summary>
     private readonly List<CommanderPostSlot> holdSlotsOuter = new();
     private readonly List<CommanderPostSlot> holdSlotsAirDefence = new();
@@ -327,7 +342,7 @@ internal sealed partial class CommanderOperationsService
         set.InnerWanted = innerCount;
         set.BearingBucket = bucket;
         PlanHoldPosts(
-            point.Radius,
+            HoldRingRadius(point.Kind, point.Radius),
             threatBearingDegrees,
             outerCount,
             airDefenceCount,
@@ -343,20 +358,32 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>Turns polar slots into ground positions, dropping anything the terrain puts under
-    /// the sea — the filter pair the point ring has always applied.</summary>
+    /// the sea and pushing anything that lands on a runway or a taxiway clear of it — the filter
+    /// pair the point ring has always applied, plus the airfield rule the reserve ring already had
+    /// (user instruction, 2026-09-16). A control point can sit on an airbase, and its ring, its air
+    /// defence pair and its inner pair all came through here unchecked.</summary>
     private static void FillPostPositions(
         GlobalPosition center, List<CommanderPostSlot> slots, List<GlobalPosition> into)
     {
         into.Clear();
+        int movedOffAirfield = 0;
         for (int i = 0; i < slots.Count; i++)
         {
             GlobalPosition candidate = CommanderGameAccess.SnapToTerrain(
                 PositionAt(center, slots[i].BearingDegrees, slots[i].RadiusMeters));
+            candidate = OffAirfieldStandingPoint(candidate, center, out bool moved);
+            if (moved)
+            {
+                movedOffAirfield++;
+            }
+
             if (!CommanderGameAccess.IsBelowSeaLevel(candidate))
             {
                 into.Add(candidate);
             }
         }
+
+        LogAirfieldPostsMoved("Point ring", center, movedOffAirfield, slots.Count);
     }
 
     /// <summary>
@@ -949,17 +976,29 @@ internal sealed partial class CommanderOperationsService
 
         float arcDistance = DefenceArcDistanceMeters(point.Radius, CommanderSettings.DefenceArcStandoffMeters);
         arcPosts.Clear();
+        int arcMovedOffAirfield = 0;
         for (int i = 0; i < arcMembers.Count; i++)
         {
             GlobalPosition candidate = CommanderGameAccess.SnapToTerrain(PositionAt(
                 point.Position,
                 DefenceArcBearing(platoon.PostureBearing, i, DefenceArcSpacingMeters, arcDistance),
                 arcDistance));
+            // The arc is built here rather than through FillPostPositions, so it needs the same
+            // airfield rule of its own (user instruction, 2026-09-16): a point on an airbase puts
+            // the whole arc across the strip.
+            candidate = OffAirfieldStandingPoint(candidate, point.Position, out bool moved);
+            if (moved)
+            {
+                arcMovedOffAirfield++;
+            }
+
             if (!CommanderGameAccess.IsBelowSeaLevel(candidate))
             {
                 arcPosts.Add(candidate);
             }
         }
+
+        LogAirfieldPostsMoved("Defence arc", point.Position, arcMovedOffAirfield, arcMembers.Count);
 
         // The vehicles that stay behind keep taking ring posts, by the same role split as ever: the
         // air defence on its own pair, the truck and any transport carrier on the far side.

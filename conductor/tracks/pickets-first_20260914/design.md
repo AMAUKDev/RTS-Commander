@@ -72,6 +72,13 @@ force (stock missions before discovery). `OperationsMaxPlatoons` is deleted (cfg
 (3) requests per review, one per point, farthest-off-road first, each behind the threat gate, the
 per-point cooldown and the commander-wide loss pause. `heli=n/3` on the review line.
 
+> **Amended 2026-09-14 (user instruction, plan.md Departure 11).** None of those requests was ever
+> issued, because the drive fill and the order book closed every shortfall before `PlanInsertions`
+> ran. A point past `OperationsHeliInsertionOffRoadMeters` is now RESERVED for the flight — the
+> drive fill skips it and it posts no requisition — unless no transport can carry vehicles, the loss
+> pause is running, or that point is on cooldown. Pure rule `PicketDeliveryMode`; the review line
+> tags it `pickets=n air`.
+
 ## Section 5 — Caps
 
 `MaxReinforcementPlatoons` 3 → 6 (self-check updated). `HomeCapMax` 4 unchanged.
@@ -90,3 +97,57 @@ Within ten minutes the review line shows most non-front points with `pickets=2`,
 front point or `Attack`; the log carries `forms … for …` with a purpose and `no purpose for a new
 platoon` when the front is quiet; no `bought … for …` plan line without a matching requisition; a
 reinforcement request may read `requests 5 platoon(s)`.
+
+## Section 6 — Pickets hold resource sites too (user, 2026-09-14)
+
+### The ownership rule as it stands, verified from code
+
+- A resource site is `StrategicPointKind.Site`. `StrategicPointKinds.IsControlPoint(Site)` is
+  **false** (`Points/CommanderStrategicPoint.cs:45-52`), pinned by the self-check "a site is not a
+  control point" (`Points/CommanderStrategicPointService.cs:1065`).
+- A site is **not held by presence**. `CommanderStrategicPoint.GetOwner()` returns the mine's
+  owner — `Mine == null || Mine.disabled ? null : Mine.NetworkHQ`
+  (`Points/CommanderStrategicPoint.cs:149-150`). The presence hold state machine is explicitly
+  skipped for a site: the hold tick only clears a destroyed mine, "mine destroyed → site free"
+  (`Points/CommanderStrategicPointService.cs:185-196`). A site therefore has no `Hold`, no
+  `GarrisonCounts` and no capture progress at all.
+- A site **pays nothing itself**: `IncomePerMinute(Site, ...)` returns 0
+  (`Points/CommanderStrategicPointService.cs:721-733`), with the self-check "a site pays only
+  through its mine". The income is the mine's, `GoldMineIncomePerMinute`.
+- **Who may build there**: `TryPickFreeReachableSite`
+  (`Points/CommanderStrategicPointService.cs:631-660`) takes any site with no live mine that is
+  inside the build radius of a held base OR inside `IsInsideGarrisonedPointReach` — and that reach
+  test counts only **control points** this HQ holds and that pay
+  (`Points/CommanderStrategicPointService.cs:602-624`). A garrison standing on the site itself does
+  not extend build reach to it.
+- Before this change `RankPoints` skipped every non-control point
+  (`Operations/CommanderOperationsFront.cs`), so no picket and no forward base was ever created on
+  a site and the commander's own mines stood unguarded.
+
+### Decision
+
+Sites are ranked and given missions like any other point.
+
+- `RankPoints` now admits `StrategicPointKind.Site` alongside the control points. A site's worth to
+  the ranking is `GoldMineIncomePerMinute` — the mine it lets the owner keep standing there —
+  because the points table deliberately pays a site nothing and that self-check stays as it is.
+- A site away from the enemy gets an ordinary **Picket**, filled, driven and air-delivered exactly
+  like a hilltop. Review line: `Picket RESOURCE SITE 3 0/0 pickets=2`.
+- A site the enemy can reach gets a **ForwardBase** purpose instead:
+  `SiteWantsPlatoonPurpose(isFront, nearestEnemyAssetMeters, trackedHostilesNear,
+  ObservedRadiusMeters)` is true when the site is a front point, when a hostile ground unit is
+  tracked within the 8 km observed ring, or when an enemy-held point or base is within that same
+  ring. Inclusive on the boundary — being wrong here costs a mine. Review line:
+  `ForwardBase RESOURCE SITE 3 1/1`. That purpose survives the forward-base demotion walk, which
+  would otherwise send it back to a two-vehicle detachment every review.
+- Ownership, income and mine siting are untouched: a held site pays and permits its mine by the
+  existing rules above.
+
+### The gap this left, closed the same day by Section 7
+
+Ranking a site was not enough. While a site's owner was only ever its mine's owner, a picket
+standing on one changed nothing — which is exactly what the user then observed: "I just manually
+moved two units near a resource site — it didn't capture it." Sites became held-by-presence control
+points on the same day; see `strategic-points_20260913`, Section "Resource sites are captured like
+any other point". With that in place the loop closes on itself: a picket holds the site, a held site
+is inside its own garrisoned build reach, and the mine can be built there.
