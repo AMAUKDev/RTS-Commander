@@ -49,6 +49,15 @@ internal sealed partial class CommanderSupplyHeliService
     private sealed class ShieldRecord
     {
         internal float Since;
+
+        /// <summary>Ground this vehicle is to be set down on, or null when it is left where it fell
+        /// (delivery-bypass_20260916). Set by the unload-in-place path and cleared by the first sweep
+        /// that acts on it, so a vehicle is placed once and then behaves like any other delivery.
+        /// The placement rides on the sweep rather than on the activation hook because the sweep
+        /// already moves delivered vehicles every tick and is proven; moving one inside the frame the
+        /// engine is still activating it in would be new risk in the delivery path with the worst
+        /// incident history in this repository.</summary>
+        internal GlobalPosition? PlaceAt;
         internal float StillSince = -1f;
         internal string Label = string.Empty;
         internal string Where = string.Empty;
@@ -67,8 +76,10 @@ internal sealed partial class CommanderSupplyHeliService
             && Instance.shielded.ContainsKey(part.parentUnit);
     }
 
-    /// <summary>Puts a freshly activated cargo vehicle under the shield.</summary>
-    private void ShieldDeliveredCargo(Unit cargoUnit, CargoMission mission)
+    /// <summary>Puts a freshly activated cargo vehicle under the shield. <paramref name="placeAt"/>
+    /// is the ground the next sweep is to set it down on, or null to leave it where it fell — only
+    /// the delivery bypass passes one.</summary>
+    private void ShieldDeliveredCargo(Unit cargoUnit, CargoMission mission, GlobalPosition? placeAt = null)
     {
         if (cargoUnit == null || cargoUnit.disabled || shielded.ContainsKey(cargoUnit))
         {
@@ -81,6 +92,7 @@ internal sealed partial class CommanderSupplyHeliService
             Label = CommanderGameAccess.GetUnitLabel(cargoUnit),
             Where = mission.InsertionPoint != null ? mission.InsertionPoint.Label : mission.CargoLabel,
             Hq = mission.Hq,
+            PlaceAt = placeAt,
         };
     }
 
@@ -130,6 +142,19 @@ internal sealed partial class CommanderSupplyHeliService
             }
 
             float shieldedFor = Time.time - record.Since;
+            if (record.PlaceAt.HasValue)
+            {
+                // The delivery bypass asked for this vehicle to be set down on chosen ground. Done
+                // once, before anything is measured, because every measurement below is about where
+                // the vehicle has ended up and it has not ended up anywhere yet.
+                GlobalPosition placeAt = record.PlaceAt.Value;
+                record.PlaceAt = null;
+                record.StillSince = -1f;
+                PlaceVehicleUpright(unit, placeAt);
+                Note(record, $"{record.Label} set down at {record.Where}: unloaded in place, not landed.");
+                continue;
+            }
+
             GlobalPosition ground = CommanderGameAccess.SnapToTerrain(unit.transform.GlobalPosition());
             bool onGround = unit.transform.GlobalPosition().y - ground.y <= GroundContactMeters;
             bool upright = IsUpright(Vector3.Dot(unit.transform.up, Vector3.up), UprightDotThreshold);
@@ -176,10 +201,13 @@ internal sealed partial class CommanderSupplyHeliService
         shieldPrune.Clear();
     }
 
-    /// <summary>Sets a vehicle that has come to rest on its side or roof back on its wheels where it
-    /// lies: heading kept, pitch and roll zeroed, lifted a little above the terrain, velocities
-    /// cleared so it drops onto its suspension. Server only; the game syncs the transform.</summary>
-    private static void RightVehicle(Unit unit, GlobalPosition ground, ShieldRecord record)
+    /// <summary>Stands a vehicle upright on <paramref name="ground"/>: heading kept, pitch and roll
+    /// zeroed, lifted a little above the terrain, velocities cleared so it drops onto its suspension.
+    /// Server only; the game syncs the transform. Lifted out of <see cref="RightVehicle"/> on
+    /// 2026-09-16 (Reuse rule 5) when the delivery bypass needed the same move to set a delivered
+    /// vehicle down on chosen ground; the righting path is unchanged and still its only other
+    /// caller.</summary>
+    private static void PlaceVehicleUpright(Unit unit, GlobalPosition ground)
     {
         if (!unit.IsServer)
         {
@@ -197,6 +225,13 @@ internal sealed partial class CommanderSupplyHeliService
         }
 
         unit.transform.SetPositionAndRotation(local, Quaternion.Euler(0f, yaw, 0f));
+    }
+
+    /// <summary>Sets a vehicle that has come to rest on its side or roof back on its wheels where it
+    /// lies.</summary>
+    private static void RightVehicle(Unit unit, GlobalPosition ground, ShieldRecord record)
+    {
+        PlaceVehicleUpright(unit, ground);
         Note(record, $"righted {record.Label} at {record.Where}: it had come to rest on its side.");
     }
 
@@ -216,6 +251,10 @@ internal sealed partial class CommanderSupplyHeliService
     /// checks.</summary>
     internal static void SelfCheck()
     {
+        // The delivery bypass's own named checks (delivery-bypass_20260916), registered through this
+        // one entry so the supply service keeps a single self-check call at plugin load.
+        SelfCheckUnload();
+
         bool ok = InsertionSettled(true, true, 3f, 3f)
             && !InsertionSettled(true, true, 2.9f, 3f)
             && !InsertionSettled(false, true, 10f, 3f)

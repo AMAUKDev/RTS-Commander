@@ -532,8 +532,11 @@ internal sealed partial class CommanderOperationsService
             // otherwise read "pkg 0/0" for its whole wait.
             if (SortieHoldsAtFormUp(sortie))
             {
-                into.Append(" pkg ").Append(CountAtFormUp(sortie))
-                    .Append('/').Append(sortie.Wanted + sortie.CapsWanted);
+                into.Append(" pkg ").Append(CountGathered(sortie))
+                    // The FROZEN bar the go-in test reads, not this review's demand (2026-09-16):
+                    // the line printed `pkg 0/4`, `0/6`, `0/8` while the package never moved, because
+                    // the fall-back's call for fighters was raising the number it was measured by.
+                    .Append('/').Append(SortieGoInTotal(sortie));
                 if (sortie.AradPending)
                 {
                     into.Append(" arad-wait");

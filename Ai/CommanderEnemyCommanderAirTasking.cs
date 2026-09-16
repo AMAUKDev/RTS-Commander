@@ -76,7 +76,7 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             if (id.TryGetUnit(out Unit unit) && unit is Aircraft aircraft && !unit.disabled)
             {
-                TrackAircraft(aircraft);
+                TrackAircraft(hq, aircraft);
             }
         }
 
@@ -174,7 +174,7 @@ internal sealed partial class CommanderEnemyCommanderService
         }
     }
 
-    private void TrackAircraft(Aircraft aircraft)
+    private void TrackAircraft(FactionHQ hq, Aircraft aircraft)
     {
         if (!airborneSince.TryGetValue(aircraft, out TrackedAirframe tracked))
         {
@@ -186,6 +186,8 @@ internal sealed partial class CommanderEnemyCommanderService
             airborneSince[aircraft] = tracked;
         }
 
+        // Re-read every tick, so an airframe that changes hands is reported by whoever holds it.
+        tracked.Owner = hq;
         tracked.LastPosition = aircraft.transform.GlobalPosition();
         tracked.LastRadarAlt = aircraft.radarAlt;
     }
@@ -204,6 +206,15 @@ internal sealed partial class CommanderEnemyCommanderService
         lostAircraft.Clear();
         foreach (KeyValuePair<Aircraft, TrackedAirframe> entry in airborneSince)
         {
+            // Only this faction's own airframes. The table is shared by every commanded faction, and
+            // without the owner test the first HQ the review loop reaches drains the lot under its
+            // own name — which is why the player's transports had no fate line at all and the
+            // enemy's loss counts were inflated by the player's (measured, 2026-09-16).
+            if (!ReferenceEquals(entry.Value.Owner, hq))
+            {
+                continue;
+            }
+
             if (entry.Key == null || entry.Key.disabled)
             {
                 lostAircraft.Add(entry.Key!);

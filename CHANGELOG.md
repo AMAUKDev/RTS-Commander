@@ -42,6 +42,76 @@
 
 ## Unreleased
 
+**Cargo transports stop trying to land.** A transport that reaches its landing zone low and roughly
+still now puts its vehicles on clear ground where it is, empties itself and flies home, instead of
+chasing the game's own release gate. That gate is the reason deliveries got stuck: the game releases
+cargo only when the aircraft is under 2 m above the ground AND under 10 m/s, in plain words on the
+ground and stopped, while inside 300 m of its touchdown point it turns flight assist off and commands
+a hover at 20 m. A transport that holds that hover satisfies the gate never, which is the "it cannot
+land, units aren't dropped, stuck" reported on 2026-09-14, and the VL-49 Tarantula tiltwing that kept
+trying is the airframe that flew into the ground — 29 percent of its losses ended in the dirt against
+the UH-90 Ibis's 9 percent. The bypass now runs on EVERY delivery, not only the ones that stall (user
+decision, 2026-09-16, taken after being shown that hovering is rare and already bounded).
+
+The new rule is one line: inside the landing zone's existing 500 m ring, at or below 25 m above the
+ground, and under 10 m/s. The 25 m deliberately clears the 20 m hover the game commands, because a
+lower ceiling would almost never be met and every delivery would end up waiting out the stall clock —
+the hang this change removes. The 10 m/s is the game's own number, kept unchanged, so exactly one of
+the two gate numbers moved. Nothing waits for ever: the stall clock that has bounded this since
+2026-09-14, 120 seconds within 500 m, now asks for an unload at a higher 40 m ceiling when it expires,
+and a transport still too high for that falls through to the parachute drop and then the recall
+exactly as before.
+
+Each vehicle is set down on clear ground found by the same landing-zone search the mod already uses,
+30 m apart so two vehicles of one load never want the same patch, and on the terrain directly beneath
+the transport when the whole search radius is blocked — awkward ground beats no delivery. The game's
+ramp-clear handshake, which is what stopped one vehicle being dropped onto another, does not apply to
+an aircraft that never touched down, so the spacing is now the release cadence's: one vehicle at a
+time, each waiting for the last to leave the aircraft, with the usual gap. Everything else is kept —
+the damage shield until a vehicle has settled, setting one upright that lands on its side, the
+delivery credit to the picket or the forward base, and the trip home. New setting `Supply /
+UnloadInPlace` (default on) turns the whole thing off and restores the old landing gate without a
+rebuild. New log lines: `unloading in place at … m`, `set down at …: unloaded in place, not landed`,
+`could not land after … s; unloading in place at … m`.
+
+**Your own aircraft losses are now recorded against your own faction.** The line that says how long an
+airframe lasted and what killed it was being written for every faction but filed under whichever
+commander the review loop reached first. In a 38,388-line log all 1,227 of those lines were attributed
+to the enemy and the player's side had none, so the player's transports were completely unmeasured and
+the enemy's loss counts were inflated by the player's. Each tracked airframe now records who owns it
+and each commander reports only its own.
+
+**A strike on a defended target now actually launches.** Four strikes were ordered in the 2026-09-16
+session and one went in — the undefended one. The others sat for many minutes with their attack aircraft
+ready, their escort held and the package stuck at nothing gathered:
+`STRIKE HILLTOP 4 S 2/2 E 2/2 FS-12 A 0 fallback @1500 pkg 0/4`. There were two gathering places. While a
+sortie falls back, the posture sends every aeroplane it holds to a hold point roughly 15 km back toward the
+base, but the package counted arrivals at its FORM-UP point, which is somewhere else entirely. The aircraft
+gathered where they were sent and were counted where they were not, so the count could never rise however
+many the sortie held.
+
+One gathering place per sortie now. Where a sortie gathers right now is one expression every caller reads:
+the hold point while the posture holds it back, the form-up point while it is still forming, the objective
+once it has gone in. The arrival count, the package marker, the `pkg n/m` line and the posture's own hold
+stamp all read it, and a self-check pins the point an aeroplane is SENT to and the point its arrival is
+COUNTED at as the same point. A helicopter is the one exception and is handled as one: the posture never
+pulls a helicopter back, so a helicopter keeps being counted at the form-up point it was actually sent to.
+Because the package assembles where it is held, it goes in on the first review after the hold clears
+instead of flying back to a form-up point it has already left.
+
+**The bar a package has to reach no longer runs away from it.** While falling back, a sortie raises its
+wanted fighters to the hostiles it can see plus a margin, and the go-in test required everything wanted to
+have gathered — so the target grew each time another hostile was tracked: 2 fighters wanted, then 4, then 6,
+against a package of 4, then 6, then 8. The go-in test is now measured against the counts the package was
+ORDERED with, frozen for as long as it is forming. A fall-back may still call for all the reinforcements it
+needs, and the review, the retask and the buy still get them; it just cannot move the target. A genuine
+top-up after a loss is untouched, because the bar counts aircraft that are actually at the gathering point:
+an escort shot down drops the count back below the frozen bar and the package waits for its replacement.
+A demand that SHRINKS does lower the bar, so nothing waits for aircraft the wing will no longer buy.
+
+The rule that a package does not go in while its escort is being held back is unchanged and is now pinned
+from both sides: gathering at the retreat point is not the same as going in from it.
+
 The cheap aeroplanes now earn their keep, two ways (user instruction 2026-09-16: "i also want to see
 increased use of the cheap aircraft", choosing both of the options offered and accepting that more aircraft
 will fly and more will be lost). The T/A-30 Compass costs 22 and the VT-7 Vagrant 29 against the FS-12

@@ -227,24 +227,45 @@ internal sealed partial class CommanderOperationsService
         }
     }
 
-    /// <summary>Aircraft of one sortie that have reached its form-up point — both elements, which
-    /// is what "has everybody arrived" means once a fighter patrol forms up too (user decision
-    /// 2026-09-16). One definition for the forming line and for the marker.</summary>
-    private static int CountAtFormUp(CommanderAirSortie sortie)
+    /// <summary>Aircraft of one sortie that have reached the place it is GATHERING — both elements,
+    /// which is what "has everybody arrived" means once a fighter patrol forms up too (user decision
+    /// 2026-09-16). One definition for the go-in test, the forming line and the marker.</summary>
+    private static int CountGathered(CommanderAirSortie sortie)
     {
-        return CountAtFormUp(sortie.Cas, sortie.FormUpPoint) + CountAtFormUp(sortie.Caps, sortie.FormUpPoint);
+        return CountGathered(sortie, sortie.Cas) + CountGathered(sortie, sortie.Caps);
     }
 
-    private static int CountAtFormUp(List<Aircraft> bound, GlobalPosition formUp)
+    /// <summary>
+    /// Aircraft of one ELEMENT that have reached where they were actually sent. Each airframe is
+    /// measured against its OWN gathering point (<see cref="GatheringPointFor"/>) rather than against
+    /// the sortie's form-up point, because the fall-back posture moves the fixed wings back to the
+    /// fall-back point and leaves the helicopters where they are (design.md,
+    /// air-fallback-posture_20260916 Section 4.6). Counting everybody at the form-up point while the
+    /// posture held them 15 km away is what pinned a defended strike at <c>pkg 0/4</c> for minutes on
+    /// end with every aircraft it needed already up (user report 2026-09-16).
+    /// </summary>
+    private static int CountGathered(CommanderAirSortie sortie, List<Aircraft> bound)
     {
+        // The whole sortie's gathering place, which is every airframe's unless the posture is
+        // holding some of them back. Hoisted because the marker calls this every frame, and asking
+        // each aeroplane whether it is a fixed wing walks its pilots and its weapon stations for an
+        // answer that cannot change the point when nothing is being held back.
+        GlobalPosition common = SortieStation(sortie);
         int count = 0;
         for (int i = 0; i < bound.Count; i++)
         {
             Aircraft aircraft = bound[i];
-            if (aircraft != null
-                && !aircraft.disabled
-                && CommanderGameAccess.HorizontalDistance(
-                    aircraft.transform.GlobalPosition().AsVector3(), formUp.AsVector3()) <= PackageArrivalMeters)
+            if (aircraft == null || aircraft.disabled)
+            {
+                continue;
+            }
+
+            GlobalPosition gathering = sortie.FallingBack
+                ? GatheringPointFor(sortie, IsFixedWingCombatAircraft(aircraft))
+                : common;
+            if (CommanderGameAccess.HorizontalDistance(
+                    aircraft.transform.GlobalPosition().AsVector3(), gathering.AsVector3())
+                <= PackageArrivalMeters)
             {
                 count++;
             }

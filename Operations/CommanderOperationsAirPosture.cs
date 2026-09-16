@@ -740,7 +740,11 @@ internal sealed partial class CommanderOperationsService
             return;
         }
 
-        mission.HoldOverride = sortie.FallingBack ? sortie.FallbackPoint : null;
+        // ONE gathering place per sortie (fix, 2026-09-16): the point stamped here is the point the
+        // arrival count, the go-in test and the marker all read, because all four go through
+        // SortieStation. Writing sortie.FallbackPoint straight onto the mission is exactly how the
+        // two drifted apart and a defended strike sat at `pkg 0/4` with all its aircraft up.
+        mission.HoldOverride = PostureHoldPoint(sortie, fixedWing: true);
         mission.SelfDefenceOnly = sortie.FallingBack;
     }
 

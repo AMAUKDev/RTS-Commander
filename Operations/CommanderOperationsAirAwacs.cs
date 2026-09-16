@@ -649,6 +649,12 @@ internal sealed partial class CommanderOperationsService
                 wanted.HasFormUp = live.HasFormUp;
                 wanted.FormUpFirstArrivalAt = live.FormUpFirstArrivalAt;
                 wanted.FormUpReported = live.FormUpReported;
+                // The go-in bar the package was ordered with (fix, 2026-09-16). Carried for the same
+                // reason the form-up clock is: rebuilding it from this review's demand would hand the
+                // fall-back's call for more fighters straight back to the package as a higher bar,
+                // which is the runaway target this freeze exists to stop.
+                wanted.GoInCasWanted = live.GoInCasWanted;
+                wanted.GoInCapsWanted = live.GoInCapsWanted;
                 // The suppression memory (user decision 2026-09-14): kept while the belt is still
                 // there, dropped the moment it thins out, so the helicopters wait again for a belt
                 // that comes back. The count on `live` is the one the LAST review measured, which is

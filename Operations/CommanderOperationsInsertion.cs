@@ -1464,6 +1464,20 @@ internal sealed partial class CommanderOperationsService
                     Time.time - insertion.NearLandingZoneSince,
                     CommanderSettings.OperationsInsertionStallTimeoutSeconds))
                 {
+                    // The delivery bypass's bounded wait (delivery-bypass_20260916, design section
+                    // 4.2). Before the parachute conversion, ask whether the transport is low enough
+                    // to put its vehicles down where it is. This is what stops "must also be low"
+                    // becoming a new way to hover for ever: the clock that has always bounded the
+                    // hover now bounds the height test too. A refusal falls through to exactly the
+                    // two answers this branch has always given.
+                    if (!insertion.Airdrop
+                        && CommanderSupplyHeliService.Instance?.TryForceUnloadInPlace(hq, insertion.Point) == true)
+                    {
+                        // Its own full window before the recall bites, as the airdrop conversion gets.
+                        insertion.NearLandingZoneSince = Time.time;
+                        continue;
+                    }
+
                     if (!insertion.Airdrop
                         && CommanderSupplyHeliService.Instance?.TryConvertInsertionToAirdrop(hq, insertion.Point) == true)
                     {

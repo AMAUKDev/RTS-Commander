@@ -83,6 +83,14 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         internal string Name = string.Empty;
         internal GlobalPosition LastPosition;
         internal float LastRadarAlt;
+
+        /// <summary>The faction that owns this airframe (delivery-bypass_20260916). The tracker is
+        /// ONE table shared by every commanded faction, and the loss sweep used to drain all of it
+        /// under whichever HQ the review loop happened to reach first — so in a 38,388-line log every
+        /// one of the 1,227 fate lines was written against the enemy and the player's own transports
+        /// had none, which is exactly the telemetry gap the delivery survey could not close. Each
+        /// entry now says whose it is and the sweep reports only its own.</summary>
+        internal FactionHQ? Owner;
     }
 
     private readonly Dictionary<Aircraft, TrackedAirframe> airborneSince = new();

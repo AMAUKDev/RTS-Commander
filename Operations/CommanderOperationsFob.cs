@@ -2653,6 +2653,17 @@ internal sealed partial class CommanderOperationsService
                 else if (HasStalledAtLandingZone(
                     Time.time - flight.NearLandingZoneSince, CommanderSettings.OperationsInsertionStallTimeoutSeconds))
                 {
+                    // The delivery bypass's bounded wait (delivery-bypass_20260916, design section
+                    // 4.2), the twin of the picket insertion's. Quoted with this flight's own slot,
+                    // so a wave unloads the load that could not get down and not the one beside it.
+                    if (!flight.Airdrop
+                        && CommanderSupplyHeliService.Instance?.TryForceUnloadInPlace(
+                            hq, flight.Order.Point, flight.SlotId) == true)
+                    {
+                        flight.NearLandingZoneSince = Time.time;
+                        continue;
+                    }
+
                     if (!flight.Airdrop
                         && CommanderSupplyHeliService.Instance?.TryConvertInsertionToAirdrop(
                             hq, flight.Order.Point, flight.SlotId) == true)

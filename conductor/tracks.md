@@ -27,6 +27,7 @@ Active and completed development tracks.
 | air-fallback-posture_20260916 | Outnumbered fighters fall back, call for help, re-engage at superiority | feature | in-progress | EVALUATE | 2026-09-16 |
 | air-survival-layer_20260916 | Air survival layer: bravery, ammo/fuel check, belt-ahead hold, brake thins the sky | feature | in-progress | PLAN | 2026-09-16 |
 | sortie-commitment_20260916 | Sortie commitment: strength is what is assigned, no hold over our own runway, every kind goes in whole, size scales with the threat | feature | in-progress | EXECUTE | 2026-09-16 |
+| delivery-bypass_20260916 | Delivery bypass: transports unload in place on clear ground instead of landing | feature | in-progress | EXECUTE | 2026-09-16 |
 
 ## Completed Tracks
 

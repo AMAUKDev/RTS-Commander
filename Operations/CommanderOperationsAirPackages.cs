@@ -314,6 +314,9 @@ internal sealed partial class CommanderOperationsService
                 sortie.HasFormUp = false;
                 sortie.FormUpFirstArrivalAt = -1f;
                 sortie.FormUpReported = -1;
+                // The next time this sortie forms up it is a new package and takes a new bar.
+                sortie.GoInCasWanted = -1;
+                sortie.GoInCapsWanted = -1;
                 continue;
             }
 
@@ -327,49 +330,75 @@ internal sealed partial class CommanderOperationsService
                 continue;
             }
 
-            int casAtFormUp = CountAtFormUp(sortie.Cas, formUp);
-            int capAtFormUp = CountAtFormUp(sortie.Caps, formUp);
-            if (sortie.FormUpFirstArrivalAt < 0f && casAtFormUp + capAtFormUp > 0)
+            // Counted where each airframe was actually SENT (fix, 2026-09-16): while the posture
+            // holds the sortie back its fixed wings gather at the fall-back point, and a package
+            // counted at a place none of its aircraft was ever told to fly to never leaves zero.
+            int casGathered = CountGathered(sortie, sortie.Cas);
+            int capGathered = CountGathered(sortie, sortie.Caps);
+            int atGatheringPoint = casGathered + capGathered;
+            if (sortie.FormUpFirstArrivalAt < 0f && atGatheringPoint > 0)
             {
                 sortie.FormUpFirstArrivalAt = Time.time;
             }
 
+            // The bar, frozen at what the package was ORDERED with (fix, 2026-09-16). The fall-back
+            // may call for as many fighters as it needs and the review and the buy will get them, but
+            // the number the package is measured by does not move while it is forming.
+            sortie.GoInCasWanted = PackageGoInBar(sortie.GoInCasWanted, sortie.Wanted);
+            sortie.GoInCapsWanted = PackageGoInBar(sortie.GoInCapsWanted, sortie.CapsWanted);
             float waited = sortie.FormUpFirstArrivalAt < 0f ? -1f : Time.time - sortie.FormUpFirstArrivalAt;
             float timeout = CommanderSettings.PackageFormUpSeconds;
-            if (!PackageGoesIn(
-                    casAtFormUp, sortie.Wanted, capAtFormUp, sortie.CapsWanted, sortie.AradPending, waited, timeout))
+            bool gathered = PackageGoesIn(
+                casGathered,
+                sortie.GoInCasWanted,
+                capGathered,
+                sortie.GoInCapsWanted,
+                sortie.AradPending,
+                waited,
+                timeout);
+            if (!gathered)
             {
                 // Both elements, because a fighter patrol has no strike element at all and would
                 // otherwise report "forming 0/0" for its whole wait (user decision 2026-09-16).
-                int atFormUp = casAtFormUp + capAtFormUp;
-                if (sortie.FormUpReported != atFormUp)
+                if (sortie.FormUpReported != atGatheringPoint)
                 {
-                    sortie.FormUpReported = atFormUp;
+                    sortie.FormUpReported = atGatheringPoint;
                     CommanderAiLog.Note(
                         hq,
-                        $"{sortie.Label}: forming {atFormUp}/{sortie.Wanted + sortie.CapsWanted} at the form-up point"
+                        $"{sortie.Label}: forming {atGatheringPoint}/{SortieGoInTotal(sortie)} at "
+                            + (sortie.FallingBack ? "the hold point" : "the form-up point")
                             + (sortie.AradPending ? ", waiting on its ARAD sortie." : "."));
                 }
 
                 continue;
             }
 
-            if (sortie.FallingBack)
+            if (!PackageLaunches(gathered, sortie.FallingBack))
             {
-                // Its escort is falling back (design.md, air-fallback-posture_20260916 Section 4.3):
-                // the package does not go in behind fighters that have just left. It goes in on the
-                // first review after the escort re-engages.
+                // Its escort is still being held back (design.md, air-fallback-posture_20260916
+                // Section 4.3): the package does not go in behind fighters that have just left.
+                // It is ASSEMBLED at the hold point now, so it goes in on the first review after the
+                // hold clears, with no second journey to a form-up point it has already left behind.
+                if (sortie.FormUpReported != atGatheringPoint)
+                {
+                    sortie.FormUpReported = atGatheringPoint;
+                    CommanderAiLog.Note(
+                        hq,
+                        $"{sortie.Label}: gathered {atGatheringPoint}/{SortieGoInTotal(sortie)} at the hold "
+                            + "point; goes in when its escort re-engages.");
+                }
+
                 continue;
             }
 
             sortie.GoneIn = true;
-            bool complete = casAtFormUp >= sortie.Wanted && capAtFormUp >= sortie.CapsWanted;
+            bool complete = casGathered >= sortie.GoInCasWanted && capGathered >= sortie.GoInCapsWanted;
             CommanderAiLog.Note(
                 hq,
                 complete
-                    ? $"{sortie.Label}: goes in whole ({casAtFormUp + capAtFormUp} aircraft)."
+                    ? $"{sortie.Label}: goes in whole ({atGatheringPoint} aircraft)."
                     : $"{sortie.Label}: goes in after {timeout:0} s wait "
-                        + $"({casAtFormUp + capAtFormUp}/{sortie.Wanted + sortie.CapsWanted}).");
+                        + $"({atGatheringPoint}/{SortieGoInTotal(sortie)}).");
         }
     }
 
@@ -816,6 +845,75 @@ internal sealed partial class CommanderOperationsService
         return sortie.HasFormUp && !sortie.GoneIn;
     }
 
+    /// <summary>
+    /// Where this sortie is GATHERING right now - the one answer every caller reads (Reuse rule 4).
+    /// The fall-back point while the posture is holding the sortie back, the form-up point while it
+    /// is still forming, else the objective itself.
+    /// <para>
+    /// User report 2026-09-16: four strikes were ordered, one went in, and the defended ones sat at
+    /// <c>pkg 0/4</c> for many minutes with every aircraft they needed already up. The posture was
+    /// sending those aircraft to the fall-back point and the package was counting arrivals at the
+    /// form-up point, so the aeroplanes gathered where they were sent and were counted where they
+    /// were not, and the count could never rise.
+    /// </para>
+    /// <para>
+    /// MOVED here from <c>CommanderOperationsAirMarkers.cs</c> on 2026-09-16, where it had been added
+    /// the same day for the marker's phase text alone. The arrival count, the marker and the posture's
+    /// own hold stamp (<see cref="PostureHoldPoint"/>) now all read this one expression.
+    /// </para>
+    /// <para>
+    /// The Air Command mission AREA the task sync writes is deliberately NOT this: it stays the
+    /// form-up point and the hold stamp is layered over it, so the moment the hold clears every
+    /// airframe is already back on its form-up orbit without a new assignment.
+    /// </para>
+    /// </summary>
+    private static GlobalPosition SortieStation(CommanderAirSortie sortie)
+    {
+        return sortie.FallingBack
+            ? sortie.FallbackPoint
+            : SortieHoldsAtFormUp(sortie) ? sortie.FormUpPoint : sortie.Center;
+    }
+
+    /// <summary>Whether the fall-back posture moves this airframe at all, pure: only a fixed-wing
+    /// combat aircraft, and only while its sortie is holding back. A helicopter is never pulled back
+    /// (design.md, air-fallback-posture_20260916 Section 4.6), so it keeps waiting where the sortie
+    /// first sent it. One definition for the stamp and for the count.</summary>
+    internal static bool PostureMovesAirframe(bool fallingBack, bool fixedWing)
+    {
+        return fallingBack && fixedWing;
+    }
+
+    /// <summary>Where ONE bound airframe of this sortie gathers: the sortie's own gathering place when
+    /// the posture moves it, and the form-up point - or the objective, once the package has gone in -
+    /// when it does not.</summary>
+    private static GlobalPosition GatheringPointFor(CommanderAirSortie sortie, bool fixedWing)
+    {
+        return PostureMovesAirframe(sortie.FallingBack, fixedWing)
+            ? SortieStation(sortie)
+            : SortieHoldsAtFormUp(sortie) ? sortie.FormUpPoint : sortie.Center;
+    }
+
+    /// <summary>
+    /// The hold point the posture stamps on one airframe of this sortie, or null when it holds none.
+    /// This is the seam the 2026-09-16 stall came through, so both sides read the one expression:
+    /// <c>ApplyPosture</c> stamps what this returns and <see cref="GatheringPointFor"/> counts against
+    /// the same thing, and <see cref="CheckSortieGathering"/> pins the two equal at load.
+    /// </summary>
+    internal static GlobalPosition? PostureHoldPoint(CommanderAirSortie sortie, bool fixedWing)
+    {
+        return PostureMovesAirframe(sortie.FallingBack, fixedWing) ? SortieStation(sortie) : null;
+    }
+
+    /// <summary>The aircraft a forming sortie must gather in total before it goes in: the FROZEN bar
+    /// once it has one, this review's demand before its first review has run. What the <c>pkg n/m</c>
+    /// line and the package marker both print, so a reader sees the same target the go-in test is
+    /// actually waiting for.</summary>
+    private static int SortieGoInTotal(CommanderAirSortie sortie)
+    {
+        return PackageGoInBar(sortie.GoInCasWanted, sortie.Wanted)
+            + PackageGoInBar(sortie.GoInCapsWanted, sortie.CapsWanted);
+    }
+
     /// <summary>Step the form-up search walks back toward the base when the point it wanted has the
     /// enemy inside the standoff: 2 km, a fraction of the 20 km standoff so the point lands as far
     /// forward as the standoff allows, and coarse enough that the search is at most six probes on the
@@ -963,5 +1061,119 @@ internal sealed partial class CommanderOperationsService
         }
 
         return best;
+    }
+
+    /// <summary>Two gathering points are the same place, for the self-check: within a metre of each
+    /// other horizontally.</summary>
+    private static bool SamePlace(GlobalPosition a, GlobalPosition b)
+    {
+        return CommanderGameAccess.HorizontalDistance(a.AsVector3(), b.AsVector3()) < 1f;
+    }
+
+    /// <summary>
+    /// ONE gathering place per sortie, and a go-in bar that does not run away from the package
+    /// (user report 2026-09-16: four strikes ordered, one went in, and the defended ones sat at
+    /// <c>pkg 0/4</c>, then <c>0/6</c>, then <c>0/8</c> with their aircraft ready and their escort
+    /// held). Registered in <c>SelfCheck</c> beside <c>CheckAirPosture</c>.
+    /// </summary>
+    private static void CheckSortieGathering(List<string> failures)
+    {
+        GlobalPosition objective = new GlobalPosition(0f, 1000f, 0f);
+        GlobalPosition formUp = new GlobalPosition(12000f, 1000f, 0f);
+        GlobalPosition fallback = new GlobalPosition(30000f, 1000f, 0f);
+        CommanderAirSortie forming = new()
+        {
+            Kind = CommanderSortieKind.Strike,
+            Center = objective,
+            FormUpPoint = formUp,
+            FallbackPoint = fallback,
+            HasFormUp = true,
+            GoneIn = false,
+            HoldReason = CommanderAirHoldReason.None,
+        };
+        CommanderAirSortie held = new()
+        {
+            Kind = CommanderSortieKind.Strike,
+            Center = objective,
+            FormUpPoint = formUp,
+            FallbackPoint = fallback,
+            HasFormUp = true,
+            GoneIn = false,
+            HoldReason = CommanderAirHoldReason.Outnumbered,
+        };
+        CommanderAirSortie goneIn = new()
+        {
+            Kind = CommanderSortieKind.Strike,
+            Center = objective,
+            FormUpPoint = formUp,
+            FallbackPoint = fallback,
+            HasFormUp = false,
+            GoneIn = true,
+            HoldReason = CommanderAirHoldReason.None,
+        };
+
+        Expect(failures, "a package still forming gathers at its form-up point", SamePlace(SortieStation(forming), formUp), true);
+        Expect(
+            failures,
+            "a package the posture is holding back gathers at the hold point, not at its form-up point",
+            SamePlace(SortieStation(held), fallback),
+            true);
+        Expect(failures, "a package that has gone in gathers over its objective", SamePlace(SortieStation(goneIn), objective), true);
+
+        // THE regression this fix exists to stop coming back: the place a sortie's aircraft are SENT
+        // and the place its arrivals are COUNTED are one place. When they were two, a defended strike
+        // never rose above zero gathered however many aircraft it held.
+        GlobalPosition? stamped = PostureHoldPoint(held, fixedWing: true);
+        Expect(
+            failures,
+            "a held sortie's aircraft are sent to the same point its arrivals are counted at",
+            stamped.HasValue && SamePlace(stamped.Value, GatheringPointFor(held, fixedWing: true)),
+            true);
+        Expect(
+            failures,
+            "and that one point is the hold point, which is where the posture actually flies them",
+            stamped.HasValue && SamePlace(stamped.Value, fallback),
+            true);
+        Expect(failures, "a sortie that is not holding stamps no hold on its aircraft", PostureHoldPoint(forming, fixedWing: true).HasValue, false);
+        Expect(
+            failures,
+            "a helicopter is never pulled back, so it is counted at the form-up point it was sent to",
+            SamePlace(GatheringPointFor(held, fixedWing: false), formUp),
+            true);
+        Expect(failures, "no hold is stamped on a helicopter either", PostureHoldPoint(held, fixedWing: false).HasValue, false);
+        Expect(failures, "the posture moves a fixed wing of a sortie that is holding back", PostureMovesAirframe(true, true), true);
+        Expect(failures, "the posture moves nothing while the sortie flies its objective", PostureMovesAirframe(false, true), false);
+        Expect(failures, "the posture never moves a helicopter", PostureMovesAirframe(true, false), false);
+
+        // The go-in bar: frozen at what the package was ordered with.
+        Expect(failures, "a package keeps the escort bar it was ordered with when the fall-back calls for more", PackageGoInBar(2, 6), 2);
+        Expect(failures, "a package with no bar yet takes this review's demand", PackageGoInBar(-1, 4), 4);
+        Expect(failures, "a bar follows a demand that has shrunk, so nothing waits for aircraft the wing will not buy", PackageGoInBar(4, 2), 2);
+        Expect(failures, "a bar of no escorts stays at none", PackageGoInBar(0, 5), 0);
+        Expect(failures, "a negative demand never makes a negative bar", PackageGoInBar(-1, -3), 0);
+
+        // The reported bug in one line and its fix in the next: a package ordered with two escorts,
+        // both of them gathered, while the fall-back has since called for six.
+        Expect(
+            failures,
+            "measured against the raised demand, a package that has everything it was ordered with still waits",
+            PackageGoesIn(2, 2, 2, 6, false, 10f, 180f),
+            false);
+        Expect(
+            failures,
+            "measured against the frozen bar it goes in, whatever the fall-back has since called for",
+            PackageGoesIn(2, PackageGoInBar(2, 2), 2, PackageGoInBar(2, 6), false, 10f, 180f),
+            true);
+        Expect(
+            failures,
+            "an escort lost after the bar was set puts the package back to waiting for its replacement",
+            PackageGoesIn(2, PackageGoInBar(2, 2), 1, PackageGoInBar(2, 6), false, 10f, 180f),
+            false);
+
+        // Gathering at the retreat point is not the same as going in from it, both directions.
+        Expect(failures, "a gathered package whose escort is still held back does not go in", PackageLaunches(true, true), false);
+        Expect(failures, "a gathered package goes in on the first review after the hold clears", PackageLaunches(true, false), true);
+        Expect(failures, "a package that has not gathered does not go in", PackageLaunches(false, false), false);
+        Expect(failures, "a package that has not gathered does not go in while it is held either", PackageLaunches(false, true), false);
     }
 }

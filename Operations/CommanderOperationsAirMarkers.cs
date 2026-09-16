@@ -402,8 +402,11 @@ internal sealed partial class CommanderOperationsService
         }
         else if (isLocal && sortie.HasFormUp && !sortie.GoneIn)
         {
+            // Wherever the sortie is actually gathering, which is the fall-back point while the
+            // posture holds it back (2026-09-16). Drawing the package on its form-up point while its
+            // aircraft were 15 km away was half of how the stall stayed invisible.
             DrawAirMarkerAt(
-                camera, sortie.FormUpPoint, label, color,
+                camera, SortieStation(sortie), label, color,
                 MarkerWorldSize, MarkerMapSize, fullscreenMap, anyMap, map);
         }
 
@@ -881,8 +884,11 @@ internal sealed partial class CommanderOperationsService
                     // an escort, whatever phase the package thinks it is in.
                     escortOnly: sortie.Wanted > 0 && sortie.Cas.Count == 0 && sortie.Caps.Count > 0,
                     formingAtFormUp: forming,
-                    atFormUp: forming ? CountAtFormUp(sortie) : 0,
-                    casWanted: sortie.Wanted,
+                    atFormUp: forming ? CountGathered(sortie) : 0,
+                    // The FROZEN bar, not this review's demand (2026-09-16): the marker has to show
+                    // the number the go-in test is actually waiting for, or the player reads a target
+                    // that keeps moving while the package stands still.
+                    gatherWanted: SortieGoInTotal(sortie),
                     escortMissing: sortie.CapsWanted > 0 && sortie.Caps.Count == 0,
                     onStation: sortie.GoneIn && bound > 0)),
             AirMarkerFlags(
@@ -909,16 +915,9 @@ internal sealed partial class CommanderOperationsService
                 missionPhase);
     }
 
-    /// <summary>Where a sortie's airframes are actually sent right now: the fallback point while the
-    /// posture holds them back (user report 2026-09-16: a package holding 15 km back read "En route to
-    /// HILLTOP 4 — CAP 1/8"), the form-up point while a package forms, else the objective. One
-    /// definition for the lead's phase and each airframe's (Reuse rule 4).</summary>
-    private static GlobalPosition SortieStation(CommanderAirSortie sortie)
-    {
-        return sortie.FallingBack
-            ? sortie.FallbackPoint
-            : SortieHoldsAtFormUp(sortie) ? sortie.FormUpPoint : sortie.Center;
-    }
+    // SortieStation MOVED to Operations/CommanderOperationsAirPackages.cs on 2026-09-16, beside the
+    // gathering rules it now also answers for: the arrival count, the go-in test and the posture's own
+    // hold stamp all read it, so a sortie can never gather in one place and be counted in another.
 
     /// <summary>The holding-back words: what the sortie is waiting for. Outnumbered carries the last
     /// "ours v hostiles" the posture logged; the belt hold says what it is waiting for instead, which
@@ -990,7 +989,7 @@ internal sealed partial class CommanderOperationsService
         bool escortOnly,
         bool formingAtFormUp,
         int atFormUp,
-        int casWanted,
+        int gatherWanted,
         bool escortMissing,
         bool onStation)
     {
@@ -1018,7 +1017,7 @@ internal sealed partial class CommanderOperationsService
         {
             return escortMissing
                 ? "Holding for escort"
-                : $"Forming at form-up ({atFormUp}/{casWanted})";
+                : $"Forming at form-up ({atFormUp}/{gatherWanted})";
         }
 
         return onStation ? "On station" : "Going in";

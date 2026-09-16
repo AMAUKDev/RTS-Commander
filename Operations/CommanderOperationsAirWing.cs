@@ -217,6 +217,19 @@ internal sealed partial class CommanderOperationsService
         /// the line prints once per change rather than once per review.</summary>
         internal int FormUpReported = -1;
 
+        /// <summary>
+        /// The strike and escort counts this package's go-in test must see gathered — the numbers it
+        /// was ORDERED with, frozen for as long as it is forming (user report 2026-09-16: a defended
+        /// strike read <c>pkg 0/4</c>, then <c>0/6</c>, then <c>0/8</c>, because the fall-back posture
+        /// raised <see cref="CapsWanted"/> every time it saw another hostile and the bar ran away from
+        /// the package). Negative until the first review gives the sortie a form-up point; set through
+        /// <see cref="PackageGoInBar"/>, which is where the rule and its reasons live. Carried across
+        /// the review by the reconcile, like the form-up clock.
+        /// </summary>
+        internal int GoInCasWanted = -1;
+
+        internal int GoInCapsWanted = -1;
+
         /// <summary>Set by the reconcile when this review's demand entry was matched onto a sortie
         /// that already existed. What tells an ARAD belt that has just been found from one that has
         /// been sitting there for ten minutes, so it is announced once rather than every review.</summary>
@@ -698,6 +711,39 @@ internal sealed partial class CommanderOperationsService
         }
 
         return casAtFormUp >= casWanted && capAtFormUp >= capWanted;
+    }
+
+    /// <summary>
+    /// The number of aircraft of one element a forming package must gather before it goes in, pure
+    /// (user report 2026-09-16). The number the package was ORDERED with, frozen while it forms: a
+    /// fall-back is free to call for all the reinforcements it likes, but it must not move the target
+    /// the package has to reach, or the bar grows away from the package every time another hostile is
+    /// tracked. A demand that has since SHRUNK does lower the bar, because waiting for aircraft the
+    /// wing will no longer buy is the same stall by another route. A negative
+    /// <paramref name="ordered"/> means this is the first review to give the package a bar, and it
+    /// takes the demand as it stands.
+    /// <para>
+    /// A genuine top-up after a loss is untouched. The bar counts aircraft AT the gathering point, so
+    /// an escort shot down drops the count back below the frozen bar and the package waits again —
+    /// and the replacement is still ordered, because the sizing, the retask and the buy all read
+    /// <see cref="CommanderAirSortie.CapsWanted"/>, which the fall-back may raise as far as it needs.
+    /// </para>
+    /// </summary>
+    internal static int PackageGoInBar(int ordered, int wantedNow)
+    {
+        int now = Mathf.Max(0, wantedNow);
+        return ordered < 0 ? now : Mathf.Min(ordered, now);
+    }
+
+    /// <summary>
+    /// Whether a package that has GATHERED actually launches this review, pure: never while its
+    /// escort is still being held back (design.md, air-fallback-posture_20260916 Section 4.3).
+    /// Gathering at the retreat point and going in from it are two different things — the package
+    /// assembles while it is held and leaves on the first review after the hold clears.
+    /// </summary>
+    internal static bool PackageLaunches(bool gathered, bool fallingBack)
+    {
+        return gathered && !fallingBack;
     }
 
     /// <summary>

@@ -538,6 +538,17 @@ internal static class CommanderSettings
     // operations reviews. Zero disables the check. Config-only.
     internal static float OperationsInsertionStallTimeoutSeconds { get => Get("Operations", "InsertionStallTimeoutSeconds", 120f); set => Set("Operations", "InsertionStallTimeoutSeconds", value); }
 
+    // Whether a cargo transport unloads its vehicles in place instead of trying to touch down
+    // (delivery-bypass_20260916, user decision 2026-09-16: bypass EVERY delivery, not only stalled
+    // ones). Default on. It exists as a setting rather than a constant because this is the delivery
+    // path with the worst incident history in the repository — a hand-off crash that stopped all
+    // transports spawning, and a "no transports spawning at all" regression — so the developer must
+    // be able to fall back to the game's own landing gate from the settings window without waiting
+    // for a rebuild. Off restores the behaviour of 2026-09-15 exactly: the game's own gate
+    // (radar altitude under 2 m and speed under 10 m/s) and the stall clock's parachute fallback.
+    // Config-only.
+    internal static bool SupplyUnloadInPlaceEnabled { get => Get("Supply", "UnloadInPlace", true); set => Set("Supply", "UnloadInPlace", value); }
+
     // How far from one of its own vehicle depots a commander will send ground vehicles at all:
     // 20 km (reach-and-points, user decision 2026-09-14, "only spawn units for objectives closer
     // than some km"). Past this a control point gets no forward base, no road picket and no platoon
@@ -1004,6 +1015,7 @@ internal static class CommanderSettings
         _ = OperationsLzClearRadiusMeters;
         _ = OperationsLzSearchRadiusMeters;
         _ = OperationsInsertionStallTimeoutSeconds;
+        _ = SupplyUnloadInPlaceEnabled;
         _ = DepotReachMeters;
         _ = FobEnabled;
         _ = FobMinDepotDistanceMeters;

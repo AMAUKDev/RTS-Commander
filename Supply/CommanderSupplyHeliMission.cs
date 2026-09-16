@@ -1608,6 +1608,12 @@ internal sealed partial class CommanderSupplyHeliService
         }
         mission.LastTransportOverrideFixedTime = Time.fixedTime;
 
+        // The delivery bypass (Supply/CommanderSupplyHeliUnload.cs): a transport that has arrived low
+        // and roughly still unloads where it is instead of chasing the game's own touchdown gate.
+        // It rides here, above the three-second landing-spot throttle below, because the release
+        // cadence between vehicles needs a look every fixed frame.
+        TickUnloadInPlace(state, aircraft, mission);
+
         float lastCheck = LastLandingSpotCheckField?.GetValue(state) is float value ? value : 0f;
         bool routeNeedsUpdate = mission.RouteTransitActive
             || mission.ApproachRouteIndex < mission.ApproachRoute.Count;
@@ -1851,7 +1857,11 @@ internal sealed partial class CommanderSupplyHeliService
                 && (HasDeployableCargo(pilot.aircraft)
                     || (mission.InsertionPoint != null && !mission.ReturnIssued));
         }
+        // A bypassed insertion is held past its last release until the return flight has been
+        // issued, exactly as the drop run above is: the game hands an emptied transport straight to
+        // its combat state, which would take the airframe before the override could send it home.
         return mission.CargoClearancePending
+            || (mission.UnloadInPlace && mission.InsertionPoint != null && !mission.ReturnIssued)
             || (mission.LastCargoReleasedAt > 0f
                 && Time.timeSinceLevelLoad - mission.LastCargoReleasedAt < 8f);
     }
@@ -1870,7 +1880,18 @@ internal sealed partial class CommanderSupplyHeliService
         }
 
         // Under the insertion shield from this moment until it has settled (Supply/CommanderSupplyHeliShield.cs).
-        ShieldDeliveredCargo(cargoUnit, mission);
+        // A bypassed load is also told WHERE to go: the shield sweep sets it down on clear ground
+        // near the transport on its next tick (delivery-bypass_20260916, design section 4.3).
+        GlobalPosition? placeAt = null;
+        if (mission.UnloadInPlace
+            && cargoUnit is GroundVehicle
+            && TryChooseUnloadGround(aircraft, mission, mission.UnloadPlacedCount, out GlobalPosition unloadGround))
+        {
+            placeAt = unloadGround;
+            mission.UnloadPlacedCount++;
+        }
+
+        ShieldDeliveredCargo(cargoUnit, mission, placeAt);
 
         mission.ActivatedCargoCount++;
         if (IsSamLogisticsMission(mission)
@@ -1925,7 +1946,12 @@ internal sealed partial class CommanderSupplyHeliService
                 return;
             }
 
-            if (cargoStillOnAircraft && !mission.Airdrop)
+            // The ramp-clear handshake is the one part of a landing delivery the bypass genuinely
+            // breaks: it exists to drive the first vehicle clear before the second is released, and
+            // there is no ramp on the ground to clear when the transport never touched down. A
+            // bypassed load therefore takes the same branch an airdrop takes, and the spacing is the
+            // release cadence's instead (design section 4.5).
+            if (cargoStillOnAircraft && !mission.Airdrop && !mission.UnloadInPlace)
             {
                 mission.CargoClearancePending = true;
                 CommanderPlugin.Instance?.StartCoroutine(ClearGroundVehicleFromRamp(aircraft, groundVehicle, mission));
@@ -1944,6 +1970,7 @@ internal sealed partial class CommanderSupplyHeliService
         }
         else if (cargoStillOnAircraft
             && !mission.Airdrop
+            && !mission.UnloadInPlace
             && !mission.CargoClearancePending)
         {
             mission.CargoClearancePending = true;
@@ -2653,9 +2680,14 @@ internal sealed partial class CommanderSupplyHeliService
 
     private static void UpdateDeliveryCompleted(Aircraft aircraft, CargoMission mission)
     {
-        if (mission.ActivatedCargoCount >= mission.ExpectedCargoLoads
-            && !HasDeployableCargo(aircraft)
-            && !mission.CargoClearancePending)
+        // The rule itself is DeliveryComplete in Supply/CommanderCargoUnloadRule.cs (Reuse rule 4):
+        // the delivery bypass has to be able to check at load that a bypassed load, which runs no
+        // ramp clearance at all, still closes its order.
+        if (CommanderCargoUnloadRule.DeliveryComplete(
+                mission.ActivatedCargoCount,
+                mission.ExpectedCargoLoads,
+                HasDeployableCargo(aircraft),
+                mission.CargoClearancePending))
         {
             mission.DeliveryCompleted = true;
         }
@@ -3125,6 +3157,22 @@ internal sealed partial class CommanderSupplyHeliService
         internal float NextCargoReleaseAt { get; set; }
         internal float LastCargoReleasedAt { get; set; }
         internal bool CargoClearancePending { get; set; }
+
+        /// <summary>True once this flight has begun unloading its vehicles in place instead of
+        /// landing (delivery-bypass_20260916). LATCHED: set once and never cleared, because a
+        /// transport that has started putting vehicles on the ground must not change its mind
+        /// because it drifted a few metres or gained a little height between releases.</summary>
+        internal bool UnloadInPlace { get; set; }
+
+        /// <summary>True once this flight has already said that no clear ground could be found near
+        /// the transport, so the line is written once per flight rather than once per vehicle.</summary>
+        internal bool UnloadGroundFallbackLogged { get; set; }
+
+        /// <summary>How many vehicles this flight has already set down in place, which is what gives
+        /// each one its own patch of ground (delivery-bypass_20260916). Separate from
+        /// <see cref="ReleasedCargoCount"/> because a release is not a placement: only a vehicle the
+        /// bypass actually placed advances this.</summary>
+        internal int UnloadPlacedCount { get; set; }
         internal bool Cancelled { get; set; }
         internal float LandingUnloadAt { get; set; }
         internal bool VerticalDepartureActive { get; set; }

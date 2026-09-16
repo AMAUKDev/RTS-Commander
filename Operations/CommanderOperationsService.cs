@@ -1950,6 +1950,7 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         CheckAirMobile(failures);
         CheckLogistics(failures);
         CheckAirPosture(failures);
+        CheckSortieGathering(failures);
         CheckSurvival(failures);
         CheckReseat(failures);
 
