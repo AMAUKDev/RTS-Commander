@@ -3164,6 +3164,11 @@ internal sealed partial class CommanderSupplyHeliService
         /// because it drifted a few metres or gained a little height between releases.</summary>
         internal bool UnloadInPlace { get; set; }
 
+        /// <summary>Scaled <c>Time.timeSinceLevelLoad</c> this flight began unloading in place, so a
+        /// flight that has latched but not yet fired a mount still reads as making progress. Zero
+        /// until it latches.</summary>
+        internal float UnloadStartedAt { get; set; }
+
         /// <summary>True once this flight has already said that no clear ground could be found near
         /// the transport, so the line is written once per flight rather than once per vehicle.</summary>
         internal bool UnloadGroundFallbackLogged { get; set; }

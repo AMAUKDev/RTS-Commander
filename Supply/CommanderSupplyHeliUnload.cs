@@ -102,6 +102,7 @@ internal sealed partial class CommanderSupplyHeliService
     private static void BeginUnloadInPlace(Aircraft aircraft, CargoMission mission, string line)
     {
         mission.UnloadInPlace = true;
+        mission.UnloadStartedAt = Time.timeSinceLevelLoad;
         // Opened here as well as by the engine: firing a mount springs its own bay doors, but a load
         // of two then waits on a ramp that is still travelling, and the doors are what the release
         // cadence's gap is for. The landing path opens them the same way for a logistics run.
@@ -141,9 +142,17 @@ internal sealed partial class CommanderSupplyHeliService
 
             if (mission.UnloadInPlace)
             {
-                // Already unloading: say yes so the caller gives it another window rather than
-                // converting a flight that is in the middle of putting vehicles on the ground.
-                return true;
+                // Already unloading. Yes while it is still putting vehicles out, so the caller gives
+                // it another window rather than converting a flight mid-unload — a normal unload can
+                // easily still be running when the clock that started on arrival expires. No once it
+                // has gone quiet, because saying yes for ever would reset the stall clock for ever
+                // and rebuild the hang this track exists to remove, one layer up. A no hands the
+                // flight to the parachute drop and then the recall, the same rescue every other
+                // stuck flight gets.
+                return CommanderCargoUnloadRule.UnloadIsProgressing(
+                    Time.timeSinceLevelLoad,
+                    Mathf.Max(mission.UnloadStartedAt, mission.LastCargoReleasedAt),
+                    CommanderCargoUnloadRule.UnloadProgressGraceSeconds);
             }
 
             float metres = CommanderGameAccess.HorizontalDistance(
