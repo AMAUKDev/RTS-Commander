@@ -1,4 +1,4 @@
-﻿# Ground Control (RTS)
+﻿# RTS // dont use my mod name
 
 A BepInEx mod for **Nuclear Option** that adds RTS-style command gameplay on top of the base
 game: a free camera, unit selection, orders, group control, ground/naval production and an
