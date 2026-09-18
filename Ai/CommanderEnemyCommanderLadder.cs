@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -477,7 +477,7 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             // Checked per buy, not once: the wing's other launches this same review (rung 2's sortie
             // buys run after this) and the player's own launches all eat the same ceiling.
-            if (CountAirborne(hq) >= CommanderOperationsService.EffectiveAirborneCeiling(hq))
+            if (!CommanderOperationsService.AirBuyAllowed(hq, standingPatrol: false))
             {
                 ceilingBlocked = true;
                 break;

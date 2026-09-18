@@ -200,9 +200,20 @@ internal sealed class CommanderStateStore : ICommanderTickPersistent, ICommander
 
     private static string GetSnapshotPath(string missionName)
     {
+        return StatePathFor(missionName, ".json");
+    }
+
+    /// <summary>
+    /// Where a per-mission state file lives: one folder, one sanitized mission name, one suffix.
+    /// Extracted from <see cref="GetSnapshotPath"/> behaviour-neutrally when the strategic save
+    /// became the second file written there (Reuse rule 5), so the folder and the name sanitiser
+    /// have one definition and the two stores can never disagree about where they put things.
+    /// </summary>
+    internal static string StatePathFor(string missionName, string suffix)
+    {
         return Path.Combine(
             Path.Combine(Application.persistentDataPath, "CommanderState"),
-            SanitizeFileName(missionName) + ".json");
+            SanitizeFileName(missionName) + suffix);
     }
 
     private static string SanitizeFileName(string name)

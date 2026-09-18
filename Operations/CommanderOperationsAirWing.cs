@@ -185,6 +185,45 @@ internal sealed partial class CommanderOperationsService
         /// <summary>What this sortie is for (design.md, smarter-air-wing_20260914).</summary>
         internal CommanderSortieKind Kind = CommanderSortieKind.Objective;
 
+        /// <summary>
+        /// True only for fighters circling a point or a platoon because hostile aircraft were
+        /// tracked near it, with nothing else making it an objective — what <c>AddCapDemand</c>
+        /// posts. These, and only these, are rationed by <c>CommanderSettings.AirPatrolReserve</c>
+        /// (air-ceiling_20260918 §4 decisions C and D).
+        /// <para>
+        /// Rationing the BUY alone would not have protected anything, and the review of this track
+        /// proved it: a patrol refused funding simply took its fighters off an escort by retask
+        /// instead. Two other rules carry the guarantee with this one — the demand walk passes over a
+        /// closed patrol so the escort behind it wins the turn
+        /// (<c>TryGetAirDemand</c>), and <see cref="IsTransportEscort"/> keeps an escort off the
+        /// retask source list. Any one of the three alone leaks.
+        /// </para>
+        /// <para>
+        /// A marker rather than a test on <see cref="Kind"/>, because a lift's escort, a platoon's
+        /// escort and a standing patrol are ALL <see cref="CommanderSortieKind.Cap"/> and were told
+        /// apart only by their printed label. Deciding what a commander may buy by comparing display
+        /// text is a rule that breaks silently the day somebody rewords a label.
+        /// </para>
+        /// </summary>
+        internal bool IsStandingPatrol;
+
+        /// <summary>
+        /// True for a sortie whose job is to escort a transport — a forward-base lift's cover
+        /// (<c>AddLiftCoverDemand</c>) or a picket insertion's escort (<c>AddEscortDemand</c>).
+        /// Such a sortie is never stripped to reinforce a contact elsewhere: the escort exists for
+        /// the ten minutes the transport is in the air, and the contact can have the next buy.
+        /// <para>
+        /// Added 2026-09-18 with the reserved block, because the review of that work found the rule
+        /// was being applied by comparing the printed label against the text "LIFT ESCORT" — which
+        /// covered the forward-base lift and silently missed the picket insertion escort, whose
+        /// label reads "escort to &lt;point&gt;". A patrol the reserve refused to FUND was therefore
+        /// taking its fighters off an insertion escort by retask instead, which is the same loss by
+        /// a different route (the incident the label test was written for, 2026-09-15: eighteen
+        /// escorts taken off transports in one hour, the transports dying alone short of the zone).
+        /// </para>
+        /// </summary>
+        internal bool IsTransportEscort;
+
         /// <summary>Whether this sortie's CAS should be flown by attack helicopters (Section 2):
         /// forward bases, pickets and platoons in contact want rotary, attacks and pre-emptive
         /// cover want jets. Read by the buy, not by the binding — an owned jet still fills a rotary

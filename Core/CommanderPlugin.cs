@@ -41,11 +41,16 @@ public sealed class CommanderPlugin : BaseUnityPlugin
         CommanderStrategicPointService.SelfCheck();
         CommanderOperationsService.SelfCheck();
         CommanderAirCommandService.SelfCheck();
+        CommanderAirLaunchFacility.SelfCheck();
         CommanderBuildPreview.SelfCheck();
         CommanderCameraTuning.SelfCheck();
         CommanderUiScale.SelfCheck();
         CommanderUiTheme.SelfCheck();
+        CommanderAiLog.SelfCheck();
+        CommanderAiLogUi.SelfCheck();
         CommanderStateStore.SelfCheck();
+        CommanderStrategicSaveStore.SelfCheck();
+        CommanderHealthDiagnostics.SelfCheck();
         modeController = gameObject.AddComponent<CommanderModeController>();
         Logger.LogInfo($"{PluginInfo.Name} {PluginInfo.Version} loaded");
     }

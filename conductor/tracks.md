@@ -28,6 +28,10 @@ Active and completed development tracks.
 | air-survival-layer_20260916 | Air survival layer: bravery, ammo/fuel check, belt-ahead hold, brake thins the sky | feature | in-progress | PLAN | 2026-09-16 |
 | sortie-commitment_20260916 | Sortie commitment: strength is what is assigned, no hold over our own runway, every kind goes in whole, size scales with the threat | feature | in-progress | EXECUTE | 2026-09-16 |
 | delivery-bypass_20260916 | Delivery bypass: transports unload in place on clear ground instead of landing | feature | in-progress | EXECUTE | 2026-09-16 |
+| strategic-save_20260917 | Strategic save and load: points, forward bases and a war chest survive a mission restart | feature | implemented-pending-game-verification | GAME_VERIFICATION | 2026-09-17 |
+| unit-economy_20260918 | Unit economy: idle reserve cashed in, smaller garrisons, a ground ceiling, quiet ground retired | feature | in-progress | EXECUTE | 2026-09-18 |
+| air-ceiling_20260918 | Air ceiling: a smaller wing that still flies packages, escorts and transports | feature | implemented-pending-game-verification | GAME_VERIFICATION | 2026-09-18 |
+| concurrent-attacks_20260918 | Concurrent attacks: several pushes at once, each with its own air | feature | implemented-pending-game-verification | GAME_VERIFICATION | 2026-09-18 |
 
 ## Completed Tracks
 

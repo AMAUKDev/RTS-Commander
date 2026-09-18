@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -1399,14 +1399,28 @@ internal sealed partial class CommanderOperationsService
 
     private static bool HasMissionFor(OperationsState state, CommanderStrategicPoint point)
     {
+        return TryFindMissionFor(state, point, out _);
+    }
+
+    /// <summary>
+    /// The mission this commander already has on <paramref name="point"/>, whatever its kind. The
+    /// walk was <see cref="HasMissionFor"/>'s alone until 2026-09-18, when the strategic load's
+    /// garrison placement needed the mission itself rather than a yes/no, so the body moved here and
+    /// the yes/no became one line of it (Reuse rule 5, behaviour-neutral).
+    /// </summary>
+    private static bool TryFindMissionFor(
+        OperationsState state, CommanderStrategicPoint point, out CommanderOperationsMission? mission)
+    {
         for (int i = 0; i < state.Missions.Count; i++)
         {
             if (ReferenceEquals(state.Missions[i].Point, point))
             {
+                mission = state.Missions[i];
                 return true;
             }
         }
 
+        mission = null;
         return false;
     }
 
@@ -2740,9 +2754,9 @@ internal sealed partial class CommanderOperationsService
         Expect(failures, "a short platoon moves out once it has waited long enough", IsReadyToMoveOut(4, 6, 180f, 180f), true);
         Expect(failures, "one short picket withholds the pool from platoon formation", PicketsNeedThePool(1, 0), true);
         Expect(failures, "a forward base nobody holds yet gets no truck", ForwardBaseWantsTruck(0), false);
-        Expect(failures, "twenty pooled vehicles over a cap of twelve sell eight", PoolSurplusToSell(20, 12), 8);
-        Expect(failures, "a pool at its cap sells nothing", PoolSurplusToSell(12, 12), 0);
-        Expect(failures, "a zero cap disables the sale", PoolSurplusToSell(50, 0), 0);
+        // The three PoolSurplusToSell cases that stood here went with the pool cap the idle-reserve
+        // sale used to read (unit-economy_20260918 §2.1): the sale is on the idle clock alone now,
+        // and the cases below are what defends it.
         Expect(failures, "a vehicle idle five minutes is sellable", PoolUnitSellable(300f, 5f), true);
         Expect(failures, "a vehicle idle four minutes is kept", PoolUnitSellable(240f, 5f), false);
         // Fix B (2026-09-15): the sale keeps back exactly as many vehicles of a role as the book

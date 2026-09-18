@@ -42,6 +42,320 @@
 
 ## Unreleased
 
+**Far more aircraft can now fly air-defence suppression.** The commander used to insist on a
+missile that homes on radar emissions, and the rosters barely have one: three aircraft carry it, and
+on each side exactly one of those was actually available — for one side the most expensive aeroplane
+it flies, for the other its only real fighter. A measured match opened thirty-one suppression
+sorties and found an aeroplane for nine of them, with none at all inside a strike package. A guided
+missile that carries a real warhead and can hurt ground now counts too, which brings the common
+anti-armour missile in and most of the combat roster with it.
+
+The old refusal still stands where it matters: a reconnaissance round with its warhead removed is
+still turned away, which was the fault the original rule was written for, and an air-to-air missile
+never qualifies however heavy its warhead.
+
+**Commanders now attack in several places at once, and each push takes its own air with it.** A
+commander used to run exactly ONE ground attack however large its army grew. An eighty-one minute
+match measured what that produced: a board of forty-eight picket posts, eleven forward bases and a
+single attack, with one platoon in ten actually attacking and the rest driving to garrison duty. With
+nothing happening on the ground there was nothing for the air force to support, so it spent itself on
+fighters chasing fighters over control points — more than two thirds of every aircraft launched.
+
+Three changes. The number of attacks now scales with the army, starting at two and adding one per
+five platoons. Each attack gets its own strike package flying ahead of it, where before the whole
+commander was limited to one package, so a second attack would have gone in with no air at all. And
+an attack short of troops can call up a platoon from a forward base the enemy is nowhere near — that
+base keeps the detachment that holds its ground, and only the platoon goes.
+
+The cost, plainly: attacking in three places with a small army can mean losing in three places, and
+rear bases are held more thinly while a push is on. Both numbers are sliders.
+
+**The Alkyon AB-4 no longer flies fighter patrols.** It is a large, fast, high-altitude bomber and
+was being parked on standing patrols over control points because its air-to-air rating was not quite
+low enough to disqualify it. It is now ground-attack only. No real fighter is affected — every
+aircraft actually flying patrols is rated a fighter outright.
+
+**The sky is smaller, and what is left in it is doing a job.** A long match had grown to about
+sixty-six aircraft over the map, and they cost frame time exactly as tanks do. The limit meant to
+hold that number was already in the mod, but it was resting on a floor of thirty aircraft per side
+set back when aircraft were believed to be almost free — a belief the performance work of the day
+before had shared, because it measured five to seven of them and set the whole air side aside on
+that basis. Measurement killed the belief: both commanders were sitting on that floor, so the floor,
+not the money, was what sized the wing. The floor comes down to sixteen and the hard maximum from
+sixty to twenty-four, which should put the map near thirty-six.
+
+**Transports no longer count against that limit.** A supply or troop helicopter is not what the
+limit is for, and a busy sky used to eat the room its own resupply needed. A lift still refuses to
+fly into contested air without its fighters — that has not changed and must not.
+
+**Circling patrols can no longer crowd out the work you notice.** One commander's orders were
+counted on a real match: thirty-three standing air requests, and twenty-seven of them were fighters
+circling a control point because something had been seen near it. The transport escorts, the strike
+package and the radar aeroplane were six lines between them. So the limit now has two lines rather
+than one: escorts, packages, the radar aeroplane, anti-radiation sorties, air support over a ground
+fight and home defence may fill it to the top, while a standing patrol must stop six aircraft short.
+Every number here is a slider.
+
+The cost, stated plainly: with twenty-seven patrol requests and room for about ten, the commander
+will refuse its own patrol orders on most reviews and write a line each time. That noise is expected.
+It goes away when patrol requests from neighbouring platoons are merged into one, which is the next
+piece of work.
+
+**Reloading a saved war no longer hands every control point straight back.** Two faults in the
+strategic load, both seen in a live match on 2026-09-18 and both now fixed.
+
+The first is that the garrison drove away. A restored point had vehicles placed on it, but nothing
+told the commander they were its garrison — and a vehicle the commander does not recognise is a
+spare vehicle, so the very next review swept all thirty-one of them into the spare pool and parked
+the spare pool in the rear, exactly as it is supposed to. Every restored point was left empty within
+seconds. A restored garrison is now claimed into that point's own detachment as it lands, which is
+the same thing an inserted picket becomes, so it is topped up, kept on its posts and counted like
+any other.
+
+The second is that the garrison was an ammunition truck. The rule that picks a vehicle to hold
+ground asked only for the cheapest thing that can take a point, and never — alone among the
+commander's purchase rules — that it be something that fights. An unarmed supply truck carries
+enough to take a point and costs almost nothing, so it won every time. It now has to be a combat
+vehicle, which in practice means a troop carrier. This was never restore-only: the same rule picks
+the units the computer commander sends to capture airbases, so it had been sending ammunition trucks
+to take airfields as well.
+
+**Performance: the commanders now field far fewer ground vehicles, and the frame rate is the
+reason.** A long match used to slow to a crawl — 8.7 ms a frame half a minute in, 120 ms at
+half an hour — and measuring it settled why: the game's own per-frame cost grows as the SQUARE of
+how many units are alive, and ground vehicles were two-thirds of all the growth, going from 14 to
+214 over that match while aircraft barely moved. Halving the vehicles is therefore worth roughly
+three quarters of the cost. Four changes do it, and none of them touches aircraft, air packages or
+insertions. **The idle reserve is cashed in**: a vehicle assigned to no platoon, no picket and no
+order for three minutes is sold back at half price, where before a dozen per commander were kept
+standing whatever happened — forty-five were counted sitting idle at the worst moment of the
+measured match. **Points are held by one vehicle rather than a crowd**, since a point needs
+something standing on it to count as held, not a garrison; a point is easier to take now, which is
+the accepted price. **Each faction has a ceiling on live ground vehicles**, eighty by default: at
+the ceiling a commander replaces its losses but never grows, which also forces it to choose where
+its strength goes instead of accumulating everywhere. **Garrisons on quiet ground are cashed in**:
+a point nobody has contested for five minutes is thinned back to its standing garrison, and the
+commander raises a new one there the moment the front returns. All four are sliders in the
+settings window, because the defaults are starting points rather than conclusions.
+
+Three things this will never do, each defended by its own named check at load. It never disbands
+anything in contact. It never leaves a point the commander holds with nothing standing on it —
+ownership is re-derived every five seconds from what is actually in the ring, so emptying a point
+would silently hand it to whoever walks in next. And it never takes the last vehicle off a point.
+A platoon still driving to a point is not counted as standing on it and is never cashed in, so a
+garrison can never be sold off on the strength of relief that has not arrived.
+
+**The health line now counts missiles.** The performance research found the engine's cost tracking
+live units, missiles and bombs together, and the mod's measurement line counted everything but the
+missiles — which the game models as units like any other, so they were inside the total with no
+name of their own. A wing trading long-range shots can put a real slice of the total in the air,
+and that slice used to read as unexplained.
+
+**Fix: automatically placed buildings now lie on the ground instead of standing in it.** A
+forward base's depot, radar and helipads, the commander's mines, factories, docks, radar masts and
+defence emplacements, and every building the strategic reload puts back, were all spawned standing
+bolt upright: the site was dropped to the terrain height and nothing else, so on any slope the
+uphill corner disappeared into the hillside. Placing a building by hand has never had this problem
+— the R key lays the ghost over the ground, and what the ghost shows is what lands. Every automatic
+placement now goes through that same rule: the same four ground probes at the building's own
+footprint, the same 12-degree limit on how far a structure may be leaned over, and the heading the
+placement already had. Ground steeper than the limit clamps at the limit rather than refusing the
+site, exactly as a hand placement does, so a commander never loses a structure it has already paid
+for; the forward-base recipe continues to move each building to the nearest level spot first. The
+enemy commander's random building headings are unchanged — only the missing tilt was added to
+them. One place does this for every build path in the mod, so the player's ghost and both
+commanders can never drift apart.
+
+**Fix: the strategic restore never ran.** Saving worked perfectly, but restarting the mission
+restored nothing and said nothing — not even a refusal. What decided whether a run should restore
+was a test for "this build was loaded from memory", which sounds like "this is a reload" but
+actually means "this copy lives in the hot-reload folder", and that is true for every run while
+developing. So the restore refused every time and the save file was never even opened. It now waits
+for the game's own mission-loaded signal instead, which is exactly the thing being asked about.
+
+Two more faults came out of the same test. The money went back too late: the opposing commander
+takes its opening balance on its very first tick, so a restore fifteen seconds in arrived after the
+head start had been taken and spent. The money side now goes back on the first tick, ahead of the
+commanders, and the world is rebuilt afterwards. As a safety net, an opening balance is held for one
+review while a save for that mission is still unread, so the ordering can never matter again. And
+every branch now writes a line saying what it decided, including "there is nothing to restore" —
+the silence is what made this take a whole play session to notice.
+
+**Air insertions wait for their escorts to get in front of them.** A lift used to leave the deck the
+moment its fighters were airborne, which on a transport helicopter's route meant the escort was still
+climbing off the runway behind it. The transport then flew past its own cover and arrived first and
+alone over the ground the cover existed to clear. The launch gate now asks a second question before
+it lets a load go: are the escorts actually AHEAD of it?
+
+"Ahead" is measured as ground still to cover, not as a fraction of the route. An escort counts as
+ahead when it is off the deck and is nearer the landing zone than the load is by at least
+`LiftEscortLeadMeters`, a new Operations setting that defaults to two kilometres. A fraction would
+have been wrong whenever a load and its cover launch from different airbases, which they routinely
+do — the same fraction of two different routes is not the same piece of sky. The distance is to the
+landing zone the load is really going to, which for a platoon lift onto contested ground is the
+forward landing zone rather than the objective beyond it.
+
+Two kilometres is about half a minute of flying for a loaded transport helicopter, so the escort is
+over any given piece of ground about half a minute before the load and is what a waiting fighter or
+an air-defence vehicle shoots at first. A fighter opens that gap within about fifteen seconds of
+leaving the same airbase, so a cover that launches with its lift costs the lift almost nothing.
+
+Nothing can be held for ever. The wait is the same three-minute form-up clock the gate already used
+for "the escorts are up" and for the sweep, so one clock releases all three conditions together and a
+lift that never gets its escort in front still goes, unescorted, exactly as it does today. An escort
+that is outnumbered and falling back is still handled by the rule that was already there — it holds
+the lift, does not read as ahead, and is released by the air posture's own give-up rather than by the
+lift's clock.
+
+This is a LAUNCH gate only. A transport already in the air is never asked again whether its escort is
+still in front of it; turning a flight round because its cover fell behind is not what was asked, and
+the delivery watch already recalls flights for real threats.
+
+The hold line in the commander log now says which of the two escort questions is holding a load —
+`waiting for the escort (0 of 2 up)` against `waiting for the escort to get ahead of it (1 of 2 up
+ahead, 2000 m of lead wanted)` — and the line a lift writes when its clock runs out says how many
+escorts were in front when it went anyway.
+
+Picket insertions are deliberately NOT gated by this, and the reason is structural rather than an
+omission. A picket flight is refused outright if anything that shoots helicopters is tracked within
+eight kilometres of its landing zone or its route, and that is the same eight-kilometre ring that
+decides whether a picket point gets a patrol at all — so a picket insertion that launches is by
+construction a flight over ground where no cover has been asked for and none exists to wait for. Its
+escort is posted only once the transport is in the air, as insurance against raiders nobody has
+tracked. Holding those flights would mean waiting three minutes for fighters the commander would have
+to buy, on a route with nothing hostile on it.
+
+**Measure the long-match slowdown.** The frame rate decaying over a long match is the single thing
+blocking long games, and three explanations for it have now been tested and ruled out: the commander
+overlay's drawing (hiding it changes nothing, and leaving commander mode entirely changes nothing
+either), permanent wrecks acting as steering obstacles (both shipped missions set a one-minute wreck
+decay, and it works), and the commander log window's storage (measured, four orders of magnitude too
+small to matter). What is left cannot be settled by reading the code, so there is now a way to
+measure it in a real match.
+
+A new Developer setting, `HealthDiagnosticLine`, is off by default. Add `HealthDiagnosticLine = true`
+under the `[Developer]` section of `BepInEx\config\com.groundcontrol.rts.cfg` and the mod writes one
+`Health ...` line to the BepInEx log every thirty seconds, carrying the elapsed match time, the average and worst frame time over
+those thirty seconds, how many units are alive split into aircraft, ground vehicles and buildings,
+how many have ever been spawned, how many wrecks are standing, each faction's contact and
+strategic-target tables, the size of every large table the mod itself keeps, and managed memory in
+use with the garbage-collection count.
+
+Everything is a plain labelled figure on one line, so two lines an hour apart can be pasted side by
+side and whatever has grown between them is where the problem is. The line runs whether or not
+commander mode is open, because the slowdown is present while flying. While the setting is off the
+mod does no extra work per frame at all; while it is on, the per-frame cost is three floating-point
+operations and the only real work, a single pass over the live unit list, happens once every thirty
+seconds.
+
+No gameplay behaviour changed.
+
+**Stop a long match and pick it up again.** The frame rate decays over a long match and the only
+cure is restarting the mission, which until now threw the whole match away: the game has no
+in-match save of its own, and a mission load restores the designer's opening layout. The commander
+now keeps the strategic picture across that restart. On the POINTS tab of COMMANDER SETTINGS there
+is a STRATEGIC SAVE box: press SAVE STRATEGIC STATE, quit to the menu, start the same mission again,
+and about fifteen seconds in the mod puts the picture back.
+
+What is kept is deliberately narrow. Who holds which control point, which forward bases exist and
+where, each faction's money, and the cash value of everything of theirs that was standing. Units are
+cashed in and never rebuilt: there is nothing to rebuild them from, and pretending otherwise would
+mean matching records to units by guesswork. Nothing in flight is kept, and neither are positions,
+damage, ammunition or loadouts.
+
+Two things are rebuilt rather than cashed in, because they are the strategic picture and not units.
+Forward bases go back up where they stood, with a record attached again so the teardown watch and
+the abandonment rule can still see them. Mines, factories and naval docks go back up too, at their
+saved upgrade level, and they matter more than they look: a resource site is owned by the mine
+standing on it, so without the mine the site is neutral however much cash the faction holds. A
+forward base that was still being delivered when you saved is simply cancelled, with no refund,
+which is the same rule the delivery path already applies everywhere else.
+
+Holding a control point is not a stored fact in this mod. It is recounted every five seconds from
+how many vehicles are standing in the ring, and the owner drops to neutral the moment nobody
+qualifies. So restoring who held what without putting anything there would blank the whole map about
+five seconds after loading. The load therefore stands a garrison on every held point, put straight
+down on the point's own hold posts rather than flown or driven in. Airbases and mined sites are the
+exception: their owner is decided by the capture ring and by the mine, so those are handed back
+directly instead.
+
+Garrisons are paid for out of the war chest at the same prices the commander pays, because the save
+already banked what was standing on those points and handing them over free would print money on
+every save. Points are restored in the commander's own priority order until the money runs out, and
+any point whose garrison cannot be paid for in full is given up and named in the log with the
+figures. Buildings that come back in kind are the other half of the same sum: they are not cashed in
+at all, so they cost nothing to put back and the faction is not paid twice for them. If one of them
+cannot be put back, its price is credited instead rather than quietly lost.
+
+All of which serves one promise: a save and a reload leave a faction no richer and no poorer than it
+was, apart from what it deliberately spends on garrisons. A one-line summary at the end of every
+load gives you the arithmetic to check it. There is a toggle beside the buttons to turn the charging
+off for testing.
+
+Several things that could have corrupted a match quietly are each fenced off with a check that runs
+at plugin load. Every computer faction would have been handed a second opening balance, since the
+flag that records "this treasury has been opened" is cleared on a mission change. Every cooldown is
+stamped against the game clock, which restarts at zero, so a saved stamp would read as far in the
+future and freeze whatever reads it for the rest of the match. Unit identifiers are a counter that
+restarts, so a saved one would name a different unit. A restored forward base would have been
+demolished almost immediately, because the two clocks that say whether it is quiet and idle default
+to exactly that. And a rebuilt base would have collided with an existing name, because the name
+counter restarts while the bases keep their old numbers.
+
+The existing hot-reload snapshot is untouched: it keeps its own file, its own ten-minute window and
+its own records, and it still gets first refusal on a reloaded run.
+
+**The commander log window stops costing the frame rate to have open.** Opening COMMANDER LOG in a
+long match used to drop the frame rate the moment the window appeared, and the drop got worse the
+further the match had run. Nothing about the window's contents has changed; it is simply no longer
+rebuilt from scratch several times a frame.
+
+Three costs went. The header — funds, income by source, plan, and the OPERATIONS block — is now
+built on the same half-second clock that already refreshed the faction tabs, and once more the
+instant a different tab is picked, instead of on every interface event. That matters because the
+income line walks every strategic point on the map and the OPERATIONS block asks the operations
+service for one freshly built line per live mission: a mature match carries sixty of them per
+faction, of which the header shows four. The scrolling log now draws only the rows the view can
+actually show, plus one row of slack at each end, rather than all two hundred: two hundred entries
+make a 5 200 pixel tall sheet inside a window about four hundred pixels tall, so the window was
+issuing four hundred label calls to display fifteen rows. And each entry's `mm:ss` stamp is
+formatted once when the decision is logged rather than two hundred times per interface event.
+
+**The decision log becomes a real ring buffer.** Every logged decision used to be inserted at the
+front of a two-hundred-entry list, shifting all two hundred elements, and then the last one removed.
+The mod logs from more than two hundred call sites and does so whether or not the window is open.
+Writes now land in one slot and move a start index; the newest-first order the window reads is
+produced by the indexer instead of by the storage order. Measured on this machine, the old pair cost
+105 nanoseconds per logged decision and the ring costs 3.4. This was never large enough to explain a
+frame-rate decay — at a hundred decisions a second it was a hundredth of a millisecond per second —
+and it is recorded here so the question does not get asked again. Named self-checks now pin the
+ring's behaviour (capacity respected, newest first, the oldest entry dropped, order preserved across
+the wrap) and the scroll-culling range at its four boundaries.
+
+**A difficulty slider for the computer opposition.** The GAMEPLAY tab now carries an "Opposition
+money" slider, reading as a plain multiplier with the number shown — 0.50x to 3.00x, default 1.00x.
+It multiplies two things and only two: every income a faction that is not yours earns from points,
+bases and mines, and the balance that faction opens the match holding. Your own faction is never
+scaled by it, whoever is commanding it — the player commander switch does not put you on the wrong
+side of this. At 1.00x the mod behaves exactly as it did before the slider existed, which a named
+self-check pins.
+
+The income half is not new: it is the `EnemyIncomeMultiplier` setting added on 2026-09-15, which
+until now could only be edited in the configuration file. The starting-funds half is new, and it is
+deliberately the same rule rather than a second one — one definition of who gets handicapped, two
+callers — so the one slider means one thing. It applies once per faction, straight after whichever
+opener the mission uses has set that faction's balance: the duel's 1.5x head start, the matched
+economy on a stock mission, or neither, in which case it scales the balance the mission itself
+authored. Moving the slider in the middle of a match therefore changes income from the next payout
+onwards and never re-opens a treasury that has already been opened; that once-per-match rule is a
+pure function with its own self-check rather than a comment.
+
+The slider shares its row with the aircraft capture strength slider, which is now labelled "Aircraft
+capture" and is otherwise unchanged. The row is shared because the COMMAND box already reaches 784
+pixels of a 790-pixel window with the help overlay open, so a tenth full-width row would not fit.
+The settings window's help overlay explains in words what the slider does, since the interface has
+no tooltips.
+
 **Cargo transports stop trying to land.** A transport that reaches its landing zone low and roughly
 still now puts its vehicles on clear ground where it is, empties itself and flies home, instead of
 chasing the game's own release gate. That gate is the reason deliveries got stuck: the game releases
@@ -60,10 +374,15 @@ the hang this change removes. The 10 m/s is the game's own number, kept unchange
 the two gate numbers moved. Nothing waits for ever: the stall clock that has bounded this since
 2026-09-14, 120 seconds within 500 m, now asks for an unload at a higher 40 m ceiling when it expires,
 and a transport still too high for that falls through to the parachute drop and then the recall
-exactly as before.
+exactly as before. A flight that has started unloading tells the clock so, which holds the recall off
+while it works, but only for as long as it keeps putting vehicles out - thirty seconds of silence and
+it is handed back to the parachute drop and the recall like any other stuck flight. Without that
+limit an unload that latched and then stopped would have reset the clock for ever, which is the same
+hang one layer up.
 
 Each vehicle is set down on clear ground found by the same landing-zone search the mod already uses,
-30 m apart so two vehicles of one load never want the same patch, and on the terrain directly beneath
+30 m apart - measured from where the transport was when it started unloading, not from where it is
+now, because a near-stationary aircraft still drifts further than that between two releases - and on the terrain directly beneath
 the transport when the whole search radius is blocked — awkward ground beats no delivery. The game's
 ramp-clear handshake, which is what stopped one vehicle being dropped onto another, does not apply to
 an aircraft that never touched down, so the spacing is now the release cadence's: one vehicle at a
@@ -23931,6 +24250,30 @@ so a recall or a cancellation takes the marker with it.
 
 
 
+
+**A forward base's helipads produce helicopters only.** A base with no runway now launches, and
+recovers, only airframes that fly like a helicopter. Everything else needs a strip. This stops the
+VT-7 Vagrant appearing on a forward base's pad: it is a vertical-lift airframe carrying an
+aeroplane pilot, so the game hands it the aeroplane AI that expects a runway and then starts it on
+a pad with no runway anywhere on the base, and it despawns or falls over (user report,
+2026-09-16). It is not the VTOL pilot case the mod already refuses — that ban does not catch this
+one, which is why it got through. Today's cheap-aircraft work made the bottom tier, which the
+Vagrant sits in, far more likely to be bought, so this was about to be hit constantly.
+
+Transports are unaffected. The UH-90 Ibis is a true helicopter and the VL-49 Tarantula is a
+tiltwing, and the mod counts both as flying like a helicopter, so a forward base's pads still put
+up supply runs and air-mobile lifts exactly as before. The tiltwing is allowed deliberately: the
+game gives it the helicopter AI and it homes on vertical landing points to come home, so treating
+it as anything else here would be a second, disagreeing idea of what a helicopter is.
+
+A base counts as having a strip when it has at least one runway, which is read off the base itself
+rather than off its name or its hangars' aircraft lists. The hangar list is exactly the thing that
+is wrong — a helipad's list names the Vagrant — and a name test breaks on a map that names things
+differently. A forward base is built with no runways on purpose, a carrier keeps the runways
+authored on its deck, and a ship with only a pad has none, so all three answer correctly.
+
+The enemy commander also stops offering itself a type none of its bases can launch, rather than
+only being refused at the pad: the same rule now gates the catalogue it buys from.
 
 ## 0.4.0.0 — Real orders, and someone to use them against
 

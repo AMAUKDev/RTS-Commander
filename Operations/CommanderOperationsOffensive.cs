@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -114,6 +114,111 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
+    /// How many attacks this commander may have open at once, pure. Deliberately the same shape as
+    /// <c>MaxForwardBases</c> (Reuse rule 4): a floor, plus a share of the platoon count, take the
+    /// larger — so a small army still pushes somewhere and a large one pushes in proportion.
+    /// <para>
+    /// Why it exists: until 2026-09-18 <see cref="TryOpenAttack"/> refused the moment ANY attack was
+    /// open, so a commander ran exactly one push however large it grew. The match measured that day
+    /// showed the result — a mission board of 48 pickets, 11 forward bases and ONE attack, with one
+    /// of ten platoons attacking and the rest driving to garrison duty. Nothing on the ground was
+    /// generating close-support work, so the wing flew 382 fighter sorties against 177 ground-attack
+    /// ones and the war was fighters circling control points.
+    /// </para>
+    /// <para>
+    /// A non-positive floor answers ONE, which is that old behaviour rather than "no attacks at
+    /// all". A deliberate departure from the repo's usual "zero switches the rule off": switching
+    /// this rule off has to leave the commander attacking, because one that never attacks is not a
+    /// commander.
+    /// </para>
+    /// <para>The share is clamped to 0..1 for the reason <c>MaxForwardBases</c> clamps its own — a
+    /// mis-typed slider should thin the attacks, never multiply the army.</para>
+    /// </summary>
+    internal static int MaxConcurrentAttacks(int platoonCount, float attacksPerPlatoon, int floor)
+    {
+        if (floor <= 0)
+        {
+            return 1;
+        }
+
+        int share = Mathf.FloorToInt(Mathf.Max(0, platoonCount) * Mathf.Clamp01(attacksPerPlatoon));
+        return Mathf.Max(floor, share);
+    }
+
+    /// <summary>
+    /// Takes up to <paramref name="wanted"/> platoons off forward bases the enemy is NOT at, and
+    /// returns them to the spare pool for an attack to claim (concurrent-attacks_20260918).
+    /// <para>
+    /// The base keeps its picket and its munitions truck, so it still HOLDS its point — a picket is
+    /// what holds ground, and stripping one would hand the point over. Threat is
+    /// <see cref="IsThreatenedFrontPoint"/>, the mod's one definition of "the enemy is at this
+    /// point", already read by the forward-base allowance, the pool order and the order book
+    /// (Reuse rule 4); this is its fourth reader and invents no second idea of danger.
+    /// </para>
+    /// <para>
+    /// Worst-ranked base first, so the commander gives up its least valuable rear position before
+    /// its best one. A base with more than one platoon gives up only the surplus first; the last
+    /// platoon on a base goes only when nothing else will serve.
+    /// </para>
+    /// </summary>
+    private int CallUpQuietForwardBases(FactionHQ hq, OperationsState state, int wanted, string? label)
+    {
+        if (wanted <= 0)
+        {
+            return 0;
+        }
+
+        int taken = 0;
+        OrderForwardBasesByRank(state);
+        for (int i = forwardBasesByRank.Count - 1; i >= 0 && taken < wanted; i--)
+        {
+            CommanderOperationsMission baseMission = forwardBasesByRank[i];
+            while (taken < wanted
+                && PlatoonMayBeCalledUp(
+                    IsThreatenedFrontPoint(state, baseMission),
+                    baseMission.Assigned.Count > 0,
+                    baseMission.Kind == CommanderMissionKind.ForwardBase))
+            {
+                CommanderPlatoon platoon = baseMission.Assigned[baseMission.Assigned.Count - 1];
+                // ReleaseFromMission, not a hand-rolled removal: its own summary calls it "the single
+                // choke point every departure path already goes through", and it is what also ends
+                // the platoon's reinforcement answer and clears the ground posture it was halfway
+                // through. Unassigning without it would carry an arc or a bound into the attack.
+                ReleaseFromMission(platoon);
+                taken++;
+                CommanderAiLog.Note(
+                    hq,
+                    $"calls up {platoon.Name} from {baseMission.Label}"
+                        + (label == null ? string.Empty : $" for the attack on {label}")
+                        + ": that base is quiet.");
+            }
+        }
+
+        return taken;
+    }
+
+    /// <summary>
+    /// Whether one forward base may give its platoon to an attack, pure. Three conditions, and the
+    /// first is the guarantee: a base the enemy is AT keeps everything it has. The second is that
+    /// there is something to send. The third is that only a forward base is ever asked — a picket is
+    /// the detachment holding the point and is never called up (concurrent-attacks_20260918).
+    /// <para>
+    /// Why it exists: <c>CountSparePlatoons</c> counts only platoons with no mission at all, and on
+    /// the match of 2026-09-18 that was one to three per commander while eight or nine sat on forward
+    /// bases. Raising the attack allowance without this would have been inert — the allowance would
+    /// have permitted attacks the commander had nobody to man.
+    /// </para>
+    /// <para>
+    /// What the caller must honour and this rule cannot express: the base keeps its
+    /// <c>PicketMembers</c> and its <c>Truck</c>. The platoon goes, the point is still held.
+    /// </para>
+    /// </summary>
+    internal static bool PlatoonMayBeCalledUp(bool threatened, bool hasPlatoon, bool isForwardBase)
+    {
+        return isForwardBase && hasPlatoon && !threatened;
+    }
+
+    /// <summary>
     /// Ranks a target worth attacking (design SS3): enemy-held control points adjacent to my front
     /// first (nearest first), then enemy bases whose observed defence is beatable with what is
     /// spare or forming. Null when nothing qualifies — the mission waits.
@@ -193,6 +298,28 @@ internal sealed partial class CommanderOperationsService
 
     /// <summary>The sizing formula at its named bounds (design SS3), <c>platoonSize = 6</c> unless
     /// stated otherwise.</summary>
+    /// <summary>
+    /// The attack allowance and the call-up, at the boundaries that matter
+    /// (concurrent-attacks_20260918). Both are numbers a retune can turn into nonsense: an allowance
+    /// that collapses to zero stops the commander attacking at all, and a call-up that ignores the
+    /// threat test strips the base the enemy is standing on.
+    /// </summary>
+    private static void CheckConcurrentAttacks(List<string> failures)
+    {
+        Expect(failures, "a small army still gets the floor of attacks", MaxConcurrentAttacks(4, 0.2f, 2), 2);
+        Expect(failures, "a ten-platoon army gets one attack per five platoons", MaxConcurrentAttacks(10, 0.2f, 2), 2);
+        Expect(failures, "a twenty-platoon army gets four attacks", MaxConcurrentAttacks(20, 0.2f, 2), 4);
+        Expect(failures, "an army with no platoons still gets the floor", MaxConcurrentAttacks(0, 0.2f, 2), 2);
+        Expect(failures, "a floor of zero means one attack, the old behaviour", MaxConcurrentAttacks(20, 0f, 0), 1);
+        Expect(failures, "a negative floor means one attack, the old behaviour", MaxConcurrentAttacks(20, 0.2f, -1), 1);
+        Expect(failures, "a share above one is clamped rather than multiplying the army", MaxConcurrentAttacks(10, 5f, 2), 10);
+
+        Expect(failures, "a quiet forward base may send its platoon to an attack", PlatoonMayBeCalledUp(threatened: false, hasPlatoon: true, isForwardBase: true), true);
+        Expect(failures, "a threatened forward base is never stripped", PlatoonMayBeCalledUp(threatened: true, hasPlatoon: true, isForwardBase: true), false);
+        Expect(failures, "a forward base with no platoon has nothing to send", PlatoonMayBeCalledUp(threatened: false, hasPlatoon: false, isForwardBase: true), false);
+        Expect(failures, "a picket is never called up, it is what holds the point", PlatoonMayBeCalledUp(threatened: false, hasPlatoon: true, isForwardBase: false), false);
+    }
+
     private static void CheckSizing(List<string> failures)
     {
         Expect(failures, "an unobserved point still gets one platoon", PlatoonsForTarget(0, 6, false), 1);
@@ -599,12 +726,23 @@ internal sealed partial class CommanderOperationsService
     /// </summary>
     private bool TryOpenAttack(FactionHQ hq, OperationsState state, int minPlatoons, string logVerb)
     {
+        // The allowance, not the first attack found (concurrent-attacks_20260918 decision A). This
+        // gate used to return false the moment ANY attack existed, which is why the match of
+        // 2026-09-18 showed one attack against 48 pickets and 11 forward bases however large the army
+        // grew, and why the ground war generated no close-support work for the wing to do.
+        int openAttacks = 0;
         for (int i = 0; i < state.Missions.Count; i++)
         {
             if (state.Missions[i].Kind == CommanderMissionKind.Attack)
             {
-                return false;
+                openAttacks++;
             }
+        }
+
+        if (openAttacks >= MaxConcurrentAttacks(
+                state.Platoons.Count, CommanderSettings.AttacksPerPlatoon, CommanderSettings.MaxAttacks))
+        {
+            return false;
         }
 
         if (!TryChooseOffensiveTarget(hq, state, out CommanderStrategicPoint? targetPoint, out Airbase? targetAirbase))
@@ -620,6 +758,15 @@ internal sealed partial class CommanderOperationsService
         }
 
         int spare = CountSparePlatoons(state);
+        // Short of bodies, call up from the quiet rear (concurrent-attacks_20260918 decision C).
+        // CountSparePlatoons counts only platoons with NO mission, which on the measured match was
+        // one to three per commander while eight or nine sat on forward bases — so without this the
+        // raised allowance would permit attacks nobody could man.
+        if (spare < minPlatoons)
+        {
+            spare += CallUpQuietForwardBases(hq, state, minPlatoons - spare, label: null);
+        }
+
         if (spare < minPlatoons)
         {
             return false;
@@ -649,7 +796,7 @@ internal sealed partial class CommanderOperationsService
         // after the mission is in the list so the strike's own target read sees the attack that asked
         // for it. A strike already open — the clock's — is left alone rather than replaced: one
         // strike sortie per commander.
-        OpenStrikeSortie(hq, state, targetPoint, targetAirbase, label);
+        OpenStrikeSortie(hq, state, targetPoint, targetAirbase, label, owner: mission);
         return true;
     }
 
@@ -1276,7 +1423,7 @@ internal sealed partial class CommanderOperationsService
             return;
         }
 
-        OpenStrikeSortie(hq, state, point, targetAirbase: null, point!.Label);
+        OpenStrikeSortie(hq, state, point, targetAirbase: null, point!.Label, owner: null);
     }
 
     /// <summary>One line, at most once a minute and only when the whole number changes, saying how
@@ -1307,14 +1454,20 @@ internal sealed partial class CommanderOperationsService
     /// and sizes the package from <see cref="StrikePackageFor"/> off those numbers. Nothing re-reads
     /// them afterwards: the package that was ordered is the package that flies.
     /// </summary>
+    /// <param name="owner">The attack this package flies ahead of, or null for the DELIBERATE strike
+    /// the clock opens when no attack is running. Added by concurrent-attacks_20260918: the guard
+    /// below used to refuse whenever the commander had any package at all, so several attacks would
+    /// have given the first one air and sent the rest in naked.</param>
     private void OpenStrikeSortie(
         FactionHQ hq,
         OperationsState state,
         CommanderStrategicPoint? point,
         Airbase? targetAirbase,
-        string label)
+        string label,
+        CommanderOperationsMission? owner)
     {
-        if (state.StrikeSortie != null || (point == null && targetAirbase == null))
+        bool ownerHasStrike = owner != null ? owner.StrikeSortie != null : state.StrikeSortie != null;
+        if (ownerHasStrike || (point == null && targetAirbase == null))
         {
             return;
         }
@@ -1382,7 +1535,15 @@ internal sealed partial class CommanderOperationsService
         // rotation like every other patrol, which is what makes the variety visible.
         AssignCapBand(ref state.StrikeCapBandCursor, sortie);
 
-        state.StrikeSortie = sortie;
+        if (owner != null)
+        {
+            owner.StrikeSortie = sortie;
+        }
+        else
+        {
+            state.StrikeSortie = sortie;
+        }
+
         state.StrikeClockMinutes = 0f;
         state.StrikeClockReported = -1;
         CommanderAiLog.Note(

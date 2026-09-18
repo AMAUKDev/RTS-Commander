@@ -219,7 +219,13 @@ internal sealed partial class CommanderEnemyCommanderService
         /// <summary>Air-superiority specialist: FS-12 Revoker, FS-20 Vortex.</summary>
         Fighter,
 
-        /// <summary>Neither rating dominates the other: KR-67 Ifrit.</summary>
+        /// <summary>
+        /// Neither rating dominates the other by <see cref="FighterRatio"/>: the Alkyon AB-4, at
+        /// 0.70 anti-air against 1.00 anti-surface. The KR-67 Ifrit this comment used to name is
+        /// NOT multirole — the match of 2026-09-18 bought it at Fighter tier 212 times — and the
+        /// mistake mattered, because a refusal keyed on this tier would have read as grounding the
+        /// enemy's main fighter when it does nothing of the kind.
+        /// </summary>
         Multirole,
 
         /// <summary>Ground-attack specialist: A-19 Brawler, SAH-46 Chicane, Alkyon AB-4.</summary>
@@ -319,7 +325,16 @@ internal sealed partial class CommanderEnemyCommanderService
     internal static bool MayFlyAirSuperiority(AircraftDefinition definition)
     {
         AirframeTier tier = ForRole(definition, AirRole.Fighter);
-        return tier != AirframeTier.Strike && tier != AirframeTier.Excluded;
+        return tier != AirframeTier.Strike
+            && tier != AirframeTier.Excluded
+            // Multirole joined the refusal on 2026-09-18 (user decision, from watching a match): the
+            // Alkyon AB-4 is "a large, fast, high-altitude large-payload delivery system" and is
+            // wanted as ground-attack ONLY. It is the sole multirole ground-attack airframe either
+            // roster fields — the EW-25 Medusa is the other multirole entry and is already reserved
+            // to the radar station by RadarAirframeMayFill — so this refusal costs the patrol and the
+            // escort nothing real. Every airframe actually flying fighter work in the measured match
+            // (FS-12 Revoker, FS-20 Vortex, KR-67 Ifrit) is Fighter tier and is untouched.
+            && tier != AirframeTier.Multirole;
     }
 
     /// <summary>

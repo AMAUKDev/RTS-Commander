@@ -244,6 +244,56 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
+    /// Fighters of a cover that are up AND ahead of the load they are covering (user instruction,
+    /// 2026-09-17), measured against <paramref name="landingZone"/> — the ground the load is actually
+    /// flying to. The same escort element <see cref="CountFightersUp"/> walks and the same
+    /// <see cref="IsFixedWingCombatAircraft"/> test decides what counts as a fighter, so the launch
+    /// gate's two numbers are always counted over one list; only the pure
+    /// <see cref="CommanderOperationsService.EscortIsAhead"/> test is added on top.
+    /// <para>A rotary escort is not counted here for the same reason it is not counted as "up": a
+    /// cover element is fixed-wing by construction. <paramref name="loadToLandingZoneMeters"/> is how
+    /// far the load itself still has to fly, which at the launch gate is its airbase's distance to
+    /// the landing zone.</para>
+    /// </summary>
+    internal static int CountFightersAhead(
+        CommanderAirSortie? sortie,
+        GlobalPosition landingZone,
+        float loadToLandingZoneMeters,
+        float marginMeters)
+    {
+        List<Aircraft>? bound = sortie?.Caps;
+        if (bound == null)
+        {
+            return 0;
+        }
+
+        int ahead = 0;
+        for (int i = 0; i < bound.Count; i++)
+        {
+            Aircraft fighter = bound[i];
+            if (!IsFixedWingCombatAircraft(fighter))
+            {
+                continue;
+            }
+
+            // GlobalPosition throughout, never transform.position: the floating origin makes a raw
+            // transform position a different number from the one the landing zone is quoted in.
+            float toLandingZone = CommanderGameAccess.HorizontalDistance(
+                fighter.transform.GlobalPosition().AsVector3(), landingZone.AsVector3());
+            if (EscortIsAhead(
+                    !CommanderAirCommandService.IsOnDeck(fighter),
+                    toLandingZone,
+                    loadToLandingZoneMeters,
+                    marginMeters))
+            {
+                ahead++;
+            }
+        }
+
+        return ahead;
+    }
+
+    /// <summary>
     /// A sortie's STRENGTH for the posture, pure (user decision 2026-09-16): the aircraft assigned
     /// to it that are up — its escort and its strike element together, the same two lists the
     /// hostile count already measures its rings from and the same two the posture stamps.
@@ -784,9 +834,10 @@ internal sealed partial class CommanderOperationsService
             AwacsLossCooldownMinutes);
         sortie.CooldownUntil = Time.time + minutes * 60f;
 
-        if (sortie.Kind == CommanderSortieKind.Strike && ReferenceEquals(state.StrikeSortie, sortie))
+        // Whichever owner holds it — the deliberate slot or an attack's (concurrent-attacks_20260918).
+        if (sortie.Kind == CommanderSortieKind.Strike)
         {
-            ForgetStrikeSortie(state);
+            ForgetAnyStrike(state, sortie);
             CommanderAiLog.Note(hq, $"strike on {sortie.Label} abandoned: its escort was outnumbered and not reinforced.");
         }
 

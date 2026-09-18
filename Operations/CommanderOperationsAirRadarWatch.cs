@@ -817,10 +817,27 @@ internal sealed partial class CommanderOperationsService
         CommanderAirSortie? capSortie = null;
         CommanderAirSortie? aradSortie = null;
         CommanderAirSortie? casSortie = null;
+        // A standing patrol the reserved line has closed is PASSED OVER here rather than allowed to
+        // win the CAP turn and be refused at the buy (fix, 2026-09-18, found in the track's own
+        // review). The demand list is in posting order and the standing patrols are posted first —
+        // AddPlatoonCapDemand calls AddTransportEscortDemand last — so one closed patrol at the head
+        // of the list took the whole CAP turn with it every review and the picket insertion escort
+        // behind it was never bought at all: the exact outcome the reserved block exists to prevent.
+        // The same skip is what lets the home patrol's growth above the baseline reach the buy,
+        // since that is only offered when no CAP sortie is open.
+        // Read ONCE, not per sortie: the answer walks the faction's live units.
+        bool standingPatrolsMayBuy = AirBuyAllowed(hq, standingPatrol: true);
         for (int i = 0; i < state.AirSorties.Count; i++)
         {
             CommanderAirSortie sortie = state.AirSorties[i];
             if (Time.time < sortie.CooldownUntil)
+            {
+                continue;
+            }
+
+            // Safe to skip the sortie WHOLE rather than only its CAP slot: AddCapDemand posts
+            // Wanted = 0, so a standing patrol has no ground-attack slot to offer the CAS side.
+            if (sortie.IsStandingPatrol && !standingPatrolsMayBuy)
             {
                 continue;
             }

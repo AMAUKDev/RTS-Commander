@@ -162,10 +162,13 @@ internal sealed partial class CommanderAirCommandService
     {
         AircraftDefinition definition = recipe.Option.Definition;
         Airbase origin = recipe.Origin;
+        // Not origin.CanSpawnAircraft directly: CommanderAirLaunchFacility.CanBaseLaunch is the
+        // mod's one reader of the game's raw roster answer, and it also refuses a base whose
+        // facilities do not suit the airframe (a helipad-only base launches helicopters only).
         if (origin != null
             && !origin.disabled
             && IsCompatibleAirbase(origin, hq, definition)
-            && origin.CanSpawnAircraft(definition))
+            && CommanderAirLaunchFacility.CanBaseLaunch(origin, definition))
         {
             return origin;
         }
@@ -179,7 +182,8 @@ internal sealed partial class CommanderAirCommandService
                 || airbase.disabled
                 || airbase.center == null
                 || !IsCompatibleAirbase(airbase, hq, definition)
-                || !airbase.CanSpawnAircraft(definition))
+                // Not airbase.CanSpawnAircraft directly — see CommanderAirLaunchFacility.CanBaseLaunch.
+                || !CommanderAirLaunchFacility.CanBaseLaunch(airbase, definition))
             {
                 continue;
             }

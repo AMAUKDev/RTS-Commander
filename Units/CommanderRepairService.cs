@@ -158,6 +158,15 @@ internal sealed class CommanderRepairService : ICommanderTickActive, ICommanderR
             return false;
         }
 
+        // A repair crew is a ground vehicle like any other, so it is bought under the same ceiling
+        // (design.md, unit-economy_20260918 §2.3; one predicate, every commander ground buy). The
+        // player's own REPAIR button is deliberately NOT gated — the ceiling is a rule about what the
+        // computer commander grows to, not a limit on what the player may do with their own money.
+        if (!CommanderOperationsService.GroundBuyAllowed(hq))
+        {
+            return false;
+        }
+
         if (!TryFindWorstDamagedBuilding(hq, out Unit? worst) || !TryHireCrew(hq, worst!))
         {
             return false;
@@ -211,7 +220,12 @@ internal sealed class CommanderRepairService : ICommanderTickActive, ICommanderR
     /// </summary>
     internal bool WantsEnemyRepairCrew(FactionHQ hq)
     {
-        return hq.IsServer && TryFindWorstDamagedBuilding(hq, out _);
+        // The ceiling is read here as well as at the send, because this method's whole contract is
+        // that the two must agree: a commander whose crew the ceiling will refuse must not have rung
+        // money reserved for one (unit-economy_20260918 §2.3).
+        return hq.IsServer
+            && CommanderOperationsService.GroundBuyAllowed(hq)
+            && TryFindWorstDamagedBuilding(hq, out _);
     }
 
     public void TickActive()

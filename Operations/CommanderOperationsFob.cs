@@ -2272,16 +2272,45 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
+    /// How far the load still has to fly to its landing zone at the moment the gate is asked: the
+    /// distance from the airbase it would lift from. The base is the insertion gate's own stand-in
+    /// for the leg a flight will fly (<see cref="TryFindInsertionLaunchBase"/>, one definition), and
+    /// it is the NEAREST held base, so the escort's lead is measured against the shortest leg the
+    /// load could possibly fly — the strictest reading, never a flattering one.
+    /// <para>A negative result means no held base could be found, in which case nothing can be
+    /// measured and the ahead test is not applied at all; a commander with no airbase cannot launch
+    /// a transport anyway, and a lift must never be held by a comparison that could not be made.</para>
+    /// </summary>
+    private static float LiftLoadDistanceToLandingZone(FactionHQ hq, GlobalPosition landingZone)
+    {
+        return TryFindInsertionLaunchBase(hq, landingZone, out GlobalPosition origin)
+            ? CommanderGameAccess.HorizontalDistance(origin.AsVector3(), landingZone.AsVector3())
+            : -1f;
+    }
+
+    /// <summary>
     /// Whether this load may leave the deck (design.md, air-mobile-platoons_20260915 Section 3): the
-    /// cover's fighters are up and its sweep has gone in, or the bounded wait has run out. The wait
+    /// cover's fighters are up, enough of them are AHEAD of the load (user instruction, 2026-09-17)
+    /// and its sweep has gone in, or the bounded wait has run out. The wait
     /// is stamped on the order the first review a load is held and cleared the moment one launches,
     /// so every load gets its own bounded wait rather than the order getting one between them all.
+    /// <para>This is a LAUNCH gate and nothing else. A transport already in the air is never asked
+    /// again whether its escort is still in front of it — that would turn a flight round because its
+    /// cover fell behind, which is not what was asked and would fight the delivery watch that already
+    /// recalls flights for real threats.</para>
     /// </summary>
     private bool LiftCoverIsUp(FactionHQ hq, OperationsState state, CommanderFobOrder order)
     {
         CommanderAirSortie? cover = FindLiftCover(state, order);
         int wanted = cover?.CapsWanted ?? CommanderSettings.LiftEscortMinimum;
         int up = CountLiftEscortsUp(cover);
+        float loadToLandingZone = LiftLoadDistanceToLandingZone(hq, order.Point.Position);
+        // Nothing to measure against means the ahead test cannot be asked, so it passes: the escorts
+        // that are up are the escorts that count, exactly as before this rule existed.
+        int ahead = loadToLandingZone < 0f
+            ? up
+            : CountFightersAhead(
+                cover, order.Point.Position, loadToLandingZone, CommanderSettings.LiftEscortLeadMeters);
         bool aradPending = cover?.AradPending == true;
         if (order.LiftHoldSince < 0f)
         {
@@ -2307,22 +2336,29 @@ internal sealed partial class CommanderOperationsService
         }
 
         float waited = Time.time - order.LiftHoldSince;
-        if (LiftMayLaunch(up, wanted, aradPending, waited, CommanderSettings.PackageFormUpSeconds))
+        if (LiftMayLaunch(up, ahead, wanted, aradPending, waited, CommanderSettings.PackageFormUpSeconds))
         {
             if (order.LiftHoldLogged && waited >= CommanderSettings.PackageFormUpSeconds)
             {
                 CommanderAiLog.Note(
                     hq,
                     $"lift for {LiftLabel(order)} has waited {CommanderSettings.PackageFormUpSeconds:0} s at the "
-                        + $"form-up point; it goes with {up} of {wanted} escort{(wanted == 1 ? string.Empty : "s")} up.");
+                        + $"form-up point; it goes with {up} of {wanted} escort{(wanted == 1 ? string.Empty : "s")} up, "
+                        + $"{ahead} of them ahead of it.");
             }
 
             return true;
         }
 
+        // The escort half of the reason says which of the two tests is holding the load, so the log
+        // tells "no fighters yet" apart from "the fighters are still behind the transport".
+        string escortReason = up < wanted
+            ? $"waiting for the escort ({up} of {wanted} up)"
+            : $"waiting for the escort to get ahead of it ({ahead} of {wanted} up ahead, "
+                + $"{CommanderSettings.LiftEscortLeadMeters:0} m of lead wanted)";
         string reason = aradPending
             ? "waiting for the sweep"
-            : $"waiting for the escort ({up} of {wanted} up)";
+            : escortReason;
         if (!order.LiftHoldLogged)
         {
             order.LiftHoldLogged = true;
@@ -4023,59 +4059,124 @@ internal sealed partial class CommanderOperationsService
         // escort exactly as a platoon lift does, which is the whole of Task 7 of that track.
         Expect(
             failures,
-            "a platoon lift with its escort up and the sweep in goes",
-            LiftMayLaunch(2, 2, false, 5f, 180f),
+            "a platoon lift with its escort up and ahead and the sweep in goes",
+            LiftMayLaunch(2, 2, 2, false, 5f, 180f),
             true);
         Expect(
             failures,
-            "a construction flight with its escort up and no sweep wanted goes",
-            LiftMayLaunch(2, 2, false, 0f, 180f),
+            "a construction flight with its escort up and ahead and no sweep wanted goes",
+            LiftMayLaunch(2, 2, 2, false, 0f, 180f),
             true);
         Expect(
             failures,
             "a lift one fighter short of its escort holds",
-            LiftMayLaunch(1, 2, false, 5f, 180f),
+            LiftMayLaunch(1, 1, 2, false, 5f, 180f),
             false);
         Expect(
             failures,
             "a lift with no escort at all holds",
-            LiftMayLaunch(0, 2, false, 5f, 180f),
+            LiftMayLaunch(0, 0, 2, false, 5f, 180f),
             false);
         Expect(
             failures,
-            "a lift whose escort is up still waits for the sweep",
-            LiftMayLaunch(2, 2, true, 5f, 180f),
+            "a lift whose escort is up and ahead still waits for the sweep",
+            LiftMayLaunch(2, 2, 2, true, 5f, 180f),
             false);
         Expect(
             failures,
             "the sweep wait is bounded by the same package clock every other package holds on",
-            LiftMayLaunch(2, 2, true, 180f, 180f),
+            LiftMayLaunch(2, 2, 2, true, 180f, 180f),
             true);
         Expect(
             failures,
             "a lift short of its escort goes once the clock runs out",
-            LiftMayLaunch(0, 2, false, 180f, 180f),
+            LiftMayLaunch(0, 0, 2, false, 180f, 180f),
             true);
         Expect(
             failures,
             "a second short of the clock it still holds",
-            LiftMayLaunch(0, 2, false, 179f, 180f),
+            LiftMayLaunch(0, 0, 2, false, 179f, 180f),
             false);
         Expect(
             failures,
             "nothing held yet is not on the clock",
-            LiftMayLaunch(0, 2, false, -1f, 180f),
+            LiftMayLaunch(0, 0, 2, false, -1f, 180f),
             false);
         Expect(
             failures,
             "a lift that wants no escort at all is never held by one",
-            LiftMayLaunch(0, 0, false, -1f, 180f),
+            LiftMayLaunch(0, 0, 0, false, -1f, 180f),
             true);
         Expect(
             failures,
             "the lift gate holds and releases on the same clock the rest of the wing forms up on",
-            LiftMayLaunch(0, 2, false, CommanderSettings.PackageFormUpSeconds, CommanderSettings.PackageFormUpSeconds),
+            LiftMayLaunch(0, 0, 2, false, CommanderSettings.PackageFormUpSeconds, CommanderSettings.PackageFormUpSeconds),
             PackageGoesIn(0, 2, 0, 2, false, CommanderSettings.PackageFormUpSeconds, CommanderSettings.PackageFormUpSeconds));
+
+        // The escorts-are-ahead half of the launch gate (user instruction, 2026-09-17: "air
+        // insertions should wait for their escorts to be ahead of them"). The whole escort element
+        // has to be in front, and the SAME bounded wait releases this test and the escorts-are-up
+        // test together — there is one clock on a lift, not two.
+        Expect(
+            failures,
+            "a lift whose escort is airborne but still behind it holds",
+            LiftMayLaunch(2, 0, 2, false, 5f, 180f),
+            false);
+        Expect(
+            failures,
+            "a lift with only half its escort ahead of it holds",
+            LiftMayLaunch(2, 1, 2, false, 5f, 180f),
+            false);
+        Expect(
+            failures,
+            "a lift whose escort never gets ahead goes once the same clock runs out",
+            LiftMayLaunch(2, 0, 2, false, 180f, 180f),
+            true);
+        Expect(
+            failures,
+            "an escort exactly the lead nearer the landing zone is ahead, the inclusive boundary the rest of the mod uses",
+            EscortIsAhead(true, 18_000f, 20_000f, 2000f),
+            true);
+        Expect(
+            failures,
+            "an escort a metre short of the lead is not yet ahead",
+            EscortIsAhead(true, 18_001f, 20_000f, 2000f),
+            false);
+        Expect(
+            failures,
+            "an escort level with the load is not ahead of it",
+            EscortIsAhead(true, 20_000f, 20_000f, 2000f),
+            false);
+        Expect(
+            failures,
+            "an escort that has fallen back behind the load is not ahead of it",
+            EscortIsAhead(true, 26_000f, 20_000f, 2000f),
+            false);
+        Expect(
+            failures,
+            "an escort still on the deck is never ahead, however near the landing zone its base is",
+            EscortIsAhead(false, 1000f, 20_000f, 2000f),
+            false);
+        Expect(
+            failures,
+            "an escort from a base further out than the load's is behind until it has flown the gap",
+            EscortIsAhead(true, 30_000f, 20_000f, 2000f),
+            false);
+        Expect(
+            failures,
+            "a zero lead asks only that the escort is in front, never behind",
+            EscortIsAhead(true, 20_000f, 20_000f, 0f),
+            true);
+        Expect(
+            failures,
+            "the lead is never negative, or a load could launch ahead of its own escort; check the Operations section of the config",
+            CommanderSettings.LiftEscortLeadMeters >= 0f,
+            true);
+        Expect(
+            failures,
+            "the lead is shorter than the ring the escort is guarding, or the escort would have to be clear past the danger before the load is let go; check the Operations section of the config",
+            CommanderSettings.LiftEscortLeadMeters < InsertionThreatRadiusMeters,
+            true);
         Expect(
             failures,
             "the escort floor is at least a pair, or a lone fighter is the first thing lost",

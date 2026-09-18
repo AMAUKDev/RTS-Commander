@@ -293,3 +293,26 @@ Deviations from the plan as written, all recorded in DECISION-050:
   path has already had.
 - Task 11 fixes a different defect from the one the design describes; see the correction in the plan
   above and in DECISION-050.
+- Two hardenings added after the first pass, on a re-audit the closed game bought time for, both with
+  their own named checks and plant-a-defect proofs:
+  (1) a flight that has ALREADY latched now answers the stall clock with `UnloadIsProgressing` rather
+  than an unconditional yes. An unconditional yes reset that clock every time it expired, so an
+  unload that latched and then stopped would have hovered for ever — this track's own bug, one layer
+  up. Thirty seconds of silence now hands the flight back to the parachute drop and the recall.
+  (2) the per-vehicle spacing is measured from where the transport was when it latched
+  (`CargoMission.UnloadAnchor`), not from where it is at each release. At the 10 m/s unload speed
+  limit and roughly five seconds between releases, a live reading could put the second vehicle back
+  on the first.
+- `TryRedirectInsertion` now clears the bypass's arrival state alongside every other arrival field it
+  already reset, so a flight moved to different ground does not place its remaining vehicles at the
+  old site's anchor.
+
+## In-game verification: NOT DONE
+
+The developer closed the game before this track was installed. No self-check has run at plugin load,
+no `unloading in place` line has been seen, and no delivery has been watched happening without a
+touchdown. Acceptance criteria 2 and 3 of design section 5 are entirely unverified. At the next
+launch, confirm a clean `Ground Control (RTS) 0.7.6.0 loaded` with no `self-check FAILED`, then watch
+for `unloading in place at … m`, `set down at …: unloaded in place, not landed`, `settled at … shield
+off`, `delivered (n/m)`, `could not land after … s; unloading in place at … m`, and a
+`Player commander (…) lost … in the air; last seen …` line.

@@ -18,6 +18,12 @@ internal sealed class CommanderMarkerService : ICommanderActivate, ICommanderDea
 
     internal static CommanderMarkerService? Instance { get; private set; }
 
+    /// <summary>How many on-screen marker images exist right now, for the health line
+    /// (<see cref="CommanderHealthDiagnostics"/>). One per tracked unit, each with its position,
+    /// scale, sprite and colour rewritten every frame, so this is the size of the mod's largest
+    /// per-frame cost and the number to watch against frame time.</summary>
+    internal int HealthMarkerCount => markerViews.Count;
+
     internal CommanderMarkerService(CommanderSelectionService selectionService)
     {
         this.selectionService = selectionService;

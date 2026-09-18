@@ -401,12 +401,22 @@ internal sealed partial class CommanderOperationsService
     /// </summary>
     private static void AddStrikeDemand(FactionHQ hq, OperationsState state, List<CommanderAirSortie> demand)
     {
-        CommanderAirSortie? strike = state.StrikeSortie;
-        if (strike == null)
+        // Every open package since concurrent-attacks_20260918: the deliberate one and one per
+        // attack. The body below is unchanged and simply runs once per package (Reuse rule 3).
+        CollectStrikeSorties(state, strikeDemandScratch);
+        for (int s = 0; s < strikeDemandScratch.Count; s++)
         {
-            return;
+            AddOneStrikeDemand(hq, state, demand, strikeDemandScratch[s]);
         }
+    }
 
+    /// <summary>Reused buffer for the walk above; this runs once per review per commander.</summary>
+    private static readonly List<CommanderAirSortie> strikeDemandScratch = new();
+
+    private static void AddOneStrikeDemand(
+        FactionHQ hq, OperationsState state, List<CommanderAirSortie> demand, CommanderAirSortie strike)
+    {
+        _ = state;
         // The bomber element gives up rather than holding the package (fix, 2026-09-15). A base
         // package whose roster holds a bomber the wing can never pay for bought NOTHING for the
         // whole twelve minutes it lived, because the bomber is ordered ahead of the strike airframes

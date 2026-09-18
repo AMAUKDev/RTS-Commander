@@ -29,6 +29,7 @@ internal sealed class CommanderServiceRegistry
     private readonly List<Gated<ICommanderTickPersistent>> tickPersistent = new();
     private readonly List<ICommanderResetSession> resetSession = new();
     private readonly List<ICommanderPersistState> persistState = new();
+    private readonly List<ICommanderPersistStrategic> persistStrategic = new();
 
     /// <summary>
     /// Registers a service under a tier and returns it, so construction and registration stay
@@ -62,6 +63,10 @@ internal sealed class CommanderServiceRegistry
         if (service is ICommanderPersistState ps)
         {
             persistState.Add(ps);
+        }
+        if (service is ICommanderPersistStrategic pst)
+        {
+            persistStrategic.Add(pst);
         }
         return service;
     }
@@ -154,6 +159,28 @@ internal sealed class CommanderServiceRegistry
         for (int i = 0; i < persistState.Count; i++)
         {
             persistState[i].Restore(r);
+        }
+    }
+
+    /// <summary>Fans a strategic save write out to every service that owns part of the strategic
+    /// picture. Not tier-gated, for the same reason <see cref="SnapshotState"/> is not.</summary>
+    internal void SnapshotStrategicState(CommanderStrategicWriter w)
+    {
+        for (int i = 0; i < persistStrategic.Count; i++)
+        {
+            persistStrategic[i].SnapshotStrategic(w);
+        }
+    }
+
+    /// <summary>Fans a strategic save read out to every service that opted in, at most once per
+    /// mission run and only after <see cref="CommanderStrategicSaveStore"/> has checked the
+    /// strategic gate. Every implementer loads records only; the store rebuilds the world itself,
+    /// in an order this fan-out cannot express.</summary>
+    internal void RestoreStrategicState(CommanderStrategicReader r)
+    {
+        for (int i = 0; i < persistStrategic.Count; i++)
+        {
+            persistStrategic[i].RestoreStrategic(r);
         }
     }
 

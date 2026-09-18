@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace GroundControlRts;
@@ -431,6 +431,25 @@ internal sealed class CommanderOperationsMission
     /// plan's original field list (T17), needed to know whether this mission already has one.</summary>
     internal Unit? Truck = null;
 
+    /// <summary>
+    /// The strike package flying ahead of this attack, or null while it has none. Only ever
+    /// populated for <see cref="CommanderMissionKind.Attack"/>.
+    /// <para>
+    /// Added by concurrent-attacks_20260918. Before it, a commander had ONE package, in a single
+    /// field on the state (<c>OperationsState.StrikeSortie</c>) — so allowing several attacks would
+    /// have given the first one air and sent the rest in naked, which is the opposite of what that
+    /// track is for. The package lives on the mission because it should die with the attack, and a
+    /// field here gives that for free.
+    /// </para>
+    /// <para>
+    /// <c>OperationsState.StrikeSortie</c> still exists and still holds the DELIBERATE strike — the
+    /// one the strike clock opens when no attack is running. That slot keeps its one-at-a-time rule
+    /// and its own clock; this track did not change it, and an attack's package closing must never
+    /// reset it.
+    /// </para>
+    /// </summary>
+    internal CommanderOperationsService.CommanderAirSortie? StrikeSortie = null;
+
     /// <summary>True once the "no munitions truck available" line has been logged for this
     /// mission, so it logs once and not every review (design SS2).</summary>
     internal bool NoTruckLogged = false;
@@ -486,6 +505,22 @@ internal sealed class CommanderOperationsMission
     /// §2). Negative when it has never lost one.
     /// </summary>
     internal float LastLossAt = -1f;
+
+    /// <summary>
+    /// Scaled <c>Time.time</c> from which nobody has contested this point — the quiet-ground
+    /// retirement's clock (design.md, <c>unit-economy_20260918</c> §2.4). Refreshed to now wherever
+    /// contact is already detected (<c>DetectMissionContact</c>, <c>DetectHoldingContact</c>), so it
+    /// is the EXISTING notion of contact that drives it and not a second one, and again every time
+    /// the retirement thins the point, so a garrison is thinned once per timeout rather than once
+    /// per review.
+    /// <para>
+    /// Negative until the retirement first sees the point quiet, which starts the clock. "Never been
+    /// in contact" must not read as "quiet for ever": that would cash a picket in on the review it
+    /// was formed, and at half price each time the commander would buy and sell the same vehicles
+    /// for the whole match.
+    /// </para>
+    /// </summary>
+    internal float QuietSince = -1f;
 
     /// <summary>
     /// Scaled <c>Time.time</c> the most recent air-inserted vehicle was set down on this picket, or

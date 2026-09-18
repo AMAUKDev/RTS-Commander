@@ -190,7 +190,10 @@ internal sealed partial class CommanderEnemyCommanderService
                     || airbase.disabled
                     || airbase.center == null
                     || !CommanderAirCommandService.IsCompatibleAirbase(airbase, hq, definition)
-                    || !airbase.CanSpawnAircraft(definition))
+                    // Not airbase.CanSpawnAircraft directly — see
+                    // CommanderAirLaunchFacility.CanBaseLaunch, the mod's one reader of the game's
+                    // raw roster answer (a helipad-only base launches helicopters only).
+                    || !CommanderAirLaunchFacility.CanBaseLaunch(airbase, definition))
                 {
                     continue;
                 }
@@ -228,7 +231,12 @@ internal sealed partial class CommanderEnemyCommanderService
                 || airbase.disabled
                 || airbase.center == null
                 || !CommanderAirCommandService.IsCompatibleAirbase(airbase, hq, definition)
-                || !airbase.CanSpawnAircraft(definition))
+                // Not airbase.CanSpawnAircraft directly — see
+                // CommanderAirLaunchFacility.CanBaseLaunch, the mod's one reader of the game's raw
+                // roster answer. This is also the buy side's offer gate: a type no held base can
+                // launch drops out of the catalogue above (RefreshAirCatalog), so the commander
+                // never spends on an airframe it would then be refused at the pad.
+                || !CommanderAirLaunchFacility.CanBaseLaunch(airbase, definition))
             {
                 continue;
             }

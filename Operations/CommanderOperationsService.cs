@@ -413,6 +413,16 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         /// <summary>The station band each home-CAP fighter was given, so a patrol re-tasked on a
         /// later review keeps the height it was sent to rather than rotating every 30 s.</summary>
         internal readonly Dictionary<Aircraft, int> HomeCapBand = new();
+
+        /// <summary>
+        /// Which of the unit economy's reductions this commander was last reported to be on
+        /// (design.md, <c>unit-economy_20260918</c> §3), so the line is written once per change
+        /// rather than once per 30 s review — the <c>ReportInsertionDenial</c> convention.
+        /// <see cref="CommanderUnitEconomyStep.None"/> until the ceiling first binds, which is the
+        /// state a commander with room to grow is genuinely in, so a match that never reaches the
+        /// ceiling stays silent.
+        /// </summary>
+        internal CommanderUnitEconomyStep UnitEconomyStepReported = CommanderUnitEconomyStep.None;
     }
 
     public void TickPersistent()
@@ -530,7 +540,13 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             // Prune again after the fills so the review line's staged= counts only vehicles still
             // in the pool, not the ones a platoon or picket took this review.
             PruneStagingPosts(state);
+            // Design §3's order of application, and the order is the specification rather than a
+            // preference: the idle reserve is cashed in FIRST because nothing is lost by it — those
+            // vehicles were not fighting — and only then is a garrison taken off quiet ground.
+            // Refusing to grow is neither of these; it happens at the buyer, which reviews after
+            // this and reads the ceiling against the count these two have just reduced.
             SellSurplusPool(hq, state);
+            RetireQuietGround(hq, state);
             LogReviewDiagnostics(hq, state);
         }
 
@@ -696,12 +712,10 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         LogStaged(hq, newlyStaged, state.Pool.Count);
     }
 
-    /// <summary>How many pool vehicles are surplus to the idle cap, pure: everything past the cap,
-    /// never negative. A cap of zero or less disables the sale.</summary>
-    internal static int PoolSurplusToSell(int poolCount, int cap)
-    {
-        return cap <= 0 ? 0 : Mathf.Max(0, poolCount - cap);
-    }
+    // PoolSurplusToSell lived here: "how many pool vehicles are surplus to the idle cap". It was
+    // removed by unit-economy_20260918 §2.1, which sells on the idle CLOCK alone. The cap it read,
+    // CommanderSettings.PoolIdleCap, keeps its other job — holding the game's own depot deployment
+    // loop and the buyer while the pool is full (Ai/CommanderEnemyCommanderService.cs).
 
     /// <summary>Whether one pool vehicle has stood idle long enough to be sold, pure.</summary>
     internal static bool PoolUnitSellable(float idleSeconds, float minutes)
@@ -738,31 +752,34 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
     private readonly int[] poolSaleOpenByRole = new int[RoleCount];
 
     /// <summary>
-    /// Sells the pool's surplus (user, 2026-09-14): once every picket, platoon and truck slot has
-    /// taken what it wants, any vehicle past <c>PoolIdleCap</c> that has stood on the reserve ring
-    /// for <c>PoolIdleSellMinutes</c> is despawned and half its price refunded, oldest idle first.
-    /// Reassignment already runs ahead of this every review (the picket fill, platoon formation and
-    /// reinforcement all draw from the pool), so what is left here is what nothing on the map wants
-    /// — except a vehicle whose role the order book still has an open line for (fix B, 2026-09-15):
-    /// that one is the answer to a line the buyer would otherwise buy again, and as many of them as
-    /// the book asks for are kept (<see cref="PoolUnitWanted"/>).
+    /// Cashes in the idle reserve (user, 2026-09-14; widened by design.md,
+    /// <c>unit-economy_20260918</c> §2.1): once every picket, platoon and truck slot has taken what
+    /// it wants, any vehicle that has stood on the reserve ring with nothing to do for
+    /// <c>IdleReserveMinutes</c> is despawned and <c>PoolSellRefundFraction</c> of its price
+    /// refunded, oldest idle first. Reassignment already runs ahead of this every review (the picket
+    /// fill, platoon formation and reinforcement all draw from the pool), so what is left here is
+    /// what nothing on the map wants — except a vehicle whose role the order book still has an open
+    /// line for (fix B, 2026-09-15): that one is the answer to a line the buyer would otherwise buy
+    /// again, and as many of them as the book asks for are kept (<see cref="PoolUnitWanted"/>).
     /// Server-only: the despawn and the refund both are.
+    /// <para>
+    /// The POOL CAP no longer gates the sale. It used to sell only the vehicles past
+    /// <c>PoolIdleCap</c>, which left twelve idle vehicles per commander standing for the whole
+    /// match; forty-five were measured sitting in reserve at the point a match reached 120 ms a
+    /// frame, and the game's per-frame cost counts those exactly as it counts a tank in a fight.
+    /// Every vehicle nothing wants now goes, and the cap keeps only its other job — holding the
+    /// game's own depot deployment loop and the buyer while the pool is full.
+    /// </para>
     /// </summary>
     private void SellSurplusPool(FactionHQ hq, OperationsState state)
     {
-        if (!hq.IsServer)
-        {
-            return;
-        }
-
-        int surplus = PoolSurplusToSell(state.Pool.Count, CommanderSettings.PoolIdleCap);
-        if (surplus <= 0)
+        if (!hq.IsServer || state.Pool.Count == 0)
         {
             return;
         }
 
         poolSaleScratch.Clear();
-        float minutes = CommanderSettings.PoolIdleSellMinutes;
+        float minutes = CommanderSettings.IdleReserveMinutes;
         for (int i = 0; i < state.Pool.Count; i++)
         {
             Unit unit = state.Pool[i];
@@ -795,19 +812,23 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
 
         int sold = 0;
         float refund = 0f;
-        for (int i = 0; i < poolSaleScratch.Count && sold < surplus; i++)
+        for (int i = 0; i < poolSaleScratch.Count; i++)
         {
-            Unit unit = poolSaleScratch[i];
-            float price = unit.definition is VehicleDefinition definition ? Mathf.Max(0f, definition.value) : 0f;
-            if (!CommanderEconomyService.DespawnUnit(unit))
+            // CashInVehicle is the one definition of a sale, shared with the quiet-ground
+            // retirement (Operations/CommanderOperationsUnitEconomy.cs, Reuse rule 5). It prices the
+            // vehicle through CommanderEconomyService.StrategicUnitValue, the mod's single answer to
+            // "what is this unit worth", which for a vehicle is the same definition value this loop
+            // used to read inline.
+            if (!CashInVehicle(poolSaleScratch[i], out float one))
             {
                 continue;
             }
 
+            Unit unit = poolSaleScratch[i];
             state.Pool.Remove(unit);
             state.PoolIssued.Remove(unit);
             state.PoolIdleSince.Remove(unit);
-            refund += price * Mathf.Clamp01(CommanderSettings.PoolSellRefundFraction);
+            refund += one;
             sold++;
         }
 
@@ -816,8 +837,8 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
             hq.AddFunds(refund);
             CommanderAiLog.Note(
                 hq,
-                $"sells {sold} idle vehicle(s) from the pool for {refund:0}: nothing on the map wants them "
-                    + $"({state.Pool.Count} left, cap {CommanderSettings.PoolIdleCap}).");
+                $"cashes in {sold} idle vehicle(s) from the reserve for {refund:0}: nothing on the map wants them "
+                    + $"({state.Pool.Count} left, idle timeout {minutes:0} minute(s)).");
         }
 
         poolSaleScratch.Clear();
@@ -1015,6 +1036,14 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         {
             platoon.InContactUntil = Time.time + ContactHoldSeconds;
             platoon.ContactBearingAnchor = hostile;
+            // The ground this platoon is standing on is being contested, so its point is not quiet
+            // (unit-economy_20260918 §2.4). Null when the platoon is holding the reserve ring, which
+            // is not a point and is never retired from.
+            if (platoon.Mission != null)
+            {
+                platoon.Mission.QuietSince = Time.time;
+            }
+
             if (!wasInContact)
             {
                 LogPostContact(hq, platoon, distance);
@@ -1026,6 +1055,11 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         if (LossIsRecent(platoon.LastLossAt, Time.time, LossContactSeconds))
         {
             platoon.InContactUntil = Time.time + ContactHoldSeconds;
+            if (platoon.Mission != null)
+            {
+                platoon.Mission.QuietSince = Time.time;
+            }
+
             // Nothing is tracked to face: the contact sortie orbits the platoon itself, the only
             // evidence of where the fight is.
             platoon.ContactBearingAnchor = here;
@@ -1059,6 +1093,11 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
                 || LossIsRecent(mission.LastLossAt, Time.time, LossContactSeconds))
             {
                 mission.ContactUntil = Time.time + ContactHoldSeconds;
+                // The quiet-ground clock is restarted by the SAME evidence, at the five-second
+                // cadence this detection already runs at rather than at the thirty-second review, so
+                // a contact between two reviews can never be missed by the retirement
+                // (unit-economy_20260918 §2.4).
+                mission.QuietSince = Time.time;
             }
         }
     }
@@ -1934,6 +1973,7 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         CheckForwardBaseShare(failures);
         CheckOrderBook(failures);
         CheckSizing(failures);
+        CheckConcurrentAttacks(failures);
         CheckObservedFloor(failures);
         CheckAxes(failures);
         CheckPressure(failures);
@@ -1953,6 +1993,8 @@ internal sealed partial class CommanderOperationsService : ICommanderTickPersist
         CheckSortieGathering(failures);
         CheckSurvival(failures);
         CheckReseat(failures);
+        CheckStrategicRestore(failures);
+        CheckUnitEconomy(failures);
 
         if (failures.Count == 0)
         {

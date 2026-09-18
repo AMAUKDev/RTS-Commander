@@ -215,6 +215,53 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         CheckDefencePosture();
         CheckLadder();
         CheckSpawnDepotPick();
+        CheckCaptureVehicleRule();
+    }
+
+    /// <summary>
+    /// The capture-unit rule at the boundary that broke it (2026-09-18). A garrison and an airbase
+    /// capture unit are both bought through <see cref="CaptureVehicleQualifies"/>, so a retune that
+    /// re-admits the logistics types puts unarmed ammo trucks back on every held point.
+    /// </summary>
+    private static void CheckCaptureVehicleRule()
+    {
+        ExpectCapture(
+            "an ammo truck is never a capture unit, however cheap it is",
+            CaptureVehicleQualifies(VehicleType.TRUCK, captureStrength: 1f, value: 2f, budget: 1000f),
+            false);
+        ExpectCapture(
+            "an unmanned ground vehicle is never a capture unit",
+            CaptureVehicleQualifies(VehicleType.UGV, captureStrength: 1f, value: 2f, budget: 1000f),
+            false);
+        ExpectCapture(
+            "a troop carrier that can take ground is a capture unit",
+            CaptureVehicleQualifies(VehicleType.AFV, captureStrength: 1f, value: 120f, budget: 1000f),
+            true);
+        ExpectCapture(
+            "a light carrier that can take ground is a capture unit",
+            CaptureVehicleQualifies(VehicleType.LCV, captureStrength: 1f, value: 80f, budget: 1000f),
+            true);
+        ExpectCapture(
+            "a tank that cannot take ground is not a capture unit",
+            CaptureVehicleQualifies(VehicleType.MBT, captureStrength: 0f, value: 300f, budget: 1000f),
+            false);
+        ExpectCapture(
+            "a capture unit priced exactly at the budget is affordable",
+            CaptureVehicleQualifies(VehicleType.AFV, captureStrength: 1f, value: 120f, budget: 120f),
+            true);
+        ExpectCapture(
+            "a capture unit one above the budget is refused",
+            CaptureVehicleQualifies(VehicleType.AFV, captureStrength: 1f, value: 121f, budget: 120f),
+            false);
+    }
+
+    private static void ExpectCapture(string name, bool actual, bool expected)
+    {
+        if (actual != expected)
+        {
+            CommanderPlugin.Log.LogError(
+                $"Capture vehicle self-check FAILED ({name}): expected {expected}, got {actual}.");
+        }
     }
 
     /// <summary>
@@ -371,33 +418,61 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         {
             state = new CommanderState();
             states[hq] = state;
+            // BEFORE ShouldOpenTreasury below, which is the whole point: a strategic load puts the
+            // war chest back but the state that remembers the treasury was already opened is
+            // created here, on the first review after the load. Seeding it any later hands every
+            // computer faction a second opening balance on top of the restored money, silently.
+            ApplyStrategicPrepared(hq, state);
         }
 
         bool duel = IsDuelMission;
         bool isLocal = ReferenceEquals(hq, localHq);
-        if (!state.Prepared)
+        // Both openers are about putting an opposing faction on the player's economy, so both are
+        // skipped for the player's own commander: no matched balance copied onto itself, no duel
+        // head start. The switch hands the player a staff officer, not a different mission. The
+        // gate is a pure function so the "once per match" half of it is checkable at load — see
+        // CommanderEconomyService.ShouldOpenTreasury, which lives beside the rest of the difficulty
+        // rule rather than here.
+        // A strategic save for this mission has not been read yet: hold the opener rather than race
+        // it. This review fires on the commander's very first tick (nextReviewAt starts at zero), so
+        // relying on the restore landing first inside one frame is not good enough — and that is
+        // exactly what went wrong the first time this shipped, when a restarted mission took the
+        // duel head start on top of what the save was about to restore. Holding costs one review of
+        // delay and removes the ordering question entirely; the hold lifts the moment the store has
+        // decided anything at all, including "there is no save".
+        if (CommanderStrategicSaveStore.IsOpeningBalanceHeld)
         {
-            // Both openers are about putting an opposing faction on the player's economy, so both
-            // are skipped for the player's own commander: no matched balance copied onto itself, no
-            // duel head start. The switch hands the player a staff officer, not a different mission.
-            if (!isLocal)
+            CommanderPlugin.Log.LogInfo(
+                $"{hq.faction?.factionName}: opening balance held for one review — a strategic save for this "
+                    + "mission has not been read yet.");
+            return;
+        }
+
+        // ShouldOpenTreasury's "already prepared" half is pinned at plugin load by
+        // CommanderEconomyService.CheckDifficulty; a strategic load restores state.Prepared above so
+        // that same rule keeps holding across a mission restart rather than handing every computer
+        // faction a second opening balance.
+        if (CommanderEconomyService.ShouldOpenTreasury(isLocal, state.Prepared))
+        {
+            if (mode == ModeMatched)
             {
-                if (mode == ModeMatched)
-                {
-                    LevelEconomy(hq, localHq);
-                }
-                if (duel)
-                {
-                    PrepareDuel(hq);
-                }
+                LevelEconomy(hq, localHq);
             }
-            else
+            if (duel)
             {
-                CommanderAiLog.Note(hq, "keeps the player's own economy: no head start, no fund reset.");
+                PrepareDuel(hq);
             }
 
-            state.Prepared = true;
+            // Last, on whatever the openers left in the balance — including the balance the mission
+            // itself authored, when neither opener ran.
+            ApplyDifficultyToOpeningFunds(hq);
         }
+        else if (isLocal && !state.Prepared)
+        {
+            CommanderAiLog.Note(hq, "keeps the player's own economy: no head start, no fund reset.");
+        }
+
+        state.Prepared = true;
 
         if (duel)
         {
@@ -840,7 +915,28 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
                     : "resumes ground buying: pool below the cap.");
         }
 
-        if (poolFull)
+        // The ground ceiling (design.md, unit-economy_20260918 §2.3). Above it this commander
+        // replaces losses but does not grow: the test is against the LIVE ground-vehicle count, so a
+        // vehicle lost drops the count and re-opens exactly one purchase on the next review. It sits
+        // here, beside the pool-full hold, because the two are the same kind of rule — a reason not
+        // to buy that has nothing to do with money — and it is logged once per change for the same
+        // reason that one is. Air buying is untouched: it happens above this line, and aircraft were
+        // measured at 55 of 427 units and a rounding error in the growth.
+        bool ceilingReached = !CommanderOperationsService.GroundBuyAllowed(hq);
+        if (ceilingReached != state.GroundCeilingReached)
+        {
+            state.GroundCeilingReached = ceilingReached;
+            int liveGround = CommanderOperationsService.CountLiveGroundVehicles(hq);
+            CommanderAiLog.Note(
+                hq,
+                ceilingReached
+                    ? $"stops growing its ground force: {liveGround} vehicles live "
+                        + $"(ceiling {CommanderSettings.GroundUnitCeiling}). It replaces losses only."
+                    : $"resumes growing its ground force: {liveGround} vehicles live, "
+                        + $"below the ceiling of {CommanderSettings.GroundUnitCeiling}.");
+        }
+
+        if (ceilingReached)
         {
             return grant - budget;
         }
@@ -974,6 +1070,29 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         // the posture only reaches airframes in the commander's own set, and those exist only once
         // the buy leg below buys them.
         TaskAirWing(hq);
+    }
+
+    /// <summary>
+    /// Scales an opposing commander's opening balance by the difficulty slider, once, straight
+    /// after whichever opener the mission uses has set it — the duel head start, the matched
+    /// economy, or neither, in which case it scales the balance the mission itself authored. This
+    /// is the starting-funds half of the one slider; the income half is
+    /// <see cref="CommanderEconomyService.IncomeHandicap"/>, and both sit on the same rule
+    /// (<see cref="CommanderEconomyService.StartingFundsFor"/>), so the player's own faction is
+    /// never touched by either. Silent at the default of 1, where it changes nothing.
+    /// </summary>
+    private static void ApplyDifficultyToOpeningFunds(FactionHQ hq)
+    {
+        float opened = CommanderEconomyService.StartingFunds(hq, hq.factionFunds);
+        if (Mathf.Approximately(opened, hq.factionFunds))
+        {
+            return;
+        }
+
+        hq.SetFunds(opened);
+        CommanderAiLog.Note(
+            hq,
+            $"difficulty x{CommanderSettings.EnemyIncomeMultiplier:0.0#}: opens on {opened:0} funds.");
     }
 
     /// <summary>
@@ -1153,12 +1272,25 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
     /// </summary>
     private VehicleDefinition? ChooseCaptureUnit(float budget)
     {
+        return CheapestCaptureVehicle(catalog, budget);
+    }
+
+    /// <summary>
+    /// The capture-unit rule itself, over any catalogue. Extracted from
+    /// <see cref="ChooseCaptureUnit"/> behaviour-neutrally (Reuse rule 5) when the strategic load's
+    /// garrison placement became its second caller: a point restored with nothing standing on it is
+    /// lost on the next hold tick, and what it needs is exactly this — the cheapest thing that can
+    /// move a capture bar, at the price the commander itself pays for one. Forking the rule would
+    /// have let a garrison and a bought capture unit disagree about what can hold ground.
+    /// </summary>
+    internal static VehicleDefinition? CheapestCaptureVehicle(IReadOnlyList<VehicleDefinition> catalog, float budget)
+    {
         VehicleDefinition? best = null;
         for (int i = 0; i < catalog.Count; i++)
         {
             VehicleDefinition definition = catalog[i];
-            if (definition.captureStrength > 0f
-                && definition.value <= budget
+            if (CaptureVehicleQualifies(
+                    definition.vehicleType, definition.captureStrength, definition.value, budget)
                 && (best == null || definition.value < best.value))
             {
                 best = definition;
@@ -1166,6 +1298,34 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// Whether one catalogue entry may be bought to hold ground, pure. Three conditions, and the
+    /// third is the one this rule was missing until 2026-09-18: the entry must move a capture bar,
+    /// it must be within budget, and it must be a vehicle the commander would buy for a FIGHT.
+    /// <para>
+    /// The incident: a munitions truck carries capture strength and costs 2, so it was the cheapest
+    /// entry in both rosters and this rule chose it every time. Every caller was affected. The
+    /// strategic load stood one unarmed ammo truck on each of thirty-one restored control points,
+    /// and the airbase capture buy (<see cref="ChooseCaptureUnit"/>) had been sending the same truck
+    /// to take airbases. "Cheapest thing that can sit in the ring" was always meant to read
+    /// "cheapest thing that can sit in the ring and shoot back"; every other purchase rule in this
+    /// service already applies <see cref="IsCombatVehicleType"/> and this one did not.
+    /// </para>
+    /// <para>
+    /// The combat whitelist does not narrow the field in practice: a capture-capable vehicle is an
+    /// APC or IFV (<c>AFV</c>) or a light carrier (<c>LCV</c>), and both are on it. What it removes
+    /// is exactly the logistics types — <c>TRUCK</c>, <c>UGV</c>, <c>RDR</c>.
+    /// </para>
+    /// </summary>
+    internal static bool CaptureVehicleQualifies(
+        VehicleType type, float captureStrength, float value, float budget)
+    {
+        return captureStrength > 0f
+            && value > 0f
+            && value <= budget
+            && IsCombatVehicleType(type);
     }
 
     /// <summary>
@@ -1319,14 +1479,25 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
 
     private static bool IsCombatVehicle(VehicleDefinition definition)
     {
-        return definition.value > 0f
-            && definition.vehicleType is VehicleType.AAA
-                or VehicleType.IR_SAM
-                or VehicleType.R_SAM
-                or VehicleType.MBT
-                or VehicleType.AFV
-                or VehicleType.ART
-                or VehicleType.LCV;
+        return definition.value > 0f && IsCombatVehicleType(definition.vehicleType);
+    }
+
+    /// <summary>
+    /// The vehicle types the commander spends money on to fight with. Split out of
+    /// <see cref="IsCombatVehicle"/> behaviour-neutrally on 2026-09-18 (Reuse rule 5) when
+    /// <see cref="CaptureVehicleQualifies"/> became its second caller: the price test belongs to the
+    /// caller, the type list is the shared rule. The types NOT here are the logistics ones —
+    /// <c>TRUCK</c>, <c>UGV</c>, <c>RDR</c> — which is why an ammo truck is no longer a capture unit.
+    /// </summary>
+    private static bool IsCombatVehicleType(VehicleType type)
+    {
+        return type is VehicleType.AAA
+            or VehicleType.IR_SAM
+            or VehicleType.R_SAM
+            or VehicleType.MBT
+            or VehicleType.AFV
+            or VehicleType.ART
+            or VehicleType.LCV;
     }
 
     private static int CountAirDefence(FactionHQ hq)
@@ -1503,6 +1674,12 @@ internal sealed partial class CommanderEnemyCommanderService : ICommanderTickPer
         /// <c>DeploymentHeldForFullPool</c>), so the hold/resume log line fires once per transition
         /// rather than every review — the same cadence <see cref="GroundBookOnly"/> uses.</summary>
         internal bool GroundPoolFull;
+
+        /// <summary>Whether the last review found this faction at or above the live ground-vehicle
+        /// ceiling (design.md, <c>unit-economy_20260918</c> §2.3), so the stop/resume line fires once
+        /// per transition — the same cadence <see cref="GroundPoolFull"/> uses, and for the same
+        /// reason.</summary>
+        internal bool GroundCeilingReached;
 
         /// <summary>Whether the last review handed the ground's unspent share of rung 2 to the wing
         /// (see <c>GroundShareGoesToWing</c>), so the log line fires once per transition rather than

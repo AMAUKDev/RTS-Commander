@@ -34,7 +34,8 @@ internal sealed partial class CommanderOverlayUi
         {
             CommanderUiTheme.DrawHelpOverlay(
                 new Rect(12f, 34f, settingsWindowRect.width - 24f, 74f),
-                "Settings are saved in the BepInEx configuration. RTS camera bindings are read only while RTS mode is active and do not alter aircraft controls.");
+                "Settings are saved in the BepInEx configuration. RTS camera bindings are read only while RTS mode is active and do not alter aircraft controls. "
+                    + "Opposition money is the difficulty slider: it multiplies what every faction other than yours earns and what it opens the match holding. Your own faction is never scaled.");
         }
         if (GUI.Button(new Rect(settingsWindowRect.width - 34f, 3f, 26f, 22f), "X", CommanderUiTheme.Button))
         {
@@ -279,23 +280,59 @@ internal sealed partial class CommanderOverlayUi
             1f,
             25f);
 
-        // How much an aircraft parked in a capture ring is worth. It is a balance number the mod
-        // invents - the base game gives an aeroplane no capture strength at all - so it belongs
-        // where it can be turned down, or off, without editing a config file.
+        // Two balance knobs share this last row. The box above is already at the window's height
+        // limit with the help overlay open (see the comment on commandY), so a tenth full-width row
+        // does not fit; both of these are worth-and-money numbers, so they pair up at half width.
+        //
+        // Aircraft capture: how much an aircraft parked in a capture ring is worth. It is a balance
+        // number the mod invents - the base game gives an aeroplane no capture strength at all - so
+        // it belongs where it can be turned down, or off, without editing a config file.
+        //
+        // Opposition money: the difficulty knob (user instruction, 2026-09-16). It multiplies both
+        // what every faction that is not yours earns and what it starts the match with; your own
+        // faction is never scaled, whoever commands it. It reads as a plain multiplier with the
+        // number shown rather than as named steps, on the user's instruction. IMGUI has no tooltip
+        // here, so the window's help overlay carries the explanation in words.
+        float balanceRowY = commandY + 488f;
+        float balanceColumn = (settingsWindowRect.width - 60f) * 0.5f;
         float capture = CommanderSettings.AircraftCaptureStrength;
-        GUI.Label(
-            new Rect(24f, commandY + 488f, 250f, 24f),
-            $"Aircraft capture strength   {capture:0.#}",
-            CommanderUiTheme.Label);
         CommanderSettings.AircraftCaptureStrength = Mathf.Round(
-            Mathf.Clamp(
-                GUI.HorizontalSlider(
-                    new Rect(280f, commandY + 494f, settingsWindowRect.width - 304f, 20f),
-                    capture,
-                    0f,
-                    10f),
-                0f,
-                10f) * 2f) * 0.5f;
+            DrawBalanceSlider(24f, balanceRowY, balanceColumn, "Aircraft capture", capture, 0f, 10f, "0.#", string.Empty) * 2f) * 0.5f;
+
+        float difficulty = CommanderSettings.EnemyIncomeMultiplier;
+        CommanderSettings.EnemyIncomeMultiplier = Mathf.Round(
+            DrawBalanceSlider(
+                36f + balanceColumn,
+                balanceRowY,
+                balanceColumn,
+                "Opposition money",
+                difficulty,
+                CommanderEconomyService.EnemyDifficultyMin,
+                CommanderEconomyService.EnemyDifficultyMax,
+                "0.00",
+                "x") * 20f) / 20f;
+    }
+
+    /// <summary>
+    /// A labelled slider that shares its row with a second one, positioned against a caller-supplied
+    /// column instead of the whole window. Same shape as <see cref="DrawCameraSlider"/>; half width
+    /// because the COMMAND box is already at the settings window's height limit with the help
+    /// overlay open, so a further full-width row would push it off the bottom.
+    /// </summary>
+    private static float DrawBalanceSlider(
+        float x, float y, float columnWidth, string label, float value, float min, float max, string format, string suffix)
+    {
+        float labelWidth = columnWidth * 0.56f;
+        GUI.Label(
+            new Rect(x, y, labelWidth, 24f),
+            $"{label}   {value.ToString(format)}{suffix}",
+            CommanderUiTheme.Label);
+        float slid = GUI.HorizontalSlider(
+            new Rect(x + labelWidth + 6f, y + 6f, columnWidth - labelWidth - 6f, 20f),
+            value,
+            min,
+            max);
+        return Mathf.Clamp(slid, min, max);
     }
 
     /// <summary>A labelled kilometre slider, snapped to a half kilometre so the readout is honest.</summary>
@@ -417,9 +454,9 @@ internal sealed partial class CommanderOverlayUi
     private void DrawPointsSettings(float y)
     {
         const float pointsBoxHeight = 414f;
-        const float operationsBoxHeight = 300f;
+        const float strategicSaveBoxHeight = 190f;
         const float gap = 8f;
-        float contentHeight = pointsBoxHeight + gap + operationsBoxHeight;
+        float contentHeight = pointsBoxHeight + gap + OperationsBoxHeight + gap + strategicSaveBoxHeight;
 
         float width = settingsWindowRect.width - 24f;
         float height = settingsWindowRect.height - y - 16f;
@@ -431,8 +468,62 @@ internal sealed partial class CommanderOverlayUi
 
         DrawStrategicPointsBox(0f, inner.width);
         DrawOperationsBox(pointsBoxHeight + gap, inner.width);
+        DrawStrategicSaveBox(pointsBoxHeight + gap + OperationsBoxHeight + gap, inner.width);
 
         GUI.EndScrollView();
+    }
+
+    /// <summary>
+    /// The strategic save (track <c>strategic-save_20260917</c>): stop a long match, restart the
+    /// mission to clear the frame-rate decay, then carry on with the same points held, the same
+    /// forward bases and a war chest holding the money plus the cash value of the army that was
+    /// standing.
+    /// </summary>
+    /// <remarks>
+    /// Buttons rather than a key binding, because this is a rare, deliberate action that wants its
+    /// status line next to it — the developer needs to see that a save exists and when it was taken
+    /// before restarting the mission, and a key binding has nowhere to say that. The save itself is
+    /// only REQUESTED here: writing a file from inside IMGUI would stall the frame the button is
+    /// drawn on, so the write happens on the mod's own persistent tick
+    /// (<see cref="CommanderStrategicSaveStore.RequestSave"/>).
+    /// </remarks>
+    private void DrawStrategicSaveBox(float y, float width)
+    {
+        GUI.Box(new Rect(4f, y, width - 8f, 190f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Label(new Rect(16f, y + 10f, width - 32f, 22f), "STRATEGIC SAVE", CommanderUiTheme.Header);
+
+        GUI.Label(
+            new Rect(16f, y + 36f, width - 32f, 40f),
+            "Saves who holds what, the forward bases, and each faction's money plus the cash value of "
+                + "everything standing. Restart the mission to load it. Units are refunded, never rebuilt.",
+            CommanderUiTheme.MutedLabel);
+
+        float buttonWidth = (width - 44f) / 2f;
+        if (GUI.Button(new Rect(16f, y + 82f, buttonWidth, 30f), "SAVE STRATEGIC STATE", CommanderUiTheme.Button))
+        {
+            CommanderStrategicSaveStore.Instance?.RequestSave();
+        }
+
+        if (GUI.Button(new Rect(28f + buttonWidth, y + 82f, buttonWidth, 30f), "DISCARD SAVE", CommanderUiTheme.Button))
+        {
+            CommanderStrategicSaveStore.DiscardSave();
+        }
+
+        CommanderSettings.StrategicGarrisonPaid = GUI.Toggle(
+            new Rect(16f, y + 118f, width - 32f, 30f),
+            CommanderSettings.StrategicGarrisonPaid,
+            "Garrisons on load are paid for out of the war chest",
+            CommanderUiTheme.Toggle);
+
+        string status = CommanderStrategicSaveStore.StatusText;
+        if (string.IsNullOrEmpty(status))
+        {
+            status = CommanderStrategicSaveStore.HasSaveFor(CommanderFeatureGate.MissionName)
+                ? "A save is waiting: it loads when this mission next starts."
+                : "No save for this mission.";
+        }
+
+        GUI.Label(new Rect(16f, y + 152f, width - 32f, 24f), status, CommanderUiTheme.MutedLabel);
     }
 
     private void DrawStrategicPointsBox(float y, float width)
@@ -441,8 +532,11 @@ internal sealed partial class CommanderOverlayUi
         GUI.Label(new Rect(16f, y + 10f, width - 32f, 22f), "STRATEGIC POINTS", CommanderUiTheme.Header);
 
         float rowY = y + 42f;
+        // "Garrison per point" since unit-economy_20260918 §2.2: the number is the standing garrison
+        // AND the ownership threshold, and "minimum" read as though something else decided the real
+        // size. One vehicle is the default now.
         CommanderSettings.PointsMinGarrison = Mathf.RoundToInt(DrawPointsSlider(
-            rowY, width, "Minimum garrison", CommanderSettings.PointsMinGarrison, 1f, 6f, "0", " vehicles"));
+            rowY, width, "Garrison per point", CommanderSettings.PointsMinGarrison, 1f, 6f, "0", " vehicles"));
         rowY += 38f;
 
         CommanderSettings.PointsHoldSeconds = Mathf.Round(DrawPointsSlider(
@@ -490,9 +584,21 @@ internal sealed partial class CommanderOverlayUi
     /// balance decisions, not taste knobs (see <c>Core/CommanderSettings.cs</c>'s own comment on
     /// the section).
     /// </summary>
+    /// <summary>
+    /// How tall the OPERATIONS box is: the 10 px top inset plus a 32 px header, thirteen 38 px slider
+    /// rows and a 34 px footnote — 570. The twelfth and thirteenth rows are the attack allowance
+    /// (concurrent-attacks_20260918), which sits beside the ground ceiling because both are about how
+    /// much army the commander commits and where. A named constant since unit-economy_20260918 added three
+    /// rows to it, because the height was written out twice, once here and once in the scroll view's
+    /// content measurement, and the two had already drifted apart by a row. The eleventh row is the
+    /// air patrol reserve (air-ceiling_20260918), which sits with the ground ceiling because the two
+    /// are the same idea applied to the two halves of the army.
+    /// </summary>
+    private const float OperationsBoxHeight = 570f;
+
     private void DrawOperationsBox(float y, float width)
     {
-        GUI.Box(new Rect(4f, y, width - 8f, 300f), string.Empty, CommanderUiTheme.Panel);
+        GUI.Box(new Rect(4f, y, width - 8f, OperationsBoxHeight), string.Empty, CommanderUiTheme.Panel);
         GUI.Label(new Rect(16f, y + 10f, width - 32f, 22f), "OPERATIONS", CommanderUiTheme.Header);
 
         float rowY = y + 42f;
@@ -522,6 +628,36 @@ internal sealed partial class CommanderOverlayUi
 
         CommanderSettings.OperationsMaxPreemptiveAirObjectives = Mathf.RoundToInt(DrawPointsSlider(
             rowY, width, "Pre-emptive air cover", CommanderSettings.OperationsMaxPreemptiveAirObjectives, 0f, 12f, "0", " marches"));
+        rowY += 38f;
+
+        // The unit economy (design.md, unit-economy_20260918 §4), all three tunable in play because
+        // the defaults are starting points rather than conclusions. The fourth setting of that
+        // design, the garrison per point, is one box up with the rest of the points rules — it is
+        // the ownership threshold as well, and it belongs beside the hold time it works with.
+        CommanderSettings.GroundUnitCeiling = Mathf.RoundToInt(DrawPointsSlider(
+            rowY, width, "Ground ceiling", CommanderSettings.GroundUnitCeiling, 0f, 300f, "0", " vehicles"));
+        rowY += 38f;
+
+        // Beside the ground ceiling on purpose: this is the same rule for the other half of the army,
+        // and the number a reader wants when they have just moved the one above it.
+        CommanderSettings.AirPatrolReserve = Mathf.RoundToInt(DrawPointsSlider(
+            rowY, width, "Air patrol reserve", CommanderSettings.AirPatrolReserve, 0f, 20f, "0", " slots"));
+        rowY += 38f;
+
+        CommanderSettings.MaxAttacks = Mathf.RoundToInt(DrawPointsSlider(
+            rowY, width, "Attacks at once", CommanderSettings.MaxAttacks, 0f, 8f, "0", " attacks"));
+        rowY += 38f;
+
+        CommanderSettings.AttacksPerPlatoon = DrawPointsSlider(
+            rowY, width, "Attacks per platoon", CommanderSettings.AttacksPerPlatoon, 0f, 1f, "0.00", string.Empty);
+        rowY += 38f;
+
+        CommanderSettings.IdleReserveMinutes = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Idle reserve timeout", CommanderSettings.IdleReserveMinutes, 0f, 15f, "0", " min"));
+        rowY += 38f;
+
+        CommanderSettings.QuietGroundMinutes = Mathf.Round(DrawPointsSlider(
+            rowY, width, "Quiet ground timeout", CommanderSettings.QuietGroundMinutes, 0f, 30f, "0", " min"));
         rowY += 38f;
 
         GUI.Label(

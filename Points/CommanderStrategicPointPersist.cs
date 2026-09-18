@@ -32,7 +32,7 @@ namespace GroundControlRts;
 /// the same <c>Newtonsoft.Json</c> round trip as every other record.
 /// </para>
 /// </remarks>
-internal sealed partial class CommanderStrategicPointService : ICommanderPersistState
+internal sealed partial class CommanderStrategicPointService : ICommanderPersistState, ICommanderPersistStrategic
 {
     /// <summary>
     /// How long discovery waits, on a hot-reload run only, before it starts sampling the map — the
@@ -46,6 +46,22 @@ internal sealed partial class CommanderStrategicPointService : ICommanderPersist
     /// anyway, and it is paid only on a reload run, never on a normal launch.
     /// </summary>
     private const float RestoreGraceSeconds = 2f;
+
+    /// <summary>
+    /// The same wait, for a STRATEGIC save waiting on a fresh mission run: the strategic restore
+    /// deliberately lets the mission settle first
+    /// (<see cref="CommanderStrategicSaveStore.StrategicRestoreSettleSeconds"/>), so the two-second
+    /// hot-reload grace would expire long before it arrives. The settle plus the hold grace plus
+    /// ten seconds of slack, measured on the WALL clock against a settle measured on the game clock,
+    /// which is why the slack is there at all: at half speed the game clock lags. Long enough that
+    /// discovery never finishes on a map the restore is about to replace — otherwise every platoon,
+    /// picket mission and forward-base plan made in those seconds would be aimed at point objects
+    /// the restore then throws away.
+    /// </summary>
+    private const float StrategicRestoreGraceSeconds =
+        CommanderStrategicSaveStore.StrategicRestoreSettleSeconds
+            + CommanderStrategicSaveStore.StrategicHoldGraceSeconds
+            + 10f;
 
     /// <summary>When the hot-reload restore grace expires, on <c>Time.realtimeSinceStartup</c> —
     /// the same clock <c>discoveryRetryAt</c> uses, because this is a one-shot wall-clock wait for
@@ -67,14 +83,26 @@ internal sealed partial class CommanderStrategicPointService : ICommanderPersist
     /// </summary>
     private bool IsWaitingForRestore()
     {
-        if (restoreHandled || !CommanderSettings.PersistStateAcrossReload || !CommanderStateStore.IsHotReloadLoad)
+        if (restoreHandled)
+        {
+            return false;
+        }
+
+        // Two reasons to wait, and both are "another system is about to hand this service its map".
+        // The hot reload is the original one. The second is a strategic save waiting for this
+        // mission: the restore runs on a fresh run, and without the wait discovery would finish and
+        // the hold tick would start judging points before the restore had said who owns them.
+        bool hotReloadPending = CommanderSettings.PersistStateAcrossReload && CommanderStateStore.IsHotReloadLoad;
+        bool strategicPending = CommanderStrategicSaveStore.HasPendingSave();
+        if (!hotReloadPending && !strategicPending)
         {
             return false;
         }
 
         if (restoreGraceUntil < 0f)
         {
-            restoreGraceUntil = Time.realtimeSinceStartup + RestoreGraceSeconds;
+            restoreGraceUntil = Time.realtimeSinceStartup
+                + (strategicPending ? StrategicRestoreGraceSeconds : RestoreGraceSeconds);
         }
 
         return Time.realtimeSinceStartup < restoreGraceUntil;
@@ -112,9 +140,125 @@ internal sealed partial class CommanderStrategicPointService : ICommanderPersist
 
     public void Restore(CommanderStateReader r)
     {
+        ApplyPointRecords(r.Snapshot.StrategicPoints, r.Snapshot.StrategicRoads, attachMines: true, "across hot reload");
+    }
+
+    /// <summary>
+    /// The strategic save's write side: the same points, the same roads and the same
+    /// owner-by-faction-name discipline as the hot-reload snapshot, with the mine identifier
+    /// suppressed. A <c>PersistentID</c> is a counter a mission load resets, so carrying one across
+    /// a restart would attach the record to whatever unit happens to get that number next; the
+    /// store refuses a save that carries one
+    /// (<see cref="CommanderStrategicSaveStore.CarriesNoUnitIdentifier"/>).
+    /// </summary>
+    public void SnapshotStrategic(CommanderStrategicWriter w)
+    {
+        // Same rule as the hot-reload snapshot and for the same reason: a discovery pass part way
+        // through holds only the points found so far, and saving that would skip the rest for good.
+        if (!DiscoveryComplete)
+        {
+            return;
+        }
+
+        List<string> factionNames = CollectFactionNames();
+        for (int i = 0; i < points.Count; i++)
+        {
+            CommanderStrategicPointRecord record = ToRecord(points[i], factionNames);
+            record.MinePersistentId = 0u;
+            w.Snapshot.Points.Add(record);
+        }
+
+        for (int i = 0; i < roadPointLists.Count; i++)
+        {
+            w.Snapshot.Roads.Add(ToRecord(roadPointLists[i]));
+        }
+    }
+
+    /// <summary>
+    /// The strategic save's read side. Load-only, as
+    /// <see cref="ICommanderPersistStrategic"/> requires: the points, their owners and the roads go
+    /// into this service's own lists and nothing is written to the world. There are no mines to
+    /// re-attach, because a mine is a building the commander built and buildings are cashed into
+    /// the war chest rather than recreated (user decision 2026-09-17).
+    /// </summary>
+    public void RestoreStrategic(CommanderStrategicReader r)
+    {
+        ApplyPointRecords(r.Snapshot.Points, r.Snapshot.Roads, attachMines: false, "from the strategic save");
+    }
+
+    /// <summary>
+    /// Hands each saved AIRBASE back to the faction that held it, through the game's own capture
+    /// state rather than through the mod's hold machine. A base's owner is
+    /// <c>Airbase.CurrentHQ</c>, driven by the game's capture ring, so writing the mod's own hold
+    /// field would change nothing — and a base cannot be garrisoned into ownership the way a
+    /// village can.
+    /// </summary>
+    /// <remarks>
+    /// <b>Unproven in play.</b> <c>Capture.ForceCapture</c> is public and server-only but is called
+    /// nowhere else in this mod (study, 2026-09-17), so this is the one step of the restore with no
+    /// prior art behind it. It also reassigns every building on the base, which can leave a
+    /// knocked-out building attributed to the wrong faction; the study's verdict was that this is
+    /// worth a log line rather than a guard, so each forced capture says what it did.
+    /// <para>
+    /// Driven by <see cref="CommanderStrategicSaveStore"/> during the ordered apply rather than
+    /// from <see cref="RestoreStrategic"/>, which writes nothing to the world by contract.
+    /// </para>
+    /// </remarks>
+    internal int ApplyStrategicBaseOwnership()
+    {
+        int forced = 0;
+        for (int i = 0; i < points.Count; i++)
+        {
+            CommanderStrategicPoint point = points[i];
+            if (point.Kind != StrategicPointKind.Base || point.Airbase == null || point.Airbase.disabled)
+            {
+                continue;
+            }
+
+            FactionHQ? owner = HqAt(point.Hold.OwnerIndex);
+            if (owner == null || !owner.IsServer)
+            {
+                // Spawning and capture are both server-side; a pure multiplayer client throws.
+                continue;
+            }
+
+            if (ReferenceEquals(point.Airbase.CurrentHQ, owner))
+            {
+                continue;
+            }
+
+            Capture? capture = point.Airbase.capture;
+            if (capture == null)
+            {
+                CommanderPlugin.Log.LogWarning(
+                    $"Strategic load: {point.Label} has no capture ring, so its owner could not be restored.");
+                continue;
+            }
+
+            capture.ForceCapture(owner);
+            forced++;
+            CommanderAiLog.Note(hq: owner, $"strategic load: {point.Label} handed back by force capture.");
+            CommanderPlugin.Log.LogInfo(
+                $"Strategic load: forced {point.Label} to {owner.faction?.factionName}. Every building on it "
+                    + "is reassigned with the base, so a knocked-out one may now read as theirs.");
+        }
+
+        return forced;
+    }
+
+    /// <summary>
+    /// The one restore body, shared by the hot-reload path and the strategic save (Reuse rule 4:
+    /// the two differ only in whether a mine identifier is worth resolving, so the difference is a
+    /// parameter and not a second copy).
+    /// </summary>
+    private void ApplyPointRecords(
+        List<CommanderStrategicPointRecord> records,
+        List<CommanderRoadPolylineRecord> roads,
+        bool attachMines,
+        string what)
+    {
         restoreHandled = true;
 
-        List<CommanderStrategicPointRecord> records = r.Snapshot.StrategicPoints;
         if (records.Count == 0)
         {
             // Nothing was saved (an older snapshot, or one taken mid-discovery). Leave the service
@@ -153,7 +297,10 @@ internal sealed partial class CommanderStrategicPointService : ICommanderPersist
                 }
             }
 
-            if (records[i].MinePersistentId != 0u)
+            // Only the hot-reload path resolves a mine: its world is untouched, so the identifier
+            // still names the building it named. A strategic save carries none, because a mission
+            // restart re-issues every identifier from zero.
+            if (attachMines && records[i].MinePersistentId != 0u)
             {
                 PersistentID id = new() { Id = records[i].MinePersistentId };
                 if (id.TryGetUnit(out Unit mine) && mine != null && !mine.disabled)
@@ -169,7 +316,6 @@ internal sealed partial class CommanderStrategicPointService : ICommanderPersist
             }
         }
 
-        List<CommanderRoadPolylineRecord> roads = r.Snapshot.StrategicRoads;
         for (int i = 0; i < roads.Count; i++)
         {
             List<GlobalPosition> polyline = FromRecord(roads[i]);
@@ -186,7 +332,7 @@ internal sealed partial class CommanderStrategicPointService : ICommanderPersist
         discovery = DiscoveryState.Done;
 
         CommanderPlugin.Log.LogInfo(
-            $"Strategic points restored across hot reload: {points.Count} points, "
+            $"Strategic points restored {what}: {points.Count} points, "
                 + $"{roadPointLists.Count} road polylines, {held} held.");
     }
 

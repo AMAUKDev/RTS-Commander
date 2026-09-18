@@ -365,6 +365,21 @@ internal sealed partial class CommanderEconomyService
             CommanderPlugin.Log.LogError("Economy self-check FAILED: the enemy income handicap no longer spares the player's faction or floors at zero.");
         }
 
+        // The other half of the same slider: opening balances, and the once-per-match rule that
+        // stops a mid-match change re-opening one. The same rule is what a strategic load leans on:
+        // it restores the "already prepared" flag so this table's second half keeps holding after a
+        // mission restart (see CommanderEnemyCommanderStrategicPersist).
+        CheckDifficulty();
+
+        // The strategic save's building valuation, which is the half of the war chest that could
+        // quietly print money (CommanderEconomyServiceStrategicPersist).
+        System.Collections.Generic.List<string> strategicFailures = new();
+        CheckStrategicValuation(strategicFailures);
+        for (int i = 0; i < strategicFailures.Count; i++)
+        {
+            CommanderPlugin.Log.LogError($"Economy self-check FAILED: {strategicFailures[i]}");
+        }
+
         if (MayStandInForDock(BuildingType.DEP) || MayStandInForDock(BuildingType.HGR) || MayStandInForDock(BuildingType.RDR)
             || !MayStandInForDock(BuildingType.CIV))
         {
@@ -892,6 +907,136 @@ internal sealed partial class CommanderEconomyService
         return isLocal ? 1f : Mathf.Max(0f, multiplier);
     }
 
+    /// <summary>
+    /// Lowest the difficulty slider goes: half money. Below half an opposing commander cannot
+    /// accumulate the price of the cheapest platoon between two reviews, so it stops buying
+    /// altogether and reads as a broken opponent rather than an easy one.
+    /// </summary>
+    internal const float EnemyDifficultyMin = 0.5f;
+
+    /// <summary>
+    /// Highest the difficulty slider goes: triple money. Picked with the floor so the fair-fight
+    /// default of 1 sits inside the range rather than at its end, and because past three an
+    /// opposing commander fills the map faster than the player can cross it.
+    /// </summary>
+    internal const float EnemyDifficultyMax = 3f;
+
+    /// <summary>
+    /// The opening balance a faction starts a match on: the figure the mission (or the duel head
+    /// start) authored for the player's own faction, and that figure scaled by the difficulty
+    /// multiplier for every other faction. Deliberately built on
+    /// <see cref="IncomeHandicapFor"/> so there is one definition of who gets handicapped and two
+    /// callers (Reuse rule 4) — the slider then means exactly one thing, whether it is paying out
+    /// income or opening a treasury. Floored at zero: a mistyped negative must empty a balance,
+    /// never invert it.
+    /// </summary>
+    internal static float StartingFundsFor(float baseFunds, bool isLocal, float multiplier)
+    {
+        return Mathf.Max(0f, baseFunds * IncomeHandicapFor(isLocal, multiplier));
+    }
+
+    /// <summary>The opening balance for this faction at the difficulty currently set. Same wrapper
+    /// shape as <see cref="IncomeHandicap"/>, over the same rule.</summary>
+    internal static float StartingFunds(FactionHQ hq, float baseFunds)
+    {
+        return StartingFundsFor(
+            baseFunds,
+            ReferenceEquals(hq, CommanderGameAccess.GetLocalHq()),
+            CommanderSettings.EnemyIncomeMultiplier);
+    }
+
+    /// <summary>
+    /// Whether a commander review is the one that opens a faction's treasury: only for a faction
+    /// that is not the player's own, and only on that faction's first review. Pure, and checked at
+    /// load, because the second half is what stops the difficulty slider handing out a second
+    /// opening balance when it is moved mid-match — income changes from the next payout on, opening
+    /// balances do not move at all. Called from
+    /// <c>CommanderEnemyCommanderService.Review</c>, which holds the "already prepared" flag; it
+    /// lives here so the whole difficulty rule — who, how much, and how often — is in one place.
+    /// </summary>
+    internal static bool ShouldOpenTreasury(bool isLocal, bool alreadyPrepared)
+    {
+        return !isLocal && !alreadyPrepared;
+    }
+
+    /// <summary>
+    /// The difficulty slider at its named boundaries. Two rules are pinned. First the arithmetic:
+    /// the player's own faction is never scaled, the default of 1 changes nothing at all, a higher
+    /// number multiplies, and a negative empties a balance instead of inverting it. Second the
+    /// timing: an opening balance is handed out once per faction per match, so moving the slider
+    /// mid-match cannot re-open a treasury that has already been opened.
+    /// </summary>
+    private static void CheckDifficulty()
+    {
+        Expect(
+            "the player's own opening balance ignores the difficulty slider",
+            StartingFundsFor(1000f, isLocal: true, multiplier: 3f),
+            1000f);
+        Expect(
+            "the default difficulty of 1 leaves an opposing opening balance exactly as authored",
+            StartingFundsFor(1000f, isLocal: false, multiplier: 1f),
+            1000f);
+        Expect(
+            "doubling the difficulty doubles an opposing opening balance",
+            StartingFundsFor(1000f, isLocal: false, multiplier: 2f),
+            2000f);
+        Expect(
+            "halving the difficulty halves an opposing opening balance",
+            StartingFundsFor(1000f, isLocal: false, multiplier: EnemyDifficultyMin),
+            500f);
+        Expect(
+            "a negative difficulty empties an opposing opening balance rather than inverting it",
+            StartingFundsFor(1000f, isLocal: false, multiplier: -2f),
+            0f);
+        Expect(
+            "a faction that opens on nothing still opens on nothing at any difficulty",
+            StartingFundsFor(0f, isLocal: false, multiplier: EnemyDifficultyMax),
+            0f);
+        Expect(
+            "a faction authored into the red opens on nothing rather than deeper in the red",
+            StartingFundsFor(-500f, isLocal: false, multiplier: 2f),
+            0f);
+        Expect(
+            "the difficulty slider's range still brackets the fair-fight default of 1",
+            EnemyDifficultyMin > 0f && EnemyDifficultyMin < 1f && EnemyDifficultyMax > 1f,
+            true);
+
+        Expect(
+            "an opposing faction's first review opens its treasury",
+            ShouldOpenTreasury(isLocal: false, alreadyPrepared: false),
+            true);
+        Expect(
+            "an opposing faction already prepared never re-opens its treasury, whatever the slider does",
+            ShouldOpenTreasury(isLocal: false, alreadyPrepared: true),
+            false);
+        Expect(
+            "the player's own faction never has its treasury opened",
+            ShouldOpenTreasury(isLocal: true, alreadyPrepared: false),
+            false);
+        Expect(
+            "the player's own faction never has its treasury re-opened either",
+            ShouldOpenTreasury(isLocal: true, alreadyPrepared: true),
+            false);
+    }
+
+    /// <summary>The economy's money comparison for a self-check case. The case name says which
+    /// rule failed, the way the commander's own <c>Expect</c> pair does.</summary>
+    private static void Expect(string name, float actual, float expected)
+    {
+        if (!Mathf.Approximately(actual, expected))
+        {
+            CommanderPlugin.Log.LogError($"Economy self-check FAILED ({name}): expected {expected}, got {actual}.");
+        }
+    }
+
+    private static void Expect(string name, bool actual, bool expected)
+    {
+        if (actual != expected)
+        {
+            CommanderPlugin.Log.LogError($"Economy self-check FAILED ({name}): expected {expected}, got {actual}.");
+        }
+    }
+
     private void PayIncome()
     {
         HoldFundsInTreasury();
@@ -1129,8 +1274,14 @@ internal sealed partial class CommanderEconomyService
     /// <paramref name="rotation"/> says. The player's placements pass the rotation the ghost was
     /// showing when the click landed — chosen heading, and the slope under it when the placement was
     /// conforming to the ground — so the preview is exactly what lands. The enemy commander still
-    /// scatters its rotations, because nobody is watching a ghost for those, and a caller that asks
-    /// for neither gets an upright building facing north as before.
+    /// scatters its rotations, because nobody is watching a ghost for those.
+    /// <para>
+    /// A caller that passes no rotation at all is an AUTOMATIC placement, and has its heading laid
+    /// over the ground here by <see cref="CommanderBuildPreview.GroundConformingRotation"/> — the
+    /// same measurement and the same steepness limit the manual ghost uses. This method is the one
+    /// place every build path in the mod goes through, so it is the only place the tilt has to be
+    /// applied.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// The name is written twice on purpose. <c>UniqueName</c> is the id the game registers the
@@ -1162,9 +1313,17 @@ internal sealed partial class CommanderEconomyService
 
         // The spawn offset is turned with the building, so a tilted structure's offset follows the
         // slope with it — the same product CommanderBuildPreview.Draw uses for the ghost.
-        Quaternion placement = randomRotation
-            ? Quaternion.Euler(0f, Random.Range(0f, 360f), 0f)
-            : rotation ?? Quaternion.identity;
+        //
+        // A caller that hands in a rotation has already composed one: that is the player's click,
+        // carrying whatever the armed ghost was showing, so it lands exactly as previewed. Every
+        // other caller is automatic — the forward base's recipe, the commander's mines, factories,
+        // docks, radars and defences, and the strategic reload that rebuilds them — and has its
+        // heading laid over the ground here (fix, 2026-09-18: automatic placements spawned upright,
+        // so every structure sited on a slope stood with a corner underground). A random heading is
+        // still random; only the missing tilt is added to it.
+        Quaternion placement = rotation
+            ?? preview.GroundConformingRotation(
+                definition, position, randomRotation ? Random.Range(0f, 360f) : 0f);
         GlobalPosition ground = CommanderGameAccess.SnapToTerrain(position);
         Vector3 local = ground.ToLocalPosition() + placement * definition.spawnOffset;
         Unit? spawned = spawner.SpawnFromUnitDefinitionInEditor(

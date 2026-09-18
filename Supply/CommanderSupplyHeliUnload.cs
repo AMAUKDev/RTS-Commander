@@ -103,6 +103,7 @@ internal sealed partial class CommanderSupplyHeliService
     {
         mission.UnloadInPlace = true;
         mission.UnloadStartedAt = Time.timeSinceLevelLoad;
+        mission.UnloadAnchor = aircraft.GlobalPosition();
         // Opened here as well as by the engine: firing a mount springs its own bay doors, but a load
         // of two then waits on a ramp that is still travelling, and the doors are what the release
         // cadence's gap is for. The landing path opens them the same way for a logistics run.
@@ -191,6 +192,12 @@ internal sealed partial class CommanderSupplyHeliService
     /// never happens, and the insertion shield covers the arrival either way. The only false is the
     /// guard below, which means the ground could not be worked out at all and the vehicle is left
     /// where it came out of the aircraft.</para>
+    /// <para>The spacing is exact between the WANTED spots, not between the found ones: on ground
+    /// where the only clearing for a hundred metres is one clearing, two vehicles of a load can still
+    /// be sent to it. That is left to the insertion shield rather than searched around, because the
+    /// shield is what the ramp-clear handshake protected against in the first place — both vehicles
+    /// are invulnerable until they have settled and either is set upright if it ends on its side, so
+    /// two hulls pushing each other apart in a clearing costs nothing.</para>
     /// </summary>
     private static bool TryChooseUnloadGround(
         Aircraft aircraft, CargoMission mission, int releaseIndex, out GlobalPosition ground)
@@ -216,8 +223,12 @@ internal sealed partial class CommanderSupplyHeliService
     private static bool ChooseUnloadGround(
         Aircraft aircraft, CargoMission mission, int releaseIndex, out GlobalPosition ground)
     {
-        CommanderCargoUnloadRule.UnloadOffsetMeters(releaseIndex, CommanderCargoUnloadRule.UnloadVehicleSpacingMeters, out float east, out float north);
-        GlobalPosition beneath = aircraft.GlobalPosition();
+        CommanderCargoUnloadRule.UnloadOffsetMeters(
+            releaseIndex, CommanderCargoUnloadRule.UnloadVehicleSpacingMeters, out float east, out float north);
+        // Measured from where the transport was when it latched, not from where it is now, so the
+        // spacing between two vehicles of one load is the spacing and not the spacing plus whatever
+        // the aircraft drifted while the first one left the ramp.
+        GlobalPosition beneath = mission.UnloadAnchor ?? aircraft.GlobalPosition();
         GlobalPosition wanted = CommanderGameAccess.SnapToTerrain(
             new GlobalPosition(beneath.x + east, beneath.y, beneath.z + north));
         if (TryFindClearLandingZone(wanted, out ground))

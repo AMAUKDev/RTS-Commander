@@ -102,6 +102,17 @@ internal sealed partial class CommanderStrategicPointService : ICommanderTickPer
             return;
         }
 
+        // A strategic restore hands back owners for ground that has nothing standing on it yet, and
+        // Step drops an owner on the FIRST tick that finds no qualifying garrison — so every
+        // restored point would be lost within five seconds. The hold machine waits while the
+        // restore places and pays for the garrisons; the wait is bounded inside the store
+        // (CommanderStrategicSaveStore.StrategicHoldGraceSeconds) so a rebuild that failed cannot
+        // freeze the hold machine for the rest of the match.
+        if (CommanderStrategicSaveStore.IsHoldingPoints)
+        {
+            return;
+        }
+
         if (CommanderScheduler.IsDue(ref nextHoldAt, HoldCheckSeconds))
         {
             TickHold();

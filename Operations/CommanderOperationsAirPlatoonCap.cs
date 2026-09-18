@@ -310,7 +310,19 @@ internal sealed partial class CommanderOperationsService
 
             bool haveOrigin = TryFindInsertionLaunchBase(hq, zone, out GlobalPosition origin);
             int hostileAir = CountHostileAirNearLift(hq, origin, zone, haveOrigin);
-            int escorts = StrikeEscortWanted(CommanderSettings.LiftEscortMinimum, hostileAir, headroom);
+            // Never below the floor, however full the sky (fix, 2026-09-18, found in the track's own
+            // review). StrikeEscortWanted clamps to the room left under the ceiling, so at a full sky
+            // it returned ZERO — and a cover wanting zero escorts reads as a cover already satisfied,
+            // so LiftMayLaunch(0, 0, 0, ...) let the transport go at once, alone, with no hold at
+            // all. That is the loss mode the escort rule was written for (2026-09-14: 15 of 74 picket
+            // flights and 7 of 15 construction flights lost to fighters). The headroom clamp is meant
+            // to bound the escort's GROWTH, not to delete it. With the floor restored, a lift at a
+            // full sky holds at its form-up point and is released by the existing bounded wait
+            // (PackageFormUpSeconds) rather than launching naked on the first review — the same
+            // compromise the wait already makes everywhere else.
+            int escorts = Mathf.Max(
+                CommanderSettings.LiftEscortMinimum,
+                StrikeEscortWanted(CommanderSettings.LiftEscortMinimum, hostileAir, headroom));
             // Spent as it is given out (fix, 2026-09-15): the headroom was read once outside this
             // loop, so two open lifts each sized their escort against the whole of the room left
             // under the airborne ceiling and together asked for twice what there was.
@@ -322,6 +334,7 @@ internal sealed partial class CommanderOperationsService
             demand.Add(new CommanderAirSortie
             {
                 Kind = CommanderSortieKind.Cap,
+                IsTransportEscort = true,
                 Center = zone,
                 Wanted = 0,
                 CapsWanted = escorts,
@@ -390,22 +403,58 @@ internal sealed partial class CommanderOperationsService
     private static readonly List<Vector3> liftRouteSamples = new();
 
     /// <summary>
+    /// Whether ONE escort is AHEAD of the load it covers, pure (user instruction, 2026-09-17: "air
+    /// insertions should wait for their escorts to be ahead of them (they have a habit of flying
+    /// straight into danger)"). Two conditions, both necessary: the escort is off the deck, and it
+    /// has less ground left to the LANDING ZONE than the load has, by at least
+    /// <paramref name="marginMeters"/>.
+    /// <para>Ground left to cover, never a fraction of the route: a load and its cover routinely
+    /// launch from different airbases, and the same fraction of two different routes is not the same
+    /// piece of sky. The distances are to the landing zone the load is actually going to — a lift's
+    /// landing zone is often an airhead short of its objective — so the comparison is against the
+    /// ground the load will really be over.</para>
+    /// <para>Airborne is asked separately because <see cref="CountFightersUp"/> counts a fighter
+    /// that is alive and bound, parked or not: a cover still on the runway of a base nearer the
+    /// landing zone than the load's own base would otherwise read as "ahead" while its wheels were
+    /// still down, which is the very failure this rule exists to stop.</para>
+    /// <para>An escort that has turned for home reads as behind and goes on reading as behind until
+    /// it re-engages; that case is what the bounded wait in <see cref="LiftMayLaunch"/> is for.
+    /// Inclusive at the boundary, the convention the rest of the mod uses.</para>
+    /// </summary>
+    internal static bool EscortIsAhead(
+        bool escortAirborne, float escortToLandingZoneMeters, float loadToLandingZoneMeters, float marginMeters)
+    {
+        return escortAirborne
+            && escortToLandingZoneMeters + Mathf.Max(0f, marginMeters) <= loadToLandingZoneMeters;
+    }
+
+    /// <summary>
     /// Whether a load may leave the deck, pure (design.md, air-mobile-platoons_20260915 Section 3;
-    /// user decision 3, 2026-09-15): its cover's fighters are up AND the sweep has gone in, or the
-    /// bounded wait has run out. The wait is <c>CommanderSettings.PackageFormUpSeconds</c>, the same
-    /// clock every other package holds on, and it is inclusive at the boundary exactly as
-    /// <see cref="PackageGoesIn"/> is — one bounded clock in the mod, not two. A negative
+    /// user decision 3, 2026-09-15): its cover's fighters are up, enough of them are AHEAD of it
+    /// (user instruction, 2026-09-17 — see <see cref="EscortIsAhead"/>) AND the sweep has gone in, or
+    /// the bounded wait has run out. The wait is <c>CommanderSettings.PackageFormUpSeconds</c>, the
+    /// same clock every other package holds on, and it is inclusive at the boundary exactly as
+    /// <see cref="PackageGoesIn"/> is — one bounded clock in the mod, not two, and the same timeout
+    /// releases the escort wait and the ahead wait together. A negative
     /// <paramref name="secondsWaiting"/> means nothing has been held yet.
+    /// <para>An escort that is ahead is an escort that is up, so <paramref name="escortsAhead"/> is
+    /// never greater than <paramref name="escortsUp"/>; both are kept so the hold line can say which
+    /// of the two the load is waiting on.</para>
     /// </summary>
     internal static bool LiftMayLaunch(
-        int escortsUp, int escortsWanted, bool aradPending, float secondsWaiting, float formUpSeconds)
+        int escortsUp,
+        int escortsAhead,
+        int escortsWanted,
+        bool aradPending,
+        float secondsWaiting,
+        float formUpSeconds)
     {
         if (secondsWaiting >= 0f && formUpSeconds > 0f && secondsWaiting >= formUpSeconds)
         {
             return true;
         }
 
-        return escortsUp >= escortsWanted && !aradPending;
+        return escortsUp >= escortsWanted && escortsAhead >= escortsWanted && !aradPending;
     }
 
     /// <summary>
@@ -437,6 +486,7 @@ internal sealed partial class CommanderOperationsService
         demand.Add(new CommanderAirSortie
         {
             Kind = CommanderSortieKind.Cap,
+            IsTransportEscort = true,
             Mission = mission,
             Center = center,
             Wanted = 0,
@@ -465,6 +515,10 @@ internal sealed partial class CommanderOperationsService
         demand.Add(new CommanderAirSortie
         {
             Kind = CommanderSortieKind.Cap,
+            // The one site that posts a STANDING patrol, and so the one site that marks itself as
+            // rationed (air-ceiling_20260918 §4 decision F). AddEscortDemand and AddLiftCoverDemand
+            // post the same sortie kind and deliberately leave this false.
+            IsStandingPatrol = true,
             Mission = mission,
             ContactPlatoon = platoon,
             Center = center,

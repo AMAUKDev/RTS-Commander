@@ -83,7 +83,10 @@ internal sealed partial class CommanderOperationsService
                 // RESOURCE SITE 20 to HILLTOP 19: contact outranks cover` — and the transport then
                 // died alone 9–33 km short of its landing zone at treetop height. The escort exists
                 // for the ten minutes the transport is in the air; the contact can have the next buy.
-                || IsLiftCoverLabel(source.Label)
+                // Marked, not label-matched (fix, 2026-09-18, found in this track's review): the
+                // label test covered the forward-base lift and missed the picket insertion escort,
+                // whose label reads "escort to <point>". The mark covers both.
+                || source.IsTransportEscort
                 || (source.Kind == CommanderSortieKind.Arad && source.GoneIn))
             {
                 continue;
@@ -270,38 +273,64 @@ internal sealed partial class CommanderOperationsService
             CommanderAirCommandService.IsReconRoundIdentity(null),
             false);
 
-        // A real anti-radiation missile: a missile, not nuclear, not a sensor round, with an ARM
-        // seeker. No payload test — the catalog does not expose the AGM-48's payload either, so any
-        // such test refuses real weapons along with the sensor round.
+        // Two ways to qualify since 2026-09-18: a radar-homing seeker, OR a guided anti-surface
+        // missile carrying a real warhead (the AGM-68). The sensor-round refusal that this rule was
+        // originally written for survives both arms — an Eyeball Mk.II has its warhead removed.
         Expect(
             failures,
             "an anti-radiation missile with a seeker is a suppression weapon",
             CommanderAirCommandService.IsAradCandidate(
-                missile: true, nuclear: false, hasArmSeeker: true, reconRound: false),
+                missile: true, nuclear: false, hasArmSeeker: true, reconRound: false,
+                deliversDamage: false, antiSurface: 0f),
             true);
+        Expect(
+            failures,
+            "an AGM-68 with a real warhead is now a suppression weapon without any seeker",
+            CommanderAirCommandService.IsAradCandidate(
+                missile: true, nuclear: false, hasArmSeeker: false, reconRound: false,
+                deliversDamage: true, antiSurface: 0.81f),
+            true);
+        Expect(
+            failures,
+            "a gutted sensor round is still refused however it is rated",
+            CommanderAirCommandService.IsAradCandidate(
+                missile: true, nuclear: false, hasArmSeeker: false, reconRound: false,
+                deliversDamage: false, antiSurface: 0.64f),
+            false);
+        Expect(
+            failures,
+            "an air-to-air missile is never a suppression weapon, warhead or not",
+            CommanderAirCommandService.IsAradCandidate(
+                missile: true, nuclear: false, hasArmSeeker: false, reconRound: false,
+                deliversDamage: true, antiSurface: 0f),
+            false);
+        Expect(
+            failures,
+            "a store exactly at the anti-surface floor is not admitted by the warhead arm",
+            CommanderAirCommandService.IsAradCandidate(
+                missile: true, nuclear: false, hasArmSeeker: false, reconRound: false,
+                deliversDamage: true, antiSurface: CommanderAirCommandService.AntiSurfaceEffectivenessFloor),
+            false);
         Expect(
             failures,
             "a reconnaissance round is never a suppression weapon",
             CommanderAirCommandService.IsAradCandidate(
-                missile: true, nuclear: false, hasArmSeeker: true, reconRound: true),
-            false);
-        Expect(
-            failures,
-            "a store without an anti-radiation seeker is never a suppression weapon",
-            CommanderAirCommandService.IsAradCandidate(
-                missile: true, nuclear: false, hasArmSeeker: false, reconRound: false),
+                missile: true, nuclear: false, hasArmSeeker: true, reconRound: true,
+                deliversDamage: true, antiSurface: 0.81f),
             false);
         Expect(
             failures,
             "a bomb or gun is never a suppression weapon however it is rated",
             CommanderAirCommandService.IsAradCandidate(
-                missile: false, nuclear: false, hasArmSeeker: true, reconRound: false),
+                missile: false, nuclear: false, hasArmSeeker: true, reconRound: false,
+                deliversDamage: true, antiSurface: 0.81f),
             false);
         Expect(
             failures,
             "a nuclear store is never a suppression weapon",
             CommanderAirCommandService.IsAradCandidate(
-                missile: true, nuclear: true, hasArmSeeker: true, reconRound: false),
+                missile: true, nuclear: true, hasArmSeeker: true, reconRound: false,
+                deliversDamage: true, antiSurface: 0.81f),
             false);
     }
 

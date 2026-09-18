@@ -173,7 +173,11 @@ internal sealed partial class CommanderEnemyCommanderService
         FactionHQ hq, CommanderState state, float budget, in ForceRead opponentForce, string previousBuy)
     {
         LogAirRosterOnce(hq);
-        if (CountAirborne(hq) >= CommanderOperationsService.EffectiveAirborneCeiling(hq))
+        // The ABSOLUTE ceiling, through the shared predicate rather than the raw comparison it
+        // used to spell out (Reuse rule 5, retrofitted 2026-09-18 when air-ceiling_20260918 created
+        // the general form). Behaviour-neutral: AirborneCeilingFor floors at Mathf.Max(1, configured),
+        // so the predicate's "a ceiling of zero never binds" branch is unreachable from here.
+        if (!CommanderOperationsService.AirBuyAllowed(hq, standingPatrol: false))
         {
             ReportAirDenial(hq, state, $"it is at the {CommanderOperationsService.EffectiveAirborneCeiling(hq)}-aircraft ceiling");
             return 0f;
@@ -262,6 +266,28 @@ internal sealed partial class CommanderEnemyCommanderService
             _ => string.Empty,
         };
         state.AirDenialContext = previousBuy;
+
+        // The reserved block (air-ceiling_20260918 §4 decision C). The ABSOLUTE ceiling at the top of
+        // this method has already been cleared; this is the second, lower line that standing patrols
+        // alone stop at, so escorts, packages, the radar aeroplane, anti-radiation sorties and air
+        // support over a ground fight keep their slots when twenty-odd patrol requests are open.
+        // Two things about where this sits, both deliberate. Home defence returned above at the
+        // homeCapDemand branch and never reaches here, which is how it comes to be protected without
+        // a special case of its own. And the demand read above has ALREADY advanced the CAP/CAS
+        // alternation, so a patrol refused on this review hands the turn to the other half of the
+        // wing rather than holding it — which is what should happen when the reason for the refusal
+        // is "patrols have had their share".
+        if (demandSortie?.IsStandingPatrol == true
+            && !CommanderOperationsService.AirBuyAllowed(hq, standingPatrol: true))
+        {
+            ReportAirDenial(
+                hq,
+                state,
+                $"a standing patrol stops {CommanderSettings.AirPatrolReserve} aircraft below its "
+                    + $"{CommanderOperationsService.EffectiveAirborneCeiling(hq)}-aircraft ceiling, so its "
+                    + "escorts, packages and radar aeroplane keep their slots");
+            return 0f;
+        }
 
         // Whether a suppression sortie is waiting for its aeroplane, read ONCE for this buy (user
         // instruction 2026-09-16). While one is, no cheap airframe may take money the only
@@ -579,7 +605,10 @@ internal sealed partial class CommanderEnemyCommanderService
                 && !pinnedBase.disabled
                 && pinnedBase.center != null
                 && CommanderAirCommandService.IsCompatibleAirbase(pinnedBase, hq, pinnedType)
-                && pinnedBase.CanSpawnAircraft(pinnedType);
+                // Not pinnedBase.CanSpawnAircraft directly — see
+                // CommanderAirLaunchFacility.CanBaseLaunch, the mod's one reader of the game's raw
+                // roster answer (a helipad-only base launches helicopters only).
+                && CommanderAirLaunchFacility.CanBaseLaunch(pinnedBase, pinnedType);
             if (KeepsPackageChoice(hasPinnedType: true, pinnedIndex >= 0, baseAccepts))
             {
                 picked = pinnedIndex;
@@ -760,7 +789,7 @@ internal sealed partial class CommanderEnemyCommanderService
         {
             // The ceiling is every faction's aircraft, the player's included, so it is read before
             // each airframe of the element rather than once for the order.
-            if (CountAirborne(hq) >= CommanderOperationsService.EffectiveAirborneCeiling(hq))
+            if (!CommanderOperationsService.AirBuyAllowed(hq, standingPatrol: false))
             {
                 break;
             }
@@ -854,7 +883,7 @@ internal sealed partial class CommanderEnemyCommanderService
             // The ceiling is read before every padding airframe exactly as it is before every proper
             // one: this rule fills slots the wing had already asked for, and it must never be the
             // thing that takes the last place under the ceiling.
-            if (CountAirborne(hq) >= CommanderOperationsService.EffectiveAirborneCeiling(hq))
+            if (!CommanderOperationsService.AirBuyAllowed(hq, standingPatrol: false))
             {
                 break;
             }
@@ -972,6 +1001,16 @@ internal sealed partial class CommanderEnemyCommanderService
         foreach (PersistentID id in hq.factionUnits)
         {
             if (!id.TryGetUnit(out Unit unit) || unit is not Aircraft || unit.disabled)
+            {
+                continue;
+            }
+
+            // Transports are skipped here exactly as CountAirborne skips them (fix, 2026-09-18,
+            // found in the track's own review). This walk's summary promises it is CountAirborne's
+            // walk with a tally hung off it so the share and the total it is a share OF can never be
+            // counted differently (Reuse rule 4); letting the two diverge would have inflated the
+            // denominator of the type-share cap by the faction's transports.
+            if (IsTransportAircraft(unit))
             {
                 continue;
             }

@@ -83,11 +83,17 @@ internal static class CommanderSettings
     internal static bool CombatAlerts { get => Get("Gameplay", "CombatAlerts", true); set => Set("Gameplay", "CombatAlerts", value); }
     internal static int EnemyCommanderMode { get => Get("Gameplay", "EnemyCommanderMode", 0); set => Set("Gameplay", "EnemyCommanderMode", value); }
 
-    /// <summary>Multiplier on every income the AI enemy commander earns (points, bases and mines):
-    /// 1.0 is a fair fight, 1.3 hands the enemy a third more money a minute. The handicap knob for a
-    /// map or a player that leaves the enemy losing every match (user, 2026-09-15: "BDF are winning too
-    /// handsomely and its not because of my actions - need to buff the PALA somehow"). Never applied to
-    /// the player's own faction, whoever commands it.</summary>
+    /// <summary>The difficulty knob for the computer opposition, exposed as the GAMEPLAY tab's
+    /// "Opposition money" slider. It multiplies two things and only two: every income an opposing
+    /// faction earns (points, bases and mines), and the balance every opposing faction opens the
+    /// match on. 1.0 is a fair fight and is exactly the behaviour the mod had before the slider
+    /// existed; 1.3 hands the opposition a third more money a minute and a third more to start
+    /// with. The handicap knob for a map or a player that leaves the opposition losing every match
+    /// (user, 2026-09-15: "BDF are winning too handsomely and its not because of my actions - need
+    /// to buff the PALA somehow"; slider added on the user's instruction 2026-09-16). Never applied
+    /// to the player's own faction, whoever commands it. Moving it mid-match changes income from
+    /// the next payout on and never re-opens a balance that has already been opened
+    /// (<c>CommanderEnemyCommanderService.ShouldOpenTreasury</c>).</summary>
     internal static float EnemyIncomeMultiplier { get => Get("Gameplay", "EnemyIncomeMultiplier", 1f); set => Set("Gameplay", "EnemyIncomeMultiplier", value); }
     // Off by default: the same commander AI that runs the enemy also runs your own faction, which
     // is a different game from the one the player opened the mission expecting. You keep command
@@ -247,8 +253,39 @@ internal static class CommanderSettings
     internal static float PointsAirbaseExclusionMeters { get => Get("Points", "AirbaseExclusionMeters", 2000f); set => Set("Points", "AirbaseExclusionMeters", value); }
 
     // Garrison, hold and income (POINTS settings tab).
-    // Ground vehicles a single faction needs inside a ring, alone, to count as present at all.
-    internal static int PointsMinGarrison { get => Get("Points", "MinGarrison", 2); set => Set("Points", "MinGarrison", value); }
+    /// <summary>
+    /// The standing garrison on a held control point, and — the same number, deliberately — the
+    /// ground vehicles a single faction needs inside the ring, alone, to count as present at all.
+    /// One since unit-economy_20260918 §2.2: around forty picket points each held several vehicles,
+    /// and ground vehicles were two-thirds of the growth that took a match from 8.7 ms a frame to
+    /// 120. A point needs something standing on it, not a crowd; the cost of one is that a point is
+    /// easier to take, which the user accepted.
+    /// <para>
+    /// ONE number for both jobs, and this is load-bearing rather than tidy. Ownership is re-derived
+    /// every five seconds from what stands in the ring, so a garrison target BELOW the ownership
+    /// threshold would station too few vehicles to hold the ground it was sent to and hand every
+    /// point away. Keeping the fill rule and the ownership rule on one setting makes that
+    /// impossible by construction, and is what lets the quiet-ground retirement prove it can never
+    /// empty a held point (<c>Operations/CommanderOperationsUnitEconomy.cs</c>,
+    /// <c>HeldPointKeepFloor</c>).
+    /// </para>
+    /// Key renamed from MinGarrison so the new default takes: BepInEx keeps whatever is already in
+    /// the player's cfg, the same reason MapDragSpeed was renamed.
+    /// </summary>
+    internal static int PointsMinGarrison { get => Get("Points", "GarrisonPerPoint", 1); set => Set("Points", "GarrisonPerPoint", value); }
+    // Conservation of value, on by default (user decision 2026-09-17). A strategic save banks the
+    // cash value of everything that was standing, so the garrisons the load places on held points
+    // must be bought out of that same war chest or every save prints money. Off is a deliberate
+    // cheat for testing: the garrisons appear free and the chest is untouched. See
+    // CommanderOperationsStrategicPersist.
+    internal static bool StrategicGarrisonPaid { get => Get("Developer", "StrategicGarrisonPaid", true); set => Set("Developer", "StrategicGarrisonPaid", value); }
+    // One "Health ..." line into the BepInEx log every 30 s carrying frame time, live unit counts,
+    // the game's own contact and strategic-target tables, the mod's own largest tables and managed
+    // memory (Core/CommanderHealthDiagnostics.cs). OFF by default: it exists to settle the
+    // long-match frame-rate question by comparing one early line with one late one
+    // (conductor/designs/2026-09-17-frame-rate-investigation.md), not to run for ever. While it is
+    // off the service does no per-frame work at all.
+    internal static bool HealthDiagnosticLine { get => Get("Developer", "HealthDiagnosticLine", false); set => Set("Developer", "HealthDiagnosticLine", value); }
     // Cumulative seconds a faction must hold a point alone with at least MinGarrison before it
     // flips; short enough to reward a fast platoon, long enough that a driving-through raid does
     // not flip it by accident.
@@ -319,6 +356,24 @@ internal static class CommanderSettings
     // At most this share of a commander's platoons sit in forward bases; the rest are reserve or
     // offensive. Guards against a commander that only ever garrisons.
     internal static float OperationsFobShare { get => Get("Operations", "FobShare", 0.5f); set => Set("Operations", "FobShare", value); }
+
+    /// <summary>
+    /// Fewest attacks a commander runs at once (concurrent-attacks_20260918). Two, because ONE was
+    /// what the match of 2026-09-18 ran and it produced a mission board of 48 pickets, 11 forward
+    /// bases and a single attack — a static picket line with one push crawling across it, one of ten
+    /// platoons attacking, and a wing with nothing to support flying 68% fighters.
+    /// <para>Zero or less means one attack: the behaviour before that track, not no attacks at all.
+    /// A commander that never attacks is not a commander.</para>
+    /// </summary>
+    internal static int MaxAttacks { get => Get("Operations", "MaxAttacks", 2); set => Set("Operations", "MaxAttacks", value); }
+
+    /// <summary>
+    /// How many more attacks a commander earns per platoon it fields (concurrent-attacks_20260918).
+    /// 0.2 is one more per five platoons, so the ten-platoon commanders of the measured match get
+    /// two and a twenty-platoon one gets four. Clamped to 0..1 by the rule that reads it, so a
+    /// mis-typed value thins the attacks rather than multiplying the army.
+    /// </summary>
+    internal static float AttacksPerPlatoon { get => Get("Operations", "AttacksPerPlatoon", 0.2f); set => Set("Operations", "AttacksPerPlatoon", value); }
     // Minutes of pressure before the commander attacks with whatever it has. Guards against a
     // commander that never attacks.
     internal static float OperationsPressureIntervalMinutes { get => Get("Operations", "PressureIntervalMinutes", 12f); set => Set("Operations", "PressureIntervalMinutes", value); }
@@ -350,28 +405,96 @@ internal static class CommanderSettings
     // rearm cycles are what should size the wing. Counts every live aircraft of the faction.
     // Floor raised 20 -> 30 and key renamed (user, 2026-09-14: "raise that ceiling to 30+"); the
     // income scaling above it is unchanged, so a rich commander still climbs toward AirborneCeilingMax.
-    internal static int AirborneCeiling { get => Get("Operations", "AirborneFloor", 30); set => Set("Operations", "AirborneFloor", value); }
+    // Floor lowered 30 -> 16 and the key renamed again (air-ceiling_20260918 §4 decision A). The 30
+    // was set on the belief that aircraft were cheap, and the frame-rate investigation of 2026-09-17
+    // shared it: it measured 5 to 7 live aircraft and wrote the whole air side out of scope on that
+    // basis. Measurement on 2026-09-18 killed the belief — the health line read 66 live aircraft with
+    // BOTH commanders sitting on this floor, not on the income scaling and not on the maximum below,
+    // so this number and not the money was what sized the wing. Sixteen, with the maximum at 24,
+    // puts the map near 36. The rename is what makes BepInEx deliver the new default to a config
+    // file that already carries the old one.
+    internal static int AirborneCeiling { get => Get("Operations", "AirFloorPerCommander", 16); set => Set("Operations", "AirFloorPerCommander", value); }
     // "Economy limited, not a hard cap" (user, 2026-09-13 and 2026-09-14): the ceiling above is the
     // FLOOR of what a commander may keep airborne; every AirborneIncomePerAirframe of income per
     // minute allows one more, up to AirborneCeilingMax. Fifteen per minute per airframe puts a
     // 460/min commander at 30 aircraft and a 130/min one at the floor. Sixty is the point past which
     // the scheduler and the strips, not the money, are what limit a wing.
     internal static float AirborneIncomePerAirframe { get => Get("Operations", "AirborneIncomePerAirframe", 15f); set => Set("Operations", "AirborneIncomePerAirframe", value); }
-    internal static int AirborneCeilingMax { get => Get("Operations", "AirborneCeilingMax", 60); set => Set("Operations", "AirborneCeilingMax", value); }
+    // 60 -> 24 with the floor above, and renamed for the same reason. Sixty was "the point past which
+    // the scheduler and the strips, not the money, are what limit a wing" — true, and irrelevant once
+    // the thing being limited is frame cost rather than the wing's own plumbing.
+    internal static int AirborneCeilingMax { get => Get("Operations", "AirCeilingMax", 24); set => Set("Operations", "AirCeilingMax", value); }
     // Frame-rate guards (user report 2026-09-14: "frame-rate has slowly decayed"; the enemy pool
     // held 238 idle vehicles and the ground was littered with pilots waiting for rescue).
     // PoolIdleCap: the game's own depot loop turns factory supply into vehicles whether or not
     // anything wants them; past this many idle vehicles in a commander's pool the loop is held and
     // the supply banks at the depot instead. Twelve is two platoons' worth of instant replacements.
     internal static int PoolIdleCap { get => Get("Operations", "PoolIdleCap", 12); set => Set("Operations", "PoolIdleCap", value); }
-    // The idle-pool sale (user, 2026-09-14: "heaps of idle units around the airbase — we need a
-    // periodic task that either re-assigns them, re-tasks them, or sells them"). Every review, pool
-    // vehicles past PoolIdleCap that have stood idle for PoolIdleSellMinutes are sold back at
-    // PoolSellRefundFraction of their price. Five minutes is ten reviews of nobody wanting the
-    // vehicle; half price is the game's own sell convention for a unit that never fought.
-    // One minute (user, 2026-09-14: "run that on a minute basis"); key renamed from PoolIdleSellMinutes so the new default takes.
-    internal static float PoolIdleSellMinutes { get => Get("Operations", "PoolIdleSellAfterMinutes", 1f); set => Set("Operations", "PoolIdleSellAfterMinutes", value); }
+    /// <summary>
+    /// The idle-reserve sale (user, 2026-09-14: "heaps of idle units around the airbase — we need a
+    /// periodic task that either re-assigns them, re-tasks them, or sells them", and
+    /// unit-economy_20260918 §2.1). A vehicle assigned to no platoon, no picket and no order for
+    /// this long is despawned and <see cref="PoolSellRefundFraction"/> of its price refunded. Three
+    /// minutes is six reviews of the picket fill, platoon formation and reinforcement passes all
+    /// declining to take it, which is long enough to be sure nothing on the map wants it and short
+    /// enough that a match's idle reserve never reaches the forty-five vehicles measured on
+    /// 2026-09-17.
+    /// <para>
+    /// The pool CAP no longer gates this sale: the cap said "keep twelve idle vehicles whatever
+    /// happens", and those twelve cost frame time in the game's pairwise unit work exactly as the
+    /// thirteenth does. <see cref="PoolIdleCap"/> keeps its other job, holding the game's own depot
+    /// deployment loop and the buyer while the pool is full.
+    /// </para>
+    /// Key renamed from PoolIdleSellAfterMinutes so the new default takes.
+    /// </summary>
+    internal static float IdleReserveMinutes { get => Get("Operations", "IdleReserveMinutes", 3f); set => Set("Operations", "IdleReserveMinutes", value); }
     internal static float PoolSellRefundFraction { get => Get("Operations", "PoolSellRefundFraction", 0.5f); set => Set("Operations", "PoolSellRefundFraction", value); }
+
+    /// <summary>
+    /// The live ground-vehicle ceiling one faction may field (unit-economy_20260918 §2.3). At or
+    /// above it the commander replaces losses but never grows: the buy gate is simply "live ground
+    /// vehicles below the ceiling", so a vehicle lost opens exactly one purchase. Eighty per faction
+    /// lands both sides near 160 rather than the 214 measured at the worst point on 2026-09-17,
+    /// which by the measured square law is roughly half the frame cost. Zero or less switches the
+    /// ceiling off entirely.
+    /// <para>
+    /// A ceiling rather than a spending limit because frame cost tracks the number of live units and
+    /// nothing else — a commander that buys dearer vehicles instead of more of them costs the same
+    /// to run. It also forces the commander to choose where its strength goes rather than
+    /// accumulating everywhere.
+    /// </para>
+    /// </summary>
+    internal static int GroundUnitCeiling { get => Get("Operations", "GroundUnitCeiling", 80); set => Set("Operations", "GroundUnitCeiling", value); }
+
+    /// <summary>
+    /// How many slots under the air ceiling a standing patrol may NOT take, so that transport
+    /// escorts, strike packages, the radar aeroplane, anti-radiation sorties and air support over a
+    /// ground fight always have room (air-ceiling_20260918 §4 decision C).
+    /// <para>
+    /// Six because that is two escorted lifts of two fighters each plus a two-aeroplane package —
+    /// the largest set of protected work the commander has been observed running at once. The reason
+    /// it is needed at all: one commander's log of 2026-09-18 carried 33 standing air requests and 27
+    /// of them were patrols, so without a reservation the patrols take the whole sky and every lift
+    /// holds at its form-up point waiting for an escort that will never be bought — the same outage
+    /// as grounding the transports, reached by a different road.
+    /// </para>
+    /// <para>Zero switches the reservation off and puts patrols on the same line as everything else,
+    /// the convention every other rule in the mod uses for a setting that can be turned off without
+    /// deleting its caller. A reserve at or above the ceiling grounds standing patrols entirely,
+    /// which is a legitimate setting rather than an error.</para>
+    /// </summary>
+    internal static int AirPatrolReserve { get => Get("Operations", "AirPatrolReserve", 6); set => Set("Operations", "AirPatrolReserve", value); }
+
+    /// <summary>
+    /// How long a held point must go uncontested before its garrison is thinned back to the
+    /// standing garrison and the surplus cashed in (unit-economy_20260918 §2.4). Five minutes is ten
+    /// reviews with no tracked hostile inside the contact range and no vehicle lost — the mod's
+    /// existing definition of contact, not a second one — so ground that goes quiet because the war
+    /// moved elsewhere is released while ground that is merely between attacks is not. The
+    /// commander re-raises there the moment the front comes back, because the point stays on the
+    /// ranked list and the picket fill runs every review. Zero or less switches the retirement off.
+    /// </summary>
+    internal static float QuietGroundMinutes { get => Get("Operations", "QuietGroundMinutes", 5f); set => Set("Operations", "QuietGroundMinutes", value); }
     // PlatoonReseatSavingMinutes (user instruction 2026-09-16: a platoon bought at a far depot and
     // still driving when a forward base opens closer to the enemy is despawned and re-raised from
     // that base; extended the same day to "pickets travelling by ground", which read this same
@@ -624,6 +747,22 @@ internal static class CommanderSettings
     // reason — one fighter alone is the first thing a pair of raiders kills, and the 2026-09-15 logs
     // lost construction flights to fighters nobody had tracked.
     internal static int LiftEscortMinimum { get => Get("Operations", "LiftEscortMinimum", 2); set => Set("Operations", "LiftEscortMinimum", value); }
+    // How much nearer the landing zone a lift's escort must be than the load before the load is let
+    // off the deck, in metres: 2,000 (user instruction, 2026-09-17: "air insertions should wait for
+    // their escorts to be ahead of them (they have a habit of flying straight into danger)"). Until
+    // then the gate asked only that the escort was airborne, so a transport left the runway the
+    // moment its fighters had, overtook them and arrived alone over the dangerous ground. Two
+    // kilometres is about half a minute of flying for a loaded transport helicopter at roughly
+    // 60 m/s, so the escort is over any piece of ground about half a minute before the load and is
+    // what a waiting fighter or air-defence vehicle shoots at first. A fighter at roughly 200 m/s
+    // opens that gap within about fifteen seconds of leaving the same airbase, far inside the
+    // three-minute form-up clock, so a cover that launches with its lift costs the lift almost
+    // nothing; a cover coming from a base further out earns the gap as it flies, which is why the
+    // rule measures ground still to cover rather than a fraction of the route. A setting rather than
+    // a constant because the right lead depends on the transport and fighter mix a mission fields
+    // and on how big the map is, which is exactly the kind of number the developer retunes in a
+    // match. Zero disables the lead test and leaves the old "escorts are airborne" gate.
+    internal static float LiftEscortLeadMeters { get => Get("Operations", "LiftEscortLeadMeters", 2000f); set => Set("Operations", "LiftEscortLeadMeters", value); }
     // How many times a lift's flight price the balance must hold before the lift launches: 2. The
     // flight charges its hull and its cargo up front and refunds the hull on recovery, so a balance
     // at twice the price absorbs the float without emptying the treasury; below it the commander
@@ -963,6 +1102,7 @@ internal static class CommanderSettings
         _ = PointsAirbaseExclusionMeters;
         _ = PointsMinGarrison;
         _ = PointsHoldSeconds;
+        _ = StrategicGarrisonPaid;
         _ = PointsBaseIncomePerMinute;
         _ = PointsVillageIncomePerMinute;
         _ = PointsHilltopIncomePerMinute;
@@ -979,6 +1119,8 @@ internal static class CommanderSettings
         _ = OperationsFrontRangeMeters;
         _ = OperationsMaxPreemptiveAirObjectives;
         _ = OperationsFobShare;
+        _ = MaxAttacks;
+        _ = AttacksPerPlatoon;
         _ = OperationsPressureIntervalMinutes;
         _ = OperationsOffensiveSpendFraction;
         _ = CasLossCooldownMinutes;
@@ -986,8 +1128,11 @@ internal static class CommanderSettings
         _ = AirborneIncomePerAirframe;
         _ = AirborneCeilingMax;
         _ = PoolIdleCap;
-        _ = PoolIdleSellMinutes;
+        _ = IdleReserveMinutes;
         _ = PoolSellRefundFraction;
+        _ = GroundUnitCeiling;
+        _ = AirPatrolReserve;
+        _ = QuietGroundMinutes;
         _ = PlatoonReseatSavingMinutes;
         _ = DownedPilotRescueMinutes;
         _ = PackageFormUpSeconds;
@@ -1026,6 +1171,7 @@ internal static class CommanderSettings
         _ = GroundSpeedMetersPerSecond;
         _ = LiftLoadsPerPlatoon;
         _ = LiftEscortMinimum;
+        _ = LiftEscortLeadMeters;
         _ = LiftFundsMultiple;
         _ = LiftAirheadMaxMeters;
         _ = StandoffContactMemorySeconds;
@@ -1058,6 +1204,7 @@ internal static class CommanderSettings
         _ = AirGuardRadiusKm;
         _ = AradRadiusKm;
         _ = StrikeRadiusKm;
+        _ = HealthDiagnosticLine;
     }
 
     private static KeyboardShortcut GetShortcut(string key, KeyCode defaultKey, string description)

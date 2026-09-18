@@ -1450,7 +1450,11 @@ internal sealed partial class CommanderSupplyHeliService : ICommanderActivate, I
             && !airbase.disabled
             && airbase.CurrentHQ == hq
             && CommanderFactionRoster.MayFlyAircraft(hq, definition)
-            && airbase.CanSpawnAircraft(definition);
+            // Not airbase.CanSpawnAircraft directly — see CommanderAirLaunchFacility.CanBaseLaunch,
+            // the mod's one reader of the game's raw roster answer. A forward base's pads still
+            // launch the UH-90 Ibis and the VL-49 Tarantula, which are what transports fly; the
+            // rule only removes airframes that need a strip the forward base does not have.
+            && CommanderAirLaunchFacility.CanBaseLaunch(airbase, definition);
     }
 
     /// <summary>

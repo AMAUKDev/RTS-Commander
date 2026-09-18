@@ -476,20 +476,12 @@ internal sealed partial class CommanderOperationsService
     /// different things aimed at one place.</summary>
     private static CommanderAirSortie? FindStrikeFor(OperationsState state, CommanderOperationsMission mission)
     {
-        CommanderAirSortie? strike = state.StrikeSortie;
-        if (strike == null)
-        {
-            return null;
-        }
-
-        if (mission.Point != null)
-        {
-            return ReferenceEquals(strike.Point, mission.Point) ? strike : null;
-        }
-
-        return mission.TargetAirbase != null && ReferenceEquals(strike.TargetAirbase, mission.TargetAirbase)
-            ? strike
-            : null;
+        // The mission's own package since concurrent-attacks_20260918. This used to read the
+        // commander's single slot and match it back to the mission by point or airbase; with several
+        // attacks open at once that lookup could match the wrong one when two attacks sat on nearby
+        // ground, and the whole point of the field is that an attack owns its air.
+        _ = state;
+        return mission.StrikeSortie;
     }
 
     /// <summary>Whether the strike ahead of this attack has actually gone in and put an airframe over
@@ -508,8 +500,18 @@ internal sealed partial class CommanderOperationsService
     /// </summary>
     private void UpdateStrikePackage(FactionHQ hq, OperationsState state)
     {
-        CommanderAirSortie? sortie = state.StrikeSortie;
-        if (sortie == null || !sortie.GoneIn)
+        CollectStrikeSorties(state, strikeSortieScratch);
+        for (int s = 0; s < strikeSortieScratch.Count; s++)
+        {
+            UpdateOneStrikePackage(hq, state, strikeSortieScratch[s]);
+        }
+    }
+
+    /// <summary>One package's half of <see cref="UpdateStrikePackage"/>, unchanged from when there
+    /// was only ever one (Reuse rule 3: moved, not rewritten).</summary>
+    private void UpdateOneStrikePackage(FactionHQ hq, OperationsState state, CommanderAirSortie sortie)
+    {
+        if (!sortie.GoneIn)
         {
             return;
         }
@@ -562,6 +564,69 @@ internal sealed partial class CommanderOperationsService
     }
 
     /// <summary>
+    /// Every strike package this commander currently has flying: the deliberate one in
+    /// <c>state.StrikeSortie</c>, plus one per open attack (concurrent-attacks_20260918). Filled into
+    /// a caller-owned buffer rather than returned, so the per-review walks allocate nothing.
+    /// <para>
+    /// One definition, read by the demand walk, the go-in update and the close sweep (Reuse rule 4).
+    /// Before this track each of those read the single field directly; with packages living in two
+    /// places that would have been three chances to forget one.
+    /// </para>
+    /// </summary>
+    private static void CollectStrikeSorties(OperationsState state, List<CommanderAirSortie> into)
+    {
+        into.Clear();
+        if (state.StrikeSortie != null)
+        {
+            into.Add(state.StrikeSortie);
+        }
+
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            CommanderOperationsMission mission = state.Missions[i];
+            if (mission.Kind == CommanderMissionKind.Attack && mission.StrikeSortie != null)
+            {
+                into.Add(mission.StrikeSortie);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drops one ATTACK's package. Deliberately does NOT touch the deliberate strike's clock —
+    /// <see cref="ForgetStrikeSortie"/> owns that reset, and letting an attack's package closing run
+    /// it would make every finished attack delay the commander's next deliberate strike
+    /// (concurrent-attacks_20260918, the trap this split exists to avoid).
+    /// </summary>
+    private static void ForgetAttackStrike(OperationsState state, CommanderAirSortie sortie)
+    {
+        for (int i = 0; i < state.Missions.Count; i++)
+        {
+            if (ReferenceEquals(state.Missions[i].StrikeSortie, sortie))
+            {
+                state.Missions[i].StrikeSortie = null;
+                return;
+            }
+        }
+    }
+
+    /// <summary>Forgets whichever owner holds <paramref name="sortie"/> — the deliberate slot or an
+    /// attack's. The one call every abandon path uses, so neither can forget the other's.</summary>
+    private static void ForgetAnyStrike(OperationsState state, CommanderAirSortie sortie)
+    {
+        if (ReferenceEquals(state.StrikeSortie, sortie))
+        {
+            ForgetStrikeSortie(state);
+            return;
+        }
+
+        ForgetAttackStrike(state, sortie);
+    }
+
+    /// <summary>Reused buffer for <see cref="CollectStrikeSorties"/>; the walks run once per review
+    /// per commander and must not allocate.</summary>
+    private static readonly List<CommanderAirSortie> strikeSortieScratch = new();
+
+    /// <summary>
     /// Closes the strike sortie once it is finished (design Section 5) and starts the struck point's
     /// cooldown. Called at the top of the strike clock, which runs before the air step: clearing
     /// <c>state.StrikeSortie</c> is what makes this review's demand walk leave it out, and the
@@ -569,12 +634,17 @@ internal sealed partial class CommanderOperationsService
     /// </summary>
     private void CloseFinishedStrike(FactionHQ hq, OperationsState state)
     {
-        CommanderAirSortie? sortie = state.StrikeSortie;
-        if (sortie == null)
+        CollectStrikeSorties(state, strikeSortieScratch);
+        for (int s = 0; s < strikeSortieScratch.Count; s++)
         {
-            return;
+            CloseOneFinishedStrike(hq, state, strikeSortieScratch[s]);
         }
+    }
 
+    /// <summary>One package's half of <see cref="CloseFinishedStrike"/>, unchanged from when there
+    /// was only ever one (Reuse rule 3: moved, not rewritten).</summary>
+    private void CloseOneFinishedStrike(FactionHQ hq, OperationsState state, CommanderAirSortie sortie)
+    {
         int aliveStrike = 0;
         for (int i = 0; i < sortie.Cas.Count; i++)
         {
@@ -601,7 +671,7 @@ internal sealed partial class CommanderOperationsService
             return;
         }
 
-        ForgetStrikeSortie(state);
+        ForgetAnyStrike(state, sortie);
 
         if (sortie.Delivered)
         {

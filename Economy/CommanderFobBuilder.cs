@@ -143,6 +143,65 @@ internal sealed partial class CommanderEconomyService
     }
 
     /// <summary>True when this airbase is one the mod built as a forward operating base.</summary>
+    /// <summary>
+    /// Pushes the forward-base name counter past every forward base already standing, so a rebuilt
+    /// base cannot take a name one of them is using. The counter is not saved and is zeroed on
+    /// reset (<c>ResetSession</c>), so after a mission restart it starts at one again while the
+    /// restored bases carry their old numbers — the first rebuild would collide (study,
+    /// 2026-09-17). Called once by the strategic restore, before it rebuilds anything.
+    /// </summary>
+    internal void SeedFobNameCounterFromWorld()
+    {
+        if (FactionRegistry.airbaseLookup == null)
+        {
+            return;
+        }
+
+        int highest = fobNameCounter;
+        foreach (KeyValuePair<string, Airbase> entry in FactionRegistry.airbaseLookup)
+        {
+            if (!IsFobBase(entry.Value))
+            {
+                continue;
+            }
+
+            highest = Mathf.Max(highest, TrailingNumber(entry.Value.SavedAirbase?.UniqueName));
+        }
+
+        if (highest > fobNameCounter)
+        {
+            fobNameCounter = highest;
+            CommanderPlugin.Log.LogInfo(
+                $"Strategic load: forward-base name counter seeded to {fobNameCounter} so a rebuilt base "
+                    + "cannot take a name already in use.");
+        }
+    }
+
+    /// <summary>The number a forward base's unique name ends in, or zero when it ends in anything
+    /// else. The names are built as <c>"FOB &lt;point&gt; &lt;n&gt;"</c>, so the trailing run of
+    /// digits is the counter value. Pure, for the self-check.</summary>
+    internal static int TrailingNumber(string? uniqueName)
+    {
+        if (string.IsNullOrEmpty(uniqueName))
+        {
+            return 0;
+        }
+
+        int end = uniqueName!.Length;
+        int start = end;
+        while (start > 0 && char.IsDigit(uniqueName[start - 1]))
+        {
+            start--;
+        }
+
+        if (start == end || !int.TryParse(uniqueName.Substring(start, end - start), out int value))
+        {
+            return 0;
+        }
+
+        return value;
+    }
+
     internal static bool IsFobBase(Airbase? airbase)
     {
         string? name = airbase?.SavedAirbase?.UniqueName;

@@ -120,7 +120,7 @@ internal sealed class CommanderBuildPreview
     /// cursor while ground-conforming is on.
     /// </summary>
     internal Quaternion PlacementRotation => conformToGround
-        ? CommanderTerrainSlope.Compose(placementYawDegrees, groundNormal)
+        ? ConformRotation(placementYawDegrees, groundNormal)
         : Quaternion.Euler(0f, placementYawDegrees, 0f);
 
     /// <summary>True while the ghost is being laid over the ground rather than stood upright.</summary>
@@ -318,6 +318,52 @@ internal sealed class CommanderBuildPreview
     {
         return CommanderGameAccess.SnapToTerrain(
             new GlobalPosition(target.x + offsetX, target.y, target.z + offsetZ)).y;
+    }
+
+    /// <summary>
+    /// A chosen heading laid over a piece of ground, leaned back to <see cref="MaxPlacementTiltDegrees"/>
+    /// first if the ground is steeper than that. This is THE definition of "how a building sits on a
+    /// slope" in the mod: the armed ghost reads it through <see cref="PlacementRotation"/>, and every
+    /// automatic placement reads it through <see cref="GroundConformingRotation"/>, so a commander's
+    /// forward base cannot end up lying on a hillside differently from a building the player sited
+    /// by hand (Reuse rule 4 — one definition, two callers).
+    /// </summary>
+    /// <remarks>
+    /// Clamping here as well as at the ghost's own sample is deliberate and costs nothing: the clamp
+    /// returns a normal that is already inside the limit unchanged, which the self-check below pins,
+    /// so passing an already-clamped normal through it is exact rather than merely close.
+    /// </remarks>
+    internal static Quaternion ConformRotation(float yawDegrees, Vector3 groundNormalDirection)
+    {
+        return CommanderTerrainSlope.Compose(
+            yawDegrees, CommanderTerrainSlope.ClampTilt(groundNormalDirection, MaxPlacementTiltDegrees));
+    }
+
+    /// <summary>
+    /// The rotation an AUTOMATICALLY placed building is given: <paramref name="yawDegrees"/> laid
+    /// over the ground under <paramref name="target"/>, measured with exactly the probes the armed
+    /// ghost uses (<see cref="SampleGroundNormal"/> — four ground heights at the building's own
+    /// footprint) and clamped by exactly its limit.
+    /// </summary>
+    /// <remarks>
+    /// Before this existed every automatic path spawned upright, so a depot, radar or helipad on any
+    /// slope stood with one corner underground (user report, 2026-09-18). The heading is left
+    /// however the caller chose it — the enemy commander's scattered rotations still scatter —
+    /// because the bug was never the heading, only the missing tilt.
+    /// <para>
+    /// Ground steeper than the limit CLAMPS rather than refuses, which is the manual path's own
+    /// answer (see <see cref="MaxPlacementTiltDegrees"/>): a structure the commander has already
+    /// committed funds to is better standing at the limit and looking slightly buried uphill than
+    /// not standing at all. Refusing steep ground stays the siting rules' business, and the FOB
+    /// recipe already moves each building to the nearest level spot before it reaches here
+    /// (<c>CommanderFobBuilder.FobStructureSite</c>).
+    /// </para>
+    /// </remarks>
+    internal Quaternion GroundConformingRotation(
+        BuildingDefinition candidate, GlobalPosition target, float yawDegrees)
+    {
+        return ConformRotation(
+            yawDegrees, SampleGroundNormal(candidate, CommanderGameAccess.SnapToTerrain(target)));
     }
 
     /// <summary>
@@ -1208,6 +1254,40 @@ internal sealed class CommanderBuildPreview
             CommanderPlugin.Log.LogError(
                 "Build placement self-check FAILED: conforming to flat ground does not give the same "
                     + "rotation as standing upright, so the toggle moves buildings on level ground.");
+        }
+
+        // Automatic placements — the FOB recipe, the commander's mines, factories, docks, radars and
+        // defences, and the strategic reload that rebuilds them — go through ConformRotation rather
+        // than composing a tilt of their own, so these three pin what one of those actually gets.
+        Quaternion automaticOnSlope = ConformRotation(90f, slope);
+        float automaticTilt = Vector3.Angle(automaticOnSlope * Vector3.up, Vector3.up);
+        if (Mathf.Abs(automaticTilt - MaxPlacementTiltDegrees) > 0.01f)
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: automatic tilt clamp — a building placed by the "
+                    + $"commander on a {measured}° slope is laid over at {automaticTilt}°, not the "
+                    + $"{MaxPlacementTiltDegrees}° limit, so its structures do not follow the ground "
+                    + "the way a hand-placed one does.");
+        }
+
+        Vector3 automaticHeading = Vector3.ProjectOnPlane(automaticOnSlope * Vector3.forward, Vector3.up);
+        float headingDegrees = automaticHeading.sqrMagnitude < 0.0001f
+            ? -1f
+            : WrapYaw(Mathf.Atan2(automaticHeading.x, automaticHeading.z) * Mathf.Rad2Deg);
+        if (Mathf.Abs(headingDegrees - 90f) > 0.01f)
+        {
+            CommanderPlugin.Log.LogError(
+                $"Build placement self-check FAILED: automatic heading kept — laying a 090 heading over "
+                    + $"a slope leaves the building pointing {headingDegrees:0}, so the enemy "
+                    + "commander's scattered headings are being thrown away by the tilt.");
+        }
+
+        if (Quaternion.Angle(ConformRotation(90f, Vector3.up), upright) > 0.01f)
+        {
+            CommanderPlugin.Log.LogError(
+                "Build placement self-check FAILED: automatic placement on the level — a building "
+                    + "placed by the commander on flat ground is not left upright, so conforming is "
+                    + "moving structures that stand on ground with no slope at all.");
         }
     }
 

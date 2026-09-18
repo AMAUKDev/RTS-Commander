@@ -54,3 +54,32 @@ internal interface ICommanderPersistState
     /// <summary>Restore this service's state from an already-guard-checked snapshot.</summary>
     void Restore(CommanderStateReader r);
 }
+
+/// <summary>
+/// Opt-in hook for a service that owns part of the STRATEGIC picture — who holds what, which
+/// forward bases exist, how much money each faction has — which the developer can save and carry
+/// across a mission restart (see <see cref="CommanderStrategicSaveStore"/>).
+/// </summary>
+/// <remarks>
+/// Deliberately a second interface beside <see cref="ICommanderPersistState"/> rather than two more
+/// methods on it. The two are read on different runs and by different gates, and the hot-reload
+/// records are actively harmful across a mission restart: they are keyed by <c>PersistentID</c>,
+/// which is a counter <c>UnitRegistry.Clear()</c> resets, so a saved id would resolve to a
+/// DIFFERENT unit after a restart. Keeping the two sets apart is what stops that, and it leaves the
+/// hot-reload path exactly as it was.
+/// <para>
+/// <see cref="RestoreStrategic"/> is LOAD-ONLY: it reads its records into memory and writes nothing
+/// to the world. The world is rebuilt afterwards, by
+/// <see cref="CommanderStrategicSaveStore"/>, in an order the registration order does not give —
+/// money has to be set before a garrison can be paid for.
+/// </para>
+/// </remarks>
+internal interface ICommanderPersistStrategic
+{
+    /// <summary>Write this service's strategic state into the shared save.</summary>
+    void SnapshotStrategic(CommanderStrategicWriter w);
+
+    /// <summary>Read this service's strategic state out of an already-gate-checked save. No world
+    /// writes here: stash the records and let the store drive the rebuild.</summary>
+    void RestoreStrategic(CommanderStrategicReader r);
+}

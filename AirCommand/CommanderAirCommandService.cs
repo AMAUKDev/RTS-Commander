@@ -561,7 +561,19 @@ internal sealed partial class CommanderAirCommandService : ICommanderActivate, I
     /// of its transit estimate. One definition of "flies like a helicopter", two callers.</summary>
     internal static bool IsRotaryPilot(Pilot pilot)
     {
-        return pilot.pilotType == Pilot.PilotType.Helo || pilot.pilotType == Pilot.PilotType.Tiltwing;
+        return IsRotaryPilotType(pilot.pilotType);
+    }
+
+    /// <summary>
+    /// The same rule with the live pilot taken out of it, so it can be driven where no game object
+    /// exists — <c>CommanderAirLaunchFacility.CheckLaunchFacility</c> pins the facility rule to it
+    /// at load (Reuse rule 5: the second caller, so the rule was extracted rather than repeated).
+    /// Behaviour-neutral: <see cref="IsRotaryPilot"/> now reads this and nothing else, and the
+    /// answer for every pilot type is unchanged.
+    /// </summary>
+    internal static bool IsRotaryPilotType(Pilot.PilotType pilotType)
+    {
+        return pilotType == Pilot.PilotType.Helo || pilotType == Pilot.PilotType.Tiltwing;
     }
 
     /// <summary>

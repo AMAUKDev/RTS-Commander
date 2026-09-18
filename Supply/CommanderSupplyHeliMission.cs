@@ -1400,6 +1400,15 @@ internal sealed partial class CommanderSupplyHeliService
             mission.ApproachRoute.Clear();
             mission.ApproachRouteIndex = 0;
             mission.RouteTransitActive = false;
+            // The bypass's own arrival state goes with the rest of it (delivery-bypass_20260916).
+            // A redirect is the mod moving this flight to different ground, so a load that had begun
+            // unloading at the old site must not carry that site's latch — or its anchor — onto the
+            // new one and put its remaining vehicles down where it is no longer going.
+            mission.UnloadInPlace = false;
+            mission.UnloadAnchor = null;
+            mission.UnloadStartedAt = 0f;
+            mission.UnloadPlacedCount = 0;
+            mission.UnloadGroundFallbackLogged = false;
             redirected = true;
         }
 
@@ -3159,15 +3168,24 @@ internal sealed partial class CommanderSupplyHeliService
         internal bool CargoClearancePending { get; set; }
 
         /// <summary>True once this flight has begun unloading its vehicles in place instead of
-        /// landing (delivery-bypass_20260916). LATCHED: set once and never cleared, because a
-        /// transport that has started putting vehicles on the ground must not change its mind
-        /// because it drifted a few metres or gained a little height between releases.</summary>
+        /// landing (delivery-bypass_20260916). LATCHED: a transport that has started putting vehicles
+        /// on the ground must not change its mind because it drifted a few metres or gained a little
+        /// height between releases. The ONE thing that clears it is
+        /// <see cref="TryRedirectInsertion"/>, which resets every other arrival field of the flight
+        /// for the same reason: the flight is going somewhere else now.</summary>
         internal bool UnloadInPlace { get; set; }
 
         /// <summary>Scaled <c>Time.timeSinceLevelLoad</c> this flight began unloading in place, so a
         /// flight that has latched but not yet fired a mount still reads as making progress. Zero
         /// until it latches.</summary>
         internal float UnloadStartedAt { get; set; }
+
+        /// <summary>Where the transport was when it latched, which is what the per-vehicle spacing is
+        /// measured from. Taken ONCE rather than read live: the aircraft is near-stationary but not
+        /// still, and five seconds of drift between two releases at up to the unload speed limit is
+        /// further than the spacing itself — so offsets measured from the live position could put the
+        /// second vehicle back on the first. Null until the flight latches.</summary>
+        internal GlobalPosition? UnloadAnchor { get; set; }
 
         /// <summary>True once this flight has already said that no clear ground could be found near
         /// the transport, so the line is written once per flight rather than once per vehicle.</summary>

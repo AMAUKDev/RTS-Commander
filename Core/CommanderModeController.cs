@@ -35,6 +35,11 @@ internal sealed class CommanderModeController : MonoBehaviour
     // comment for why it is still registered for TickPersistent/ResetSession.
     private CommanderStateStore? stateStore;
 
+    // Same again: it holds the game's mission-load event, which is what arms a strategic
+    // restore, and a static event holding a dead instance across a hot reload is a leak that
+    // would also leave two stores answering. Detached by hand in OnDestroy.
+    private CommanderStrategicSaveStore? strategicSaveStore;
+
     // Draw-only and input-only surfaces: no lifecycle of their own.
     private CommanderPovCrewUi? povCrewUi;
     private CommanderAlertUi? alertUi;
@@ -78,6 +83,13 @@ internal sealed class CommanderModeController : MonoBehaviour
         CommanderSamSiteService samSiteService = services.Register(
             new CommanderSamSiteService(samSiteAnalyzerService, supplyHeliService),
             CommanderTier.Advanced);
+        // BEFORE every service that reads or spends money, and in particular before the enemy
+        // commander below. Its first job on a restored mission is to put the war chest back and mark
+        // which treasuries have already been opened, and the commander's first review fires on its
+        // own first tick and opens its treasury there — so ticking after it would apply the save one
+        // frame too late, which is exactly what went wrong the first time this shipped. Core tier:
+        // its own file is what gates it, not the feature gate.
+        strategicSaveStore = services.Register(new CommanderStrategicSaveStore(services));
         // After the SAM analyzer, whose strategic height map discovery waits on; before the
         // economy, so the hold state is fresh by the time PayIncome reads it.
         services.Register(new CommanderStrategicPointService(), CommanderTier.Advanced);
@@ -132,6 +144,11 @@ internal sealed class CommanderModeController : MonoBehaviour
             economyService,
             UnlockAdvancedFeatures,
             () => Deactivate()));
+
+        // Dead last, so the counts it reads are this frame's finished state rather than a picture
+        // taken half way through the schedule. Core tier and persistent-tick: the decay it measures
+        // is present while the player is flying with RTS mode closed, so it must keep running there.
+        services.Register(new CommanderHealthDiagnostics());
 
         povCrewUi = new CommanderPovCrewUi(cameraFollowService);
         alertUi = new CommanderAlertUi(alertService, selectionService, () => IsActive);
@@ -260,6 +277,7 @@ internal sealed class CommanderModeController : MonoBehaviour
         // same OnDestroy for its own camera/cursor teardown, long before this track existed), so
         // this is the shutdown snapshot's one chance to run.
         stateStore?.WriteSnapshotOnDestroy();
+        strategicSaveStore?.DetachMissionHook();
         SceneManager.activeSceneChanged -= OnActiveSceneChanged;
         Deactivate(restorePreviousCamera: false);
     }

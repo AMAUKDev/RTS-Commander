@@ -855,7 +855,12 @@ internal sealed partial class CommanderEnemyCommanderService
         Expect("the SAH-46 Chicane is refused every air-superiority task",
             MayFlyAirSuperiority(chicane), false);
         Expect("the FS-12 Revoker flies air superiority", MayFlyAirSuperiority(revoker2), true);
-        Expect("a multirole bomber is still allowed to escort", MayFlyAirSuperiority(alkyon), true);
+        // Was "a multirole bomber is still allowed to escort" and expected true until 2026-09-18.
+        // The user watched a match and decided the Alkyon AB-4 is ground-attack only, so the whole
+        // multirole tier is now refused every fighter task — patrol and escort alike.
+        Expect("the Alkyon AB-4 is ground-attack only and flies no fighter task", MayFlyAirSuperiority(alkyon), false);
+        Expect("the multirole refusal does not touch the job the AB-4 IS for",
+            ForRole(alkyon, AirRole.Strike), AirframeTier.Multirole);
         Expect("the T/A-30 Compass may hold the patrol when nothing better can launch",
             MayFlyAirSuperiority(compass2), true);
         Expect("the A-19 Brawler is exactly the strike tier the refusal keys on",

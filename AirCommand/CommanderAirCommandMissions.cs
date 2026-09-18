@@ -130,8 +130,11 @@ internal sealed partial class CommanderAirCommandService
         Vector3 cameraPosition = camera != null ? camera.transform.position : Vector3.zero;
         foreach (Airbase airbase in hq.GetAirbases())
         {
+            // Not airbase.CanSpawnAircraft directly: the facility rule is in
+            // CommanderAirLaunchFacility.CanBaseLaunch, the mod's one reader of the game's raw
+            // roster answer (a helipad-only base launches helicopters only).
             if (!IsCompatibleAirbase(airbase, hq, option.Definition)
-                || !airbase.CanSpawnAircraft(option.Definition))
+                || !CommanderAirLaunchFacility.CanBaseLaunch(airbase, option.Definition))
             {
                 continue;
             }
@@ -404,7 +407,10 @@ internal sealed partial class CommanderAirCommandService
         for (int h = 0; h < airbase.hangars.Count; h++)
         {
             Hangar hangar = airbase.hangars[h];
-            if (hangar == null || hangar.Disabled || !hangar.Available || !hangar.CanSpawnAircraft(definition))
+            // Not hangar.CanSpawnAircraft directly: readiness AND the facility rule live in
+            // CommanderAirLaunchFacility.CanHangarLaunch, the mod's one reader of the game's raw
+            // roster answer (a helipad-only base launches helicopters only).
+            if (!CommanderAirLaunchFacility.CanHangarLaunch(airbase, hangar, definition))
             {
                 continue;
             }
@@ -676,9 +682,11 @@ internal sealed partial class CommanderAirCommandService
             return false;
         }
 
-        if (!airbase.CanSpawnAircraft(option.Definition))
+        // Not airbase.CanSpawnAircraft directly — see CommanderAirLaunchFacility.CanBaseLaunch.
+        if (!CommanderAirLaunchFacility.CanBaseLaunch(airbase, option.Definition))
         {
-            SetStatus("The selected airbase is busy. Retry when a compatible hangar is free.");
+            SetStatus("The selected airbase is busy, or has no strip for this airframe. "
+                + "Retry when a compatible hangar is free.");
             return false;
         }
 

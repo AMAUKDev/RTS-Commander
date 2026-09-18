@@ -210,6 +210,10 @@ internal sealed partial class CommanderEnemyCommanderService
             // without the owner test the first HQ the review loop reaches drains the lot under its
             // own name — which is why the player's transports had no fate line at all and the
             // enemy's loss counts were inflated by the player's (measured, 2026-09-16).
+            // Considered and accepted: entries whose faction stops being commanded mid-match are no
+            // longer drained by anyone and sit here until ResetSession. That is bounded by one
+            // faction's aircraft count and costs a few small objects; draining them under a faction
+            // that does not own them is the bug this test exists to fix.
             if (!ReferenceEquals(entry.Value.Owner, hq))
             {
                 continue;
@@ -306,10 +310,45 @@ internal sealed partial class CommanderEnemyCommanderService
         return airbase != null;
     }
 
-    /// <summary>Aircraft this faction currently has in the world, pilots and AI alike. Internal
-    /// (one-word widening): the strike package's escort is capped by the room left under the
-    /// airborne ceiling, and the ceiling and the count have to be the same pair the buy loop reads
-    /// or the package would be sized against a different sky (Reuse rule 4).</summary>
+    /// <summary>
+    /// Whether one aircraft definition is a transport, memoised. <see cref="GetAirRole"/> is the
+    /// mod's one definition of that question (Reuse rule 4) but it reaches into the prefab through
+    /// <c>CommanderAirCommandService.HasPlanePilot</c>, which is a Unity component lookup; the
+    /// question is asked once per live aircraft per air buy and again for every escort sizing, so the
+    /// answer is kept. Aircraft definitions are shared assets that live for the whole process, so the
+    /// memo needs no sweep and cannot go stale.
+    /// </summary>
+    private static readonly Dictionary<AircraftDefinition, bool> transportDefinitions = new();
+
+    /// <summary>The memoised transport test over a live unit.</summary>
+    private static bool IsTransportAircraft(Unit unit)
+    {
+        if (unit.definition is not AircraftDefinition definition)
+        {
+            return false;
+        }
+
+        if (!transportDefinitions.TryGetValue(definition, out bool transport))
+        {
+            transport = GetAirRole(definition) == AirRole.Transport;
+            transportDefinitions[definition] = transport;
+        }
+
+        return transport;
+    }
+
+    /// <summary>Aircraft this faction currently has in the world, pilots and AI alike, EXCEPT its
+    /// transports. Internal (one-word widening): the strike package's escort is capped by the room
+    /// left under the airborne ceiling, and the ceiling and the count have to be the same pair the
+    /// buy loop reads or the package would be sized against a different sky (Reuse rule 4).
+    /// <para>
+    /// Transports came out on 2026-09-18 by user decision (air-ceiling_20260918 §4 decision B): a
+    /// lift must never be blocked by a full sky. It still may not fly into contested air without its
+    /// escort — that gate is <c>Operations/CommanderOperationsFob.cs:2320</c> and is untouched — so
+    /// what this buys is that the LIFT is free, not that it goes unprotected. Because the ceiling and
+    /// this count are deliberately one pair, escort sizing sees the same change, which is intended:
+    /// the room a package measures itself against is room for COMBAT aircraft.
+    /// </para></summary>
     internal static int CountAirborne(FactionHQ hq)
     {
         if (hq.factionUnits == null)
@@ -320,7 +359,7 @@ internal sealed partial class CommanderEnemyCommanderService
         int count = 0;
         foreach (PersistentID id in hq.factionUnits)
         {
-            if (id.TryGetUnit(out Unit unit) && unit is Aircraft && !unit.disabled)
+            if (id.TryGetUnit(out Unit unit) && unit is Aircraft && !unit.disabled && !IsTransportAircraft(unit))
             {
                 count++;
             }
